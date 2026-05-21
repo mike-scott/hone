@@ -1,0 +1,15 @@
+# The linux-arm-msm public-inbox clone — a ~1.1 GB regenerable git mirror.
+# Re-clone it per SOURCES.md; never commit it.
+archive/
+
+# Python bytecode cache.
+__pycache__/
+
+# The SQLite ledger — local accumulated state. Recreate with: hone_db.py init
+hone.db
+
+# Staged base-tree worktrees produced by the STAGE stage (refrepo.py).
+staged/
+
+# Local docker-compose secrets — never commit. (.env.example is the template.)
+.env

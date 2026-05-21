@@ -1,0 +1,672 @@
+name: hone default methodology
+version: 1
+description: |
+  A repeatable, staged process to run on every kernel patch — by analysis
+  alone. This methodology validates *correctness*, specifically *semantics*.
+
+  The review nodes read patches and reason about them; they do not build the
+  kernel or run tooling. The value of this document is its precise wording —
+  the disciplined manual pass it prescribes.
+
+principles:
+  - id: surface-checks-are-style-only
+    title: Surface checks are style-only
+    body: |
+      Surface and style checks say nothing about correctness. A patch can
+      pass every style and formatting check — `checkpatch` is one example —
+      and still be semantically broken. Passing such a check says nothing
+      about correctness. This methodology validates *semantics*.
+
+  - id: self-scaling
+    title: The methodology is self-scaling
+    body: |
+      Every stage has an applicability gate. A one-line DT change
+      legitimately answers "N/A" to the C-code stages and is done in
+      minutes; a driver-logic change gets everything. "N/A" is a valid
+      answer only when it is a *deliberate* one.
+
+  - id: written-record
+    title: Produce a written record
+    body: |
+      Each patch gets a structured analysis record — the result of the
+      review. It
+      feeds the cover letter and lets you answer reviewers without
+      re-deriving.
+
+  - id: absence-is-not-proof
+    title: Absence of a finding is not proof
+    body: |
+      An analysis is only as good as its completeness. A "clean" result —
+      no finding — is meaningless unless the analysis that produced it was
+      itself complete. A truncated search, a half-read function, or a
+      silently narrowed scope yields a false "clean": it reports nothing
+      because it *looked* at nothing, not because there is nothing there.
+      Confirm the analysis actually covered what it claims to cover — count
+      the hits, read the whole function, verify the scope. An unverified
+      "clean" rests on the gap, not on the code.
+
+  - id: trailers-are-not-evidence
+    title: Trailers are not evidence
+    body: |
+      Assume the patchset is wrong until your own analysis proves otherwise.
+      `Reviewed-by`, `Tested-by`, `Acked-by`, and a high `vN` are other
+      people's conclusions — not verification *you* did, and not grounds to
+      lower scrutiny. Bugs survive many review rounds (the qmp-combo UAF
+      shipped at v2, multiply-reviewed, caught only post-submission). Start
+      every patchset from "there is probably something wrong here" and make
+      it earn the verdict — a "clean" result must rest only on your own
+      findings, never on pedigree.
+
+  - id: safe-is-a-finding
+    title: '"Safe" is a finding — record why'
+    body: |
+      When edge-case analysis concludes "no crash," classify the reason:
+      (a) safe by explicit, intentional design; (b) safe only by accident —
+      a caller-side coincidence, or a guard that covers it but was added for
+      another reason; (c) safe for *current* callers but not guaranteed by
+      any contract. Only (a) may be dropped silently. (b) and (c) are
+      **reportable observations** — into the written record, and for
+      exported interfaces onto the list as a hardening note. The edge case
+      you trace and then wave away as "handled" is the one the next patch
+      reintroduces.
+
+stages:
+  - id: "0"
+    title: Base & apply gate
+    applies: Every patch. A failure here stops everything else.
+    body: |
+      **Base-commit gate — do this before anything else.** A series carries
+      a `base-commit:` line, and the cover letter often gives a `git
+      describe` string (e.g. `v7.1-rc4-100-g8bc67e4db64a`). The repo used to
+      apply and review the patchset must have `HEAD` *at that exact
+      base-commit*.
+
+      If `HEAD` is not the base-commit, **stop and say so** — do not
+      silently review against a different tree, and do not assume "close
+      enough." A `git describe` string is not a tag:
+      `v7.1-rc4-100-g8bc67e4db64a` means 100 commits *after* the `v7.1-rc4`
+      tag — checking out the tag leaves you 100 commits behind the real
+      base. The wrong base invalidates every Stage 2 "parity with the
+      original function" comparison and produces both spurious apply
+      failures and missed real ones.
+
+      If the exact base-commit genuinely cannot be obtained, every
+      base-dependent finding must be explicitly labelled provisional.
+
+      **Applies cleanly.** Confirm the patch (or series, in order) applies
+      to the base — `git apply --check`. This is lightweight and
+      toolchain-free. A patch that does not apply cleanly to its stated base
+      cannot be reviewed against that base.
+
+  - id: "1"
+    title: Format-specifier check
+    applies: Any patch that adds or modifies a format-string call.
+    body: |
+      **Format-specifier check.** For every format-string call the patch
+      adds or modifies, match each `%` conversion to the C type of its
+      argument. Cover the whole `printk` family and every other
+      format-taking call: `printk`, `pr_*`, `dev_*` / `netdev_*` /
+      `bdev_*`, `seq_printf` / `seq_buf_*`, `sprintf` / `snprintf` /
+      `scnprintf` / `vsnprintf`, `kasprintf`, `WARN*` / `BUG*` with a
+      message, `panic`, `trace_*`, and any `__printf`-annotated subsystem
+      helper.
+
+      With no `-Wformat` build step, this check covers *all* mismatches by
+      reasoning — for every format call in the diff:
+      - *Size and kind* — `%d` for a `u64`, `%s` for an integer. Confirm the
+        conversion's width and category match the argument's C type.
+      - *Signedness* — `%d`/`%i` on an `unsigned` argument, or `%u`/`%x` on
+        a signed one. These are not interchangeable; a mismatch misprints
+        once the value crosses the sign boundary.
+      - *Kernel `%p` extensions* — `%pe`, `%pOF`, `%pK`, `%pM`, `%pIS`,
+        `%pS`, … — confirm the pointer's type matches the extension.
+
+      A type-incorrect specifier is graded **`minor`**: usually harmless
+      today (a signedness mismatch misprints only once the value exceeds
+      `INT_MAX`) but latent — it misprints the moment the field's range
+      grows, and the wrong specifier spreads by copy-paste. Cost is low and
+      bounded: only the format calls *in the diff* (a handful at most, often
+      none), each a local specifier-vs-argument-type check — no call graph,
+      no whole-function reading.
+
+  - id: "2"
+    title: Manual semantic review
+    applies: Any patch touching C code.
+    body: |
+      Whole classes of bug are not caught by surface review. Stage 2 is two
+      steps: **scope the change via its call graph**, then apply the
+      Stage-2 bug-class checks over everything in scope. The Stage-2 checks
+      are an **unordered set** — each one an independent bug-class analysis,
+      with no sequence and no dependency between them; apply them in any
+      order.
+
+      **Scope — build the call graph, both directions** (trace the call
+      graph from the changed code outward).
+
+      Build it on the **whole patchset applied** — the series tip — never
+      per-patch. A per-patch graph of an API-introducing patch shows that
+      API with *zero callers* and hides every caller/callee relationship
+      that spans patches, which is exactly what Stage S's API-add-then-use
+      check needs. (Per-patch intermediate states are inspected only for
+      Stage S bisectability.) For a lone non-series patch the tip is just
+      base+patch. Findings are still attributed to the specific patch that
+      introduces them.
+
+      - **Caller tree** (upstream): every function that reaches the changed
+        code, transitively, up to the subsystem entry points. Note each
+        caller's **execution context** — process, softirq, or hard IRQ. If
+        the change can now sleep (a new mutex, allocation,
+        `synchronize_rcu()`) and any caller is in atomic/IRQ context, that
+        is a bug.
+      - **Callee tree** (downstream): every function the change calls — did
+        it break a precondition or contract a callee relies on (argument
+        range, a lock expected held, state expected set)?
+      - If the patch changes an **internal API** (signature, semantics,
+        locking rules), the caller tree *is* the set of sites that must be
+        updated; verify every site across **all architectures**, not just
+        the local one, and that none was missed.
+
+      **The enumeration must be complete.** A search piped through `head`,
+      or searching one file when the field/symbol spans several, silently
+      narrows the scope — and every later "all N sites are handled"
+      conclusion inherits that truncation (the `absence-is-not-proof` principle, applied to scoping).
+      Count the hits, confirm the count, and never review a truncated list.
+
+      The functions in that graph — not just the literally-changed lines —
+      are the review unit. The scope of a modified function is the **whole
+      function**: a three-line addition inherits every counter, lock, and
+      shared field it manipulates near the change. Shared state (counters,
+      locks, flags) must also be traced *across* patches in a series —
+      **Stage S** is the dedicated pass for that.
+
+      Apply every Stage-2 check to each in-scope function — in any order, as
+      an unordered set of independent bug-class analyses; write the answer
+      to each — "N/A" is valid only when deliberate — then run the subsystem
+      checklist.
+
+  - id: "3"
+    title: Adversarial self-review
+    applies: Every C-code patch.
+    body: |
+      Write down 3–5 things a hostile maintainer — or an AI review bot —
+      would attack about this patch, and answer each in writing. A weak
+      answer is a real finding: fix it or document it. The surviving answers
+      become cover-letter and review-reply material.
+
+  - id: "S"
+    title: Series-level review
+    applies: Every patch series — reviewed as a unit, not as N independent patches.
+    body: |
+      A patch series is reviewed as a **unit**, not as N independent
+      patches. Stage S brackets the per-patch stages — do the first half
+      before Stage 0, the second half after Stage 3.
+
+      **Before the per-patch passes — frame the series:**
+      - Read the cover letter — the series' stated contract. What is it for;
+        does the patch split match it; is each patch one self-contained
+        logical change? Note its claims and any declared non-goals; the
+        integrate step verifies them against the code.
+      - Map the dependency order — which patch introduces what a later one
+        uses.
+
+      **After the per-patch passes — integrate:**
+      - **Bisectability.** Applied in order, *each* patch must leave a
+        kernel that builds and runs (`submitting-patches.rst`: "Each patch
+        should yield a kernel which builds and runs properly"). A `git
+        bisect` landing mid-series must not hit a broken tree. This is a
+        property to *reason about* — read each intermediate state and
+        confirm it is self-consistent.
+      - **API-add-then-use.** When the series adds an API early and uses it
+        later, the early patch *cannot be fully judged alone* — review the
+        new API's contract against every caller across the series. Do the
+        callers rely on guarantees the API actually provides? An API-add
+        patch with no callers yet is only decidable against the patches
+        that use it.
+      - **Cross-patch state and lifetime.** Trace every shared counter,
+        lock, flag, or allocation whose life spans patches — added in A,
+        used in B, freed in C. A bug can live purely in the interaction
+        (patch A's new guard meeting patch B's pre-existing decrement).
+      - **Churn.** A later patch reworking or reverting an earlier patch's
+        own lines means the split is wrong — ask for a re-split.
+      - **Cumulative diff.** Read `git diff base..tip` once — the net effect
+        of the whole series, separate from the per-patch diffs; per-patch
+        review can miss what only the whole shows.
+      - **Cover letter vs. docs vs. code.** The cover letter is the series'
+        stated contract — verify the cumulative diff against it, **both
+        directions**. *Completeness:* is every fix, behaviour, or feature it
+        claims actually delivered? *Scope:* does the series do anything
+        **material the cover letter does not disclose** — an undisclosed
+        behaviour change, an unrelated fix riding along, a security-relevant
+        change not called out? The undisclosed direction is the dangerous
+        one: a change nobody was told to look at evades review. Also confirm
+        the cover letter's stated *justification* holds against the code,
+        and that anything it declares out of scope ("not in this series")
+        really is absent. This is the series-level analog of the
+        `efficacy-and-root-cause` check.
+        When the series also carries a **documentation patch**, that doc is
+        a *second, independent* statement of intent — check all three pairs,
+        not just each against the code: cover letter ↔ docs ↔ code. A
+        cover-letter↔docs contradiction is a finding in itself, and it often
+        *resolves* a doc↔code mismatch — whichever of the two agrees with
+        the third is the correct one.
+
+      The series verdict is **not** the AND of the per-patch verdicts: a
+      series of individually-clean patches can still be wrong as a whole.
+
+checks:
+  - id: object-lifetime
+    stage: "2"
+    title: Object lifetime / use-after-free
+    body: |
+      For every pointer dereferenced: who allocates it, who frees it,
+      *when*? Red flags — `devm_*` allocations (freed when the
+      **provider** device unbinds; a consumer or framework callback can
+      still run afterward); pointers reached via callbacks registered
+      with another subsystem; any path where the caller lives in a
+      different driver. A freed `devm_kzalloc` object is a **silent**
+      use-after-free: the slab page stays mapped, so the stale read
+      returns plausible data and does *not* crash. "It didn't crash in
+      testing" proves nothing.
+      *Question:* can the object this pointer refers to be freed while
+      this code still runs?
+
+  - id: concurrency
+    stage: "2"
+    title: Concurrency / locking
+    body: |
+      For every shared field the patch reads or writes: search the
+      whole driver for that field. List **every** reader and **every**
+      writer, and the lock held at each. Is the patch's access locked
+      consistently with the others?
+
+      A lockless "fast path" check *before* taking the lock is
+      **double-checked locking** — a named antipattern the kernel
+      formally models in
+      `Documentation/litmus-tests/locking/DCL-broken.litmus` (result:
+      *Sometimes* — it breaks). The lock plus a `READ_ONCE()` lockless
+      check is **not** enough; `DCL-fixed.litmus` shows the minimum
+      correct form needs `smp_load_acquire()` on the lockless read and
+      `smp_store_release()` on the publish — and even that presumes the
+      `lock-storage-lifetime` check holds (the lock's object is alive). A
+      plain lockless access is a
+      data race under the kernel memory model: a single shared location
+      needs at least `READ_ONCE()`/`WRITE_ONCE()`; communicating
+      *between* two locations locklessly (publish data, then raise a
+      flag) additionally needs release/acquire ordering —
+      `WRITE_ONCE`/`READ_ONCE` stop tearing but do not order one
+      variable against another.
+
+      The fix for any of these (TOCTOU, DCL) is to **collapse the
+      window**: hold the lock continuously across check-and-act, or use
+      a kernel combined primitive that does both atomically —
+      `cmpxchg`/`try_cmpxchg`, `atomic_dec_and_test`,
+      `atomic_dec_and_lock`, `atomic_dec_and_mutex_lock`,
+      `refcount_dec_and_lock`, `kref_put`. These exist precisely to
+      remove check→use windows; a hand-rolled "check then act" usually
+      shouldn't.
+
+      **Userspace double-fetch** is a second TOCTOU class, distinct
+      from the kernel-internal races above. If the patch reads a
+      `__user` pointer (`get_user`, `copy_from_user`, `__get_user`) in
+      code that reads the same user address *again* — re-validating a
+      field, or copying a length-determined amount where the length is
+      re-fetched — a concurrent userspace thread can change the value
+      in the window. The rule, stated verbatim in
+      `Documentation/userspace-api/seccomp_filter.rst`: *fetch once
+      into kernel memory, then validate and use only the kernel copy* —
+      never re-dereference the user pointer.
+
+      Then map reachability: for each changed function, which
+      subsystems/threads invoke it (process / softirq / IRQ; which
+      framework)? Two call paths with no common lock are a race
+      surface.
+
+      Check lock **ordering**, not only presence: if the change takes
+      two locks, every other path that takes the same pair must take
+      them in the same order — a reversed pair is an AB-BA deadlock.
+      Trace acquisition order across the call graph (the caller/callee
+      trees above).
+      *Question:* what else can touch this field concurrently, from
+      where?
+
+  - id: lock-storage-lifetime
+    stage: "2"
+    title: Lock-storage lifetime — a lock cannot protect its own object
+    body: |
+      Check *where the lock itself lives*. A lock embedded in a
+      `devm_*`-allocated, refcounted, or otherwise freeable object
+      cannot guard that object's lifetime: `mutex_lock()` grants no
+      implicit reference to its memory
+      (`Documentation/locking/mutex-design.rst` — *"Memory areas where
+      held locks reside must not be freed"*; the mutex *"does not
+      provide an implicit reference for the memory it occupies"*). If a
+      consumer can invoke the code after an independent teardown has
+      freed the object, the embedded lock is unusable in that window —
+      and the textbook fix for a `concurrency` TOCTOU ("just take the
+      lock") is
+      then itself a use-after-free on the lock. When the
+      `object-lifetime` and `concurrency` checks both
+      fire on the same object they are usually **one** bug: lifetime
+      must be solved first — by a reference count, by RCU (the kernel's
+      canonical mechanism for a lockless reader racing a freeing
+      updater — `Documentation/RCU/`), or by a framework guarantee that
+      the object outlives every caller (`locking.rst`: *"this is only
+      guaranteed while you hold the lock … The solution … is to use a
+      reference count"*) — only then is the lock safe to take.
+      *Question:* is the lock's own storage guaranteed live in every
+      context that acquires it?
+
+  - id: integer-safety
+    stage: "2"
+    title: Integer safety
+    body: |
+      Counters, sizes, indices, lengths: can they underflow (an
+      unsigned `--` at 0 wraps to `UINT_MAX`), overflow, or carry a
+      signedness bug? Every decrement — is the balance proven, or
+      guarded?
+
+  - id: error-teardown
+    stage: "2"
+    title: Error and teardown paths
+    body: |
+      Every early `return` / `goto`: is cleanup complete and balanced —
+      locks, refcounts, allocations, counters? Does a newly added early
+      return skip a needed unlock or decrement?
+
+  - id: efficacy-and-root-cause
+    stage: "2"
+    title: Efficacy, then root cause vs symptom
+    body: |
+      *First, does the patch even work?* Take the exact failing
+      scenario from the commit message, trace it line by line through
+      the **patched** code, and confirm the outcome genuinely changes.
+      A patch can pass every other Stage-2 check — well-formed,
+      correctly locked, no UAF —
+      and still fix **nothing**: e.g. a guard whose condition is
+      bypassed on the very path the bug lives on, so the steady state
+      is identical to before the patch. "Well-formed" is not
+      "effective"; verify effectiveness explicitly. *Then, root cause
+      vs symptom:* does it fix the cause or mask it? Converting a loud
+      failure (oops, WARN) into a silent one (corruption, wrong state)
+      is a regression even when the crash "goes away."
+
+  - id: function-contract
+    stage: "2"
+    title: New or generalised functions — contract and input domain
+    body: |
+      Analyse every function the patch *introduces*, and every function
+      it *generalises*, as an interface for arbitrary callers — not
+      just this series' call sites; doubly so for `EXPORT_SYMBOL*`.
+      - *Out-parameter table.* For each return path, tabulate the
+        return value against each `*out` parameter's value and whether
+        it was written. Flag any path that leaves an `*out` a caller
+        may read unwritten, or two paths that signal the same logical
+        outcome differently — e.g. one returns `NULL`, another returns
+        non-`NULL` with a count of `0`. An inconsistent return contract
+        is a footgun even when today's callers happen to cope.
+      - *Full input domain.* Exercise the whole declared domain of each
+        parameter, not the subset current callers pass: a `const struct
+        cpumask *` includes the empty mask; an `unsigned int` count
+        includes `0`; a pointer includes `NULL`. If the kerneldoc says
+        "CPUs to consider," the empty set is in-domain. For a callback
+        registered **per-instance** (multi-instance cpuhp states,
+        notifier chains), the invocation domain is every `(instance,
+        event)` pair: it fires for *every* registered instance on
+        *every* event, so "this event does not concern this instance"
+        is the common input, not an edge — handle it first.
+        (`blk_mq_hctx_can_offline_hk_cpu()` judged an `hctx` against an
+        offlining CPU without first checking that CPU was mapped to
+        that `hctx`, so a single stranded hctx vetoed every unrelated
+        CPU-offline in the system.)
+      - *Domain-widening.* When a patch widens the set of values
+        something can take, every invariant that silently relied on the
+        old, narrower range must be re-proven. Two shapes recur:
+        - *Parameter widened.* A hardcoded constant becomes a
+          parameter. `group_cpus_evenly()` could never return `nummasks
+          == 0` only because its universe was hardwired to the
+          never-empty `cpu_possible_mask`; `group_mask_cpus_evenly()`
+          parameterised that mask and inherited an empty-input case its
+          callers were never written for.
+        - *Computation changed.* A value's range widens with no
+          signature change. `num = cpumask_weight(online_mask)` is
+          always ≥ 1, but `num = cpumask_weight_and(online_mask,
+          hk_mask)` can be 0. Re-derive the range of every value whose
+          computation the patch touched, then re-check each downstream
+          consumer — e.g. `min_not_zero(num, max)` silently relied on
+          `num ≥ 1`; once `num` can be 0 it returns `max`, the opposite
+          of what a starved state wants.
+
+  - id: preexisting-issues
+    stage: "2"
+    title: Pre-existing issues near the change — two tiers (bounded)
+    body: |
+      While walking the other Stage-2 checks, also evaluate *unchanged*
+      code near the
+      patch as code in its own right. A patch hunk hands you
+      surrounding code for free; if it is itself buggy, it is worth
+      saying so. Two scopes, both bounded:
+
+      - *Tier 1 — hunk context lines.* The unchanged ` `-prefixed lines
+        already shown in the diff. Near-free — you are reading them
+        anyway.
+      - *Tier 2 — the whole body of a function the patch modifies.*
+        Read the entire modified function, not just its hunks. A real
+        pre-existing bug often sits a dozen lines outside the hunk. To
+        give such a finding an anchor, **expand the hunk** in Report
+        finalization: re-quote the intervening unchanged lines as
+        ` `-prefixed context and bump the `@@` line counts so the
+        comment lands on the offending line.
+
+      Tier 1 is the floor — always done. Tier 2 is not automatic: it
+      costs real reading and widens the false-positive surface, so it
+      is a *declared* choice, never a silent default. Run Tier 2 when
+      **either** the requester asked for a deeper review, **or** you
+      judge it warranted — and when you judge it warranted, say so.
+      Carve-out: if a modified function is small (≈60 lines or fewer),
+      reading it whole is nearly as free as Tier 1 — just do it.
+      Whichever the case, the scope actually reviewed must be **known
+      to the reader**: the final report states explicitly whether
+      Tier 2 was performed, and on which patches (see Report
+      finalization).
+
+      Both tiers stop there — never the rest of the file, never
+      callers. A finding with no line in (or expandable from) a hunk
+      has nowhere to anchor; raise it elsewhere (a separate patch, a
+      note to the maintainer).
+
+      Apply a **higher confidence bar** than for patch-introduced
+      findings: code that has shipped for years is usually correct for
+      a non-obvious reason (an invariant a caller guarantees, a lock
+      held further up). Flag it only if you would bet on it; otherwise
+      phrase it as a question. Tier 2's wider reading carries a wider
+      false-positive surface — hold the bar.
+
+      These are **not** the submitter's responsibility. In Report
+      finalization they go in a separate "Pre-existing / not introduced
+      by this series" group; every such comment must **state explicitly
+      that the issue pre-dates the patch** ("This isn't introduced by
+      your change, but since it's in the function you are editing —
+      …") and is marked **non-blocking** — the right disposition is a
+      separate patch or the maintainer's call, never a gate on this
+      series.
+
+  - id: documented-contract
+    stage: "2"
+    title: Documented-contract conformance — the commit message is not authority
+    body: |
+      When a hunk removes or alters code whose observable effect is
+      fixed by a *documented contract*, verify the change against the
+      document — never against the commit message's account of it. A
+      documented contract includes: man pages, `Documentation/ABI/`,
+      syscall / `prctl` / ioctl / uAPI semantics, kerneldoc, the design
+      rationale recorded in the commit that *introduced* the code, and
+      in-tree design comments. A commit message asserting that the new
+      behaviour is the "correct" or "intended" semantics does **not**
+      lower scrutiny: recover what observable contract the touched code
+      satisfied, and if the change contradicts it with no explicit,
+      justified declaration of an intentional break, that is a
+      regression — rated by true impact (an undisclosed ABI change is
+      `major`/`critical`, not a `minor` cleanup). The check also turns
+      inward: a commit message that overstates its own coverage, or
+      makes a false structural claim about its own patch (e.g. "defined
+      in an internal header" when the symbol is in fact tree-wide), is
+      itself a finding. This is the per-patch analog of Stage S's
+      "cover letter vs docs vs code", and the operational form of
+      the `trailers-are-not-evidence` principle applied to the patch's own message.
+
+  - id: subsystem-checklists
+    stage: "2"
+    title: Subsystem checklists
+    body: |
+      The other Stage-2 checks are the *general* semantic layer. Where
+      the kernel
+      ships a subsystem-specific review checklist, reason against it as
+      well. The most important: any patch using RCU (`rcu_read_lock()`,
+      `call_rcu()`, `rcu_dereference()`, `list_*_rcu()`,
+      `synchronize_rcu()`, …) must be walked through
+      `Documentation/RCU/checklist.rst` — a maintained 17-point review
+      checklist (a document to reason against, not a tool). Recurring
+      misses it catches: RCU protects *readers*, not updaters —
+      concurrent updaters still need their own mutual exclusion;
+      publish with `rcu_assign_pointer()`, never a plain store;
+      `rcu_dereference()` is valid only inside a read-side critical
+      section and its result must not be re-fetched; `synchronize_rcu()`
+      can block, so never from atomic context.
+
+documentation_review:
+  title: Documentation patches
+  body: |
+    Applies to any patch touching `Documentation/`, `kernel-parameters.txt`,
+    kerneldoc `/** */` comments, or `Documentation/ABI/`. A documentation
+    patch is not second-class: its correctness *is* its accuracy, and
+    accuracy is verifiable — against the code and the tree. Run Stage 0
+    (apply) and the intent review below; grade findings on the normal
+    severity scale.
+
+    **Examine intent — treat the page like a cover letter.** A doc page is a
+    statement of intent, not a bag of facts: what the feature is *for*, when
+    to use it, the mental model, the declared scope and limits.
+    - *Capture the intent first, then verify.* A doc that accurately
+      restates *what* the code does but never conveys *why* or *when* is a
+      weak doc even at full factual accuracy — `nit`/`minor`.
+    - *Check both directions.* doc→code: every claim is true of the code.
+      code→doc: no user-visible behaviour is left undocumented — accurate-
+      but-incomplete is a real defect.
+    - *The doc may be the spec.* Unlike a cover letter — transient, code is
+      ground truth — a doc is permanent, and admin- and ABI-facing docs *are*
+      the contract. When doc and code disagree, do not reflexively fix the
+      doc: decide which expresses the intended contract; the mismatch may be
+      a code bug the doc surfaced.
+    - *Deprecated / removed references.* Every parameter, `CONFIG_*`,
+      function, syscall, path, or sibling feature the doc names or
+      cross-references must still exist and not be deprecated — verify by
+      locating it (`__setup` / `module_param` handler, Kconfig symbol).
+      Examples must not use APIs listed in
+      `Documentation/process/deprecated.rst`.
+    - *Format and placement* match the file's conventions
+      (`kernel-parameters.txt` entry format and ordering; an addition under
+      `Documentation/ABI/` is a stability commitment — flag it as one).
+
+    Strictness stops at accuracy: hold the doc to describing correctly
+    whatever exists — do not NAK a `docs:` patch for the merits of the
+    feature it documents; that belongs to the patches that implement it.
+
+report_finalization:
+  body: |
+    The staged analysis — complete and correct — is organised by bug class,
+    not by where the reader's eyes are.
+    A maintainer cannot absorb "the `function-contract` check found an
+    inconsistent return
+    contract" in the abstract. The last step converts the analysis into a
+    review the way it lands on a mailing list: **every finding anchored to
+    the line of code it is about.**
+
+    Do this once, after all stages are done — do not skip it because the
+    analysis "is already written down."
+
+    1. **Enumerate every finding**, nit through critical, from all stages.
+       Nothing is too small to inline; nothing is dropped because it is
+       "only a nit." the `safe-is-a-finding` principle's reportable observations (safe-by-accident,
+       safe-by-no-contract) are findings too.
+    2. **For each finding, pick the single most relevant anchor line** — the
+       one line of the patch (or of the pre-existing file) where a reviewer
+       would put the comment so the reader instantly sees what it is about.
+       One anchor per finding; if a finding spans hunks, anchor it where the
+       fix would land.
+    3. **Write each finding as an inline review comment**, the way a
+       reviewer replies on-list: quote the relevant diff/code context, then
+       below it the comment — a severity tag
+       (`nit`/`minor`/`moderate`/`major`/`critical`, per the scale below),
+       what is wrong, why it matters, and a concrete suggested change.
+       Plain, specific, actionable; no restating the obvious.
+    4. **Group inline comments under the patch they belong to.** Use the
+       patch's own `N/M` ordering.
+    5. **Patchset-wide findings go in one comment block on the cover
+       letter** (`0/M`) — anything not localisable to a single patch:
+       series-level churn, a cover-letter claim contradicted across patches,
+       Stage S verdicts, residual gates (e.g. Stage 3 adversarial
+       self-review not performed, or a verification a reviewer would expect
+       that this analysis-only pass cannot supply). Do not scatter a
+       whole-series point across individual patches.
+    6. **State the review scope.** In the cover-letter block, say explicitly
+       whether the `preexisting-issues` Tier-2 pre-existing scan was
+       performed, and on which
+       patches (e.g. "Tier-2 pre-existing scan: patches 4 and 5; Tier 1 only
+       elsewhere"). The reader must know the floor and the ceiling of what
+       was actually checked.
+    7. **End with the verdict** — the series verdict and what, concretely,
+       would change it.
+
+    The staged analysis is the evidence; the finalized report is the
+    deliverable. A finding the maintainer cannot locate in the code is a
+    finding that will not be fixed.
+
+    Severity is *impact × reachability*, not impact alone. Every finding
+    carries exactly one tag. `critical`/`major`/`moderate`/`minor` block the
+    merge; only `nit` does not. The Linux kernel is an enormous, long-lived
+    codebase — unaddressed `minor` issues accrete into real debt, so a
+    discerning reviewer holds the line on them rather than waving them
+    through as "good enough." Two modifiers:
+
+    - *Reachability rates it down.* An impact-`critical` bug behind a path no
+      realistic configuration reaches is rated down — and the assumed
+      reachability is stated in the comment. (Why the patch-3 empty-mask
+      contract is `minor`, not a latent `critical`.)
+    - *Pre-existing (`preexisting-issues`) findings are non-blocking
+      regardless of tag.* Tag
+      them for impact as normal, but per the `preexisting-issues` check the
+      disposition is a separate
+      patch, never a gate on this series.
+  severity_scale:
+    - tag: critical
+      meaning: |
+        Memory unsafety (UAF, OOB write, double-free), data corruption or
+        loss, a security-exploitable flaw, or a crash/deadlock reachable in
+        normal operation. Unsafe to ship.
+      blocks_merge: true
+    - tag: major
+      meaning: |
+        A genuine functional defect reachable in realistic use, not directly
+        memory-unsafe: breaks an existing feature, disables a core operation
+        (CPU hotplug, suspend, boot), or fails to fix what the commit
+        message claims (efficacy failure).
+      blocks_merge: true
+    - tag: moderate
+      meaning: |
+        A correctness, contract, or documentation defect that misbehaves or
+        misleads in a real but non-mainstream configuration, or a required
+        verification not performed (a claim not checked). Bounded — the
+        common case still works.
+      blocks_merge: true
+    - tag: minor
+      meaning: |
+        A real but low-impact issue: correct for every current caller and
+        configuration yet fragile or inconsistent (an odd return contract, a
+        wrong-direction-but-non-failing fallback), or a maintainability
+        problem.
+      blocks_merge: true
+    - tag: nit
+      meaning: |
+        Cosmetic: style, naming, comment wording, surface-check output,
+        harmless redundancy. No behavioural effect.
+      blocks_merge: false
