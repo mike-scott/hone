@@ -24,11 +24,15 @@ def ctx(tmp_path):
 
 
 def _form(**overrides):
-    """A complete settings form at the defaults, with `overrides` applied."""
+    """A complete settings form at the defaults, with `overrides` applied. A
+       "sources" field defaults to [] (every toggle off); pass a list of source
+       names to turn toggles on."""
     form = {}
     for group, key, _label, _unit, kind in runtime_config.FIELDS:
-        default = runtime_config.DEFAULTS[group][key]
-        form[f"{group}.{key}"] = "" if kind == "csv" else str(default)
+        if kind == "sources":
+            form[f"{group}.{key}"] = []
+        else:
+            form[f"{group}.{key}"] = str(runtime_config.DEFAULTS[group][key])
     form.update(overrides)
     return form
 
@@ -37,6 +41,8 @@ def test_settings_page_shows_values_and_masks_secrets(ctx):
     r = ctx.client.get("/settings")
     assert r.status_code == 200
     assert "GATHER cadence" in r.text and 'value="600"' in r.text
+    assert "Enabled gather sources" in r.text and "form-switch" in r.text
+    assert "sashiko" in r.text                       # a per-source toggle
     assert "Deployment configuration" in r.text and "core.example" in r.text
     assert "FLEETSECRETVALUE" not in r.text          # secret is masked
     assert "ADMINTOKENVALUE" not in r.text
@@ -44,7 +50,7 @@ def test_settings_page_shows_values_and_masks_secrets(ctx):
 
 def test_save_settings_persists_and_applies_live(ctx):
     r = ctx.client.post("/settings", data=_form(**{
-        "gather.interval_seconds": "300", "gather.sources": "sashiko"}))
+        "gather.interval_seconds": "300", "gather.sources": ["sashiko"]}))
     assert r.status_code == 200 and "Settings saved" in r.text
     on_disk = yaml.safe_load(open(ctx.config_path, encoding="utf-8"))
     assert on_disk["gather"]["interval_seconds"] == 300
@@ -66,9 +72,19 @@ def test_save_rejects_a_non_numeric_value(ctx):
     assert r.status_code == 400 and "whole number" in r.text
 
 
-def test_save_rejects_an_unknown_gather_source(ctx):
-    r = ctx.client.post("/settings",
-                        data=_form(**{"gather.sources": "sashiko, bogus-src"}))
-    assert r.status_code == 400 and "bogus-src" in r.text
+def test_save_can_unselect_all_sources(ctx):
+    # every toggle off -> no gather.sources posted -> an empty (paused) set;
+    # this means *none*, not "gather everything".
+    r = ctx.client.post("/settings", data=_form())
+    assert r.status_code == 200 and "Settings saved" in r.text
     on_disk = yaml.safe_load(open(ctx.config_path, encoding="utf-8"))
-    assert on_disk["gather"]["sources"] == []                    # untouched
+    assert on_disk["gather"]["sources"] == []
+    assert ctx.app.state.runtime_config.gather_sources == ()
+
+
+def test_save_keeps_only_the_toggled_on_sources(ctx):
+    r = ctx.client.post("/settings",
+                        data=_form(**{"gather.sources": ["sashiko"]}))
+    assert r.status_code == 200
+    on_disk = yaml.safe_load(open(ctx.config_path, encoding="utf-8"))
+    assert on_disk["gather"]["sources"] == ["sashiko"]

@@ -212,7 +212,7 @@ page **edits**:
 # /data/config.yaml — hone-core operator-tunable settings
 gather:
   interval_seconds: 600
-  sources: []              # [] = every installed gather module
+  sources: [sashiko, ...]  # the enabled gather sources ([] = none/paused)
 work_queue:
   lease_seconds: 1800
   heartbeat_seconds: 300

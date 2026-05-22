@@ -43,7 +43,8 @@ async def lifespan(app: FastAPI):
     log.info("TLS material ready — cert_dir=%s", cfg.cert_dir)
     # Operator-tunable runtime config (config.yaml on the data volume) — held
     # live in app.state so a Settings change applies without a restart.
-    app.state.runtime_config = runtime_config.load(cfg.config_path)
+    app.state.runtime_config = runtime_config.load(
+        cfg.config_path, all_sources=gather.gather_api.available())
     log.info("runtime config ready — %s", cfg.config_path)
     gather_task = asyncio.create_task(gather.gather_loop(app))
     try:

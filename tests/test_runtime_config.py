@@ -33,6 +33,14 @@ def test_first_run_seeds_from_env(tmp_path, monkeypatch):
     assert rc.gather_sources == ("sashiko",)
 
 
+def test_first_run_seeds_sources_from_installed_modules(tmp_path):
+    # with no HONE_GATHER_SOURCES set, the enabled sources default to every
+    # installed module — gather-everything stays the out-of-the-box default.
+    rc = runtime_config.load(str(tmp_path / "config.yaml"),
+                             all_sources=["alpha", "beta"])
+    assert rc.gather_sources == ("alpha", "beta")
+
+
 def test_existing_file_overrides_defaults(tmp_path):
     path = tmp_path / "config.yaml"
     path.write_text("gather:\n  interval_seconds: 42\n", encoding="utf-8")

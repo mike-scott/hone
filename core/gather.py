@@ -101,16 +101,14 @@ def _gather_source(db, module) -> dict:
 
 
 def _select_sources(wanted, available):
-    """The gather modules to run this pass: the configured subset
-       (`HONE_GATHER_SOURCES`, in the operator's order) intersected with what
-       is installed; or, when none is configured, every installed module. A
-       configured name that is not installed is dropped with a warning."""
-    if not wanted:
-        return list(available)
+    """The gather modules to run this pass — the operator's enabled sources
+       (`gather.sources`) intersected with what is installed. An empty set
+       gathers nothing (GATHER paused); it does NOT mean "everything". A
+       configured source that is not installed is dropped with a warning."""
     unknown = [s for s in wanted if s not in available]
     if unknown:
-        log.warning("GATHER: HONE_GATHER_SOURCES names unknown source(s) %s "
-                    "— ignored (installed: %s)",
+        log.warning("GATHER: enabled source(s) %s are not installed — ignored "
+                    "(installed: %s)",
                     ", ".join(unknown), ", ".join(available) or "none")
     return [s for s in wanted if s in available]
 

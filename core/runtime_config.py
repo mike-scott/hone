@@ -21,7 +21,7 @@ log = logging.getLogger("hone.config")
 DEFAULTS = {
     "gather": {
         "interval_seconds": 600,
-        "sources": [],                  # [] = every installed gather module
+        "sources": [],                  # the enabled gather sources ([] = none)
     },
     "work_queue": {
         "lease_seconds": 1800,
@@ -60,12 +60,12 @@ _ENV_SEEDS = {
 
 # Settings-form schema — drives the operator UI's Settings page and the
 # validation of a submission. `kind`: "int" (a positive integer), "int0"
-# (>= 0), "csv" (a comma-separated list).
+# (>= 0), "sources" (a toggle per installed gather module).
 FIELDS = [
     ("gather", "interval_seconds", "GATHER cadence", "seconds", "int"),
     ("gather", "sources", "Enabled gather sources",
-     "comma-separated, in priority order; empty = every installed source",
-     "csv"),
+     "tick the sources GATHER pulls from; untick all to pause gathering",
+     "sources"),
     ("work_queue", "lease_seconds", "Claim lease", "seconds", "int"),
     ("work_queue", "heartbeat_seconds", "Heartbeat interval", "seconds", "int"),
     ("enrollment", "access_token_ttl", "Access-token TTL", "seconds", "int"),
@@ -146,10 +146,14 @@ def _merge(base, overlay):
     return out
 
 
-def _seed_from_env():
+def _seed_from_env(all_sources=None):
     """The defaults with any env-var-set tunable overriding its key — the
-       first-run seed, so an env-configured deployment keeps its values."""
+       first-run seed, so an env-configured deployment keeps its values. When
+       `all_sources` is given, the enabled sources default to every installed
+       module (HONE_GATHER_SOURCES still overrides, if set)."""
     seeded = copy.deepcopy(DEFAULTS)
+    if all_sources is not None:
+        seeded["gather"]["sources"] = list(all_sources)
     for (group, key), (env, parse) in _ENV_SEEDS.items():
         raw = os.environ.get(env)
         if raw not in (None, ""):
@@ -169,17 +173,18 @@ def _write(path, data):
     os.replace(tmp, path)
 
 
-def load(path):
+def load(path, all_sources=None):
     """Resolve the runtime config. If `path` exists it is the defaults overlaid
        with that file. If not — first run — write a fresh config.yaml seeded
-       from the defaults plus any tunable env vars, and use that. Returns a
-       RuntimeConfig."""
+       from the defaults plus any tunable env vars (the enabled sources
+       defaulting to `all_sources`, every installed module), and use that.
+       Returns a RuntimeConfig."""
     if os.path.exists(path):
         with open(path, encoding="utf-8") as f:
             data = _merge(DEFAULTS, yaml.safe_load(f) or {})
         log.info("runtime config loaded from %s", path)
     else:
-        data = _seed_from_env()
+        data = _seed_from_env(all_sources)
         _write(path, data)
         log.info("runtime config initialised at %s", path)
     return RuntimeConfig(data)
@@ -200,16 +205,13 @@ def parse_form(form, valid_sources=None):
     errors = {}
     for group, key, label, _unit, kind in FIELDS:
         name = f"{group}.{key}"
-        raw = (form.get(name) or "").strip()
-        if kind == "csv":
-            items = _csv(raw)
-            unknown = ([s for s in items if s not in valid_sources]
-                       if valid_sources is not None else [])
-            if unknown:
-                errors[name] = "unknown source(s): " + ", ".join(unknown)
-            else:
-                data[group][key] = items
+        if kind == "sources":
+            # checkbox group — the posted values are the ticked sources;
+            # none posted == all unticked == an empty (paused) set.
+            data[group][key] = [s for s in form.getlist(name)
+                                if valid_sources is None or s in valid_sources]
             continue
+        raw = (form.get(name) or "").strip()
         try:
             value = int(raw)
         except ValueError:

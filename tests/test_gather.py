@@ -94,13 +94,14 @@ def test_gather_is_idempotent(db):
     assert len(core_db.source_findings(db, "<root-1@x>")) == 1   # no re-ingest
 
 
-# --- source selection (HONE_GATHER_SOURCES) --------------------------------
+# --- source selection (gather.sources) -------------------------------------
 
 _INSTALLED = ["linux-arm-msm", "sashiko"]
 
 
-def test_select_sources_default_is_every_installed():
-    assert gather._select_sources((), _INSTALLED) == _INSTALLED
+def test_select_sources_empty_selection_gathers_nothing():
+    # an empty enabled set is "GATHER paused", NOT "every installed source"
+    assert gather._select_sources((), _INSTALLED) == []
 
 
 def test_select_sources_restricts_to_the_configured_set():
