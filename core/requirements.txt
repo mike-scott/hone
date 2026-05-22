@@ -2,6 +2,7 @@
 # SQLite is in the Python standard library — no dependency needed.
 # Floors only; a deployment should pin (pip freeze) or lock these.
 fastapi>=0.115             # web framework — the v1 REST API and the UI routes
+starlette>=0.47            # fastapi's core; >=0.47 has status.HTTP_422_UNPROCESSABLE_CONTENT
 uvicorn[standard]>=0.32    # ASGI server (the Dockerfile CMD runs uvicorn)
 pydantic>=2.9              # typed request/response models (see common/)
 jinja2>=3.1                # server-rendered HTML templates (operator web UI)

@@ -57,7 +57,7 @@ def _validate_record(validator, record, what):
         e = errors[0]
         loc = "/".join(str(p) for p in e.absolute_path) or "<root>"
         raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
             f"{what} failed schema validation at {loc}: {e.message}")
 
 
@@ -286,13 +286,13 @@ def submit_result(claim_id: str, body: ResultRequest, request: Request):
     db = request.app.state.db
     if body.task_type == "review":
         if body.state is None or body.record is None:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                                 "a review result needs `state` and `record`")
         _validate_record(_REVIEW_VALIDATOR, body.record,
                           "review completion record")
         if body.state != body.record.get("outcome"):
             raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
                 f"`state` ({body.state!r}) does not match the record's "
                 f"`outcome` ({body.record.get('outcome')!r})")
         try:
@@ -300,16 +300,16 @@ def submit_result(claim_id: str, body: ResultRequest, request: Request):
                                               body.record,
                                               body.methodology_version)
         except ValueError as exc:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc))
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc))
     elif body.task_type == "maintenance":
         if body.result is None:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                                 "a maintenance result needs `result`")
         _validate_record(_MAINTENANCE_VALIDATOR, body.result,
                           "maintenance-task record")
         outcome = core_db.complete_maintenance_task(db, claim_id, body.result)
     else:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                             f"unknown task_type {body.task_type!r}")
     return {"status": outcome}
 
