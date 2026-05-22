@@ -145,9 +145,18 @@ The returned key is what that client's nodes present as `X-HONE-Client-Key`.
 
 ---
 
-## The review completion record
+## The completion record
 
-The body of `POST /v1/claims/{claim_id}/result`. One record per claim.
+The body of `POST /v1/claims/{claim_id}/result` — one record per claim, in one
+of two shapes: a **review completion record** (below) or a **maintenance-task
+record** (further down). Both are formally specified by
+`core/completion-record.schema.yaml` (JSON Schema, draft 2020-12) — that schema
+is the machine-checkable contract, this section and the next its prose
+companion; hone-core validates every record against it and returns `422` on a
+failure. The two `outcome` enums are disjoint, so a record resolves to exactly
+one shape with no separate type field.
+
+### The review completion record
 
 ```
 {
@@ -263,6 +272,9 @@ redraft feedback).
 
 ### Result — `POST /v1/claims/{claim_id}/result`, maintenance record
 
+The maintenance-task record — the second shape of the completion record,
+specified alongside the review record in `core/completion-record.schema.yaml`.
+
 ```
 {
   worker_id            : the node submitting
@@ -305,8 +317,6 @@ a malformed proposal (counting against the node's reputation). Idempotent on
 
 ## Open / not yet specified
 
-- A formal JSON Schema for the completion record (mirroring
-  `core/methodology.schema.yaml`'s role for the methodology).
 - Whether the shared-secret is upgraded from a presented header to per-request
   signing.
 - Pagination / listing endpoints, if any prove necessary for operators.

@@ -1,0 +1,587 @@
+# completion-record.schema.yaml — JSON Schema (draft 2020-12) for a hone
+# task completion record.
+#
+# A completion record is the body of `POST /v1/claims/{claim_id}/result`
+# (see ../API.md). It is one of two shapes, discriminated by `outcome`:
+#
+#   - a REVIEW completion record   — outcome reviewed | unappliable | deferred
+#   - a MAINTENANCE-task record    — outcome completed | failed
+#
+# The two `outcome` enums are disjoint, so the top-level `oneOf` resolves a
+# record to exactly one shape with no separate discriminator field. Every
+# property carries a `description`, so this schema doubles as the functional
+# specification of the result wire format — the formal companion to the prose
+# in ../API.md ("The review completion record" / "The maintenance-task
+# payloads"). It mirrors methodology.schema.yaml's role for the methodology.
+#
+# Validate:
+#   python3 -c "import json,yaml,jsonschema; \
+#     jsonschema.validate(json.load(open('record.json')), \
+#                         yaml.safe_load(open('completion-record.schema.yaml')))"
+#
+# Invariants enforced structurally here:
+#   - every object is closed (additionalProperties: false) — a stray or
+#     misspelled key fails validation rather than being silently ignored;
+#   - the field set is outcome-dependent: `reviewed` requires the full review
+#     and forbids `reason`; `unappliable`/`deferred` carry only `reason`;
+#     `completed` requires `proposals`, `failed` requires `reason`;
+#   - a proposal's `payload` shape is pinned to its `recommendation`.
+#
+# Checks JSON Schema cannot express, left to hone-core on receipt:
+#   - that the record's shape matches the claimed task's `task_type`;
+#   - `methodology_version` naming an existing methodology version;
+#   - a `redraft` maintenance result carrying exactly one proposal (the record
+#     does not carry `maintenance_kind` — only the claim does);
+#   - referential integrity of `produced_by`, `finding_ref`, `coverage[].id`,
+#     `candidate_id`, `subject`, `subsumed_by`, `redraft_of` against real ids;
+#   - the suppression-log constraint (no re-proposing a rejected pair).
+
+$schema: "https://json-schema.org/draft/2020-12/schema"
+$id: "urn:hone:completion-record-schema"
+title: hone task completion record
+description: >-
+  The body of POST /v1/claims/{claim_id}/result — a node's terminal report on
+  one claimed task. Either a review completion record or a maintenance-task
+  record; the top-level oneOf selects the shape from the `outcome` value.
+
+oneOf:
+  - $ref: "#/$defs/review_record"
+  - $ref: "#/$defs/maintenance_record"
+
+$defs:
+
+  # --- shared primitives ---------------------------------------------------
+
+  slug:
+    type: string
+    pattern: "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
+    description: >-
+      A kebab-case identifier — lowercase letter, then lowercase letters and
+      digits in single-hyphen-separated words. The id form of a check, a
+      candidate practice, or a candidate nomination.
+
+  stage_id:
+    type: string
+    pattern: "^[0-9A-Za-z]+$"
+    description: >-
+      A review-stage id (`0`, `1`, `2`, `3`, `S`) — terse and ordinal, as in
+      methodology.schema.yaml. Must match a methodology `stages[].id`.
+
+  worker_id:
+    type: string
+    minLength: 1
+    description: Id of the node submitting this record.
+
+  methodology_version:
+    type: integer
+    minimum: 1
+    description: >-
+      The methodology version this task applied. For a review, the version the
+      review was graded against (an in-flight review finishes on the version it
+      started). For a maintenance task, the claim's base_methodology_version.
+
+  usage:
+    type: object
+    additionalProperties: false
+    required: [tokens, tool_uses, duration_ms]
+    description: Per-task cost accounting, measured by the node.
+    properties:
+      tokens:
+        type: integer
+        minimum: 0
+        description: Total model tokens the task consumed.
+      tool_uses:
+        type: integer
+        minimum: 0
+        description: Number of tool invocations during the task.
+      duration_ms:
+        type: integer
+        minimum: 0
+        description: Wall-clock duration of the task, in milliseconds.
+
+  # --- review completion record -------------------------------------------
+
+  review_record:
+    type: object
+    additionalProperties: false
+    required: [worker_id, methodology_version, outcome]
+    description: >-
+      A node's report on a review task. `outcome` selects the field set:
+      `reviewed` carries the full review; `unappliable` / `deferred` carry only
+      a `reason`.
+    properties:
+      worker_id:
+        $ref: "#/$defs/worker_id"
+      methodology_version:
+        $ref: "#/$defs/methodology_version"
+      outcome:
+        type: string
+        enum: [reviewed, unappliable, deferred]
+        description: >-
+          Terminal disposition. `reviewed` — a review was produced.
+          `unappliable` — the patch will not apply and could not be reconciled.
+          `deferred` — the base tree was unobtainable; retryable.
+      reason:
+        type: string
+        minLength: 1
+        description: >-
+          Why the patch was unappliable or the task deferred. Present only for
+          outcome `unappliable` / `deferred`.
+      verdict:
+        type: string
+        enum: [clean, issues, blocked]
+        description: The overall call on the patchset. Present only when reviewed.
+      findings:
+        type: array
+        description: The blind review's findings. Present only when reviewed.
+        items:
+          $ref: "#/$defs/finding"
+      coverage:
+        type: array
+        minItems: 1
+        description: >-
+          Per stage and per check, the completeness record — proof the review
+          was whole, not partial. Present only when reviewed.
+        items:
+          $ref: "#/$defs/coverage_entry"
+      candidate_outcomes:
+        type: array
+        description: >-
+          Per candidate practice the node applied — the Applied / Catches
+          signal for the self-honing loop. Present only when reviewed.
+        items:
+          $ref: "#/$defs/candidate_outcome"
+      source_comparison:
+        type: array
+        description: >-
+          The measurement — the node's blind review verified against each
+          finding in the gathered source's review. Present only when reviewed.
+        items:
+          $ref: "#/$defs/source_comparison_entry"
+      we_win:
+        type: array
+        description: >-
+          Real, code-verified issues the node found that the gathered source's
+          review missed. Optional; present only when reviewed.
+        items:
+          type: string
+          minLength: 1
+          description: A real issue the source missed — a finding ref or summary.
+      candidate_nominations:
+        type: array
+        description: >-
+          New candidate practices proposed from a verified miss. Optional —
+          present only when reviewed, and only when a miss motivated one.
+        items:
+          $ref: "#/$defs/candidate_nomination"
+      residual_risk:
+        type: string
+        minLength: 1
+        description: >-
+          Known limitations of this review (write "None identified." if none).
+          Present only when reviewed.
+      usage:
+        $ref: "#/$defs/usage"
+        description: Per-review cost accounting. Present only when reviewed.
+    allOf:
+      - if:
+          required: [outcome]
+          properties:
+            outcome: { const: reviewed }
+        then:
+          required:
+            - verdict
+            - findings
+            - coverage
+            - candidate_outcomes
+            - source_comparison
+            - residual_risk
+            - usage
+          properties:
+            reason: false        # a produced review carries no `reason`
+        else:
+          required: [reason]
+          properties:            # unappliable / deferred carry only `reason`
+            verdict: false
+            findings: false
+            coverage: false
+            candidate_outcomes: false
+            source_comparison: false
+            we_win: false
+            candidate_nominations: false
+            residual_risk: false
+            usage: false
+
+  finding:
+    type: object
+    additionalProperties: false
+    required: [severity, anchor, text, produced_by, preexisting]
+    description: One finding from the node's blind review.
+    properties:
+      severity:
+        type: string
+        enum: [critical, major, moderate, minor, nit]
+        description: The finding's severity tag (methodology severity scale).
+      anchor:
+        $ref: "#/$defs/anchor"
+        description: Where in the patchset the finding is raised.
+      text:
+        type: string
+        minLength: 1
+        description: The inline review comment, per the methodology's report finalization.
+      produced_by:
+        type: string
+        minLength: 1
+        description: Id of the stage, check, or candidate practice that surfaced the finding.
+      preexisting:
+        type: boolean
+        description: >-
+          True if the finding is a preexisting / Tier-2 issue (already in the
+          base tree), not introduced by the patch.
+
+  anchor:
+    type: object
+    additionalProperties: false
+    required: [patch, file, line]
+    description: A location within a patchset.
+    properties:
+      patch:
+        type: string
+        pattern: "^[0-9]+/[0-9]+$"
+        description: The patch within the series, as `N/M` (the cover letter is `0/M`).
+      file:
+        type: string
+        minLength: 1
+        description: Path of the file the finding anchors to.
+      line:
+        type: integer
+        minimum: 1
+        description: 1-based line number within the file.
+
+  coverage_entry:
+    type: object
+    additionalProperties: false
+    required: [id, status]
+    description: Whether one stage or check was exercised by the review.
+    properties:
+      id:
+        type: string
+        minLength: 1
+        description: Id of the stage or check (a stage id or a check slug).
+      status:
+        type: string
+        enum: [applied, n/a]
+        description: >-
+          `applied` — the stage/check was exercised; `n/a` — it did not apply
+          to this patchset.
+      note:
+        type: string
+        minLength: 1
+        description: Optional explanation — why `n/a`, or a coverage caveat.
+
+  candidate_outcome:
+    type: object
+    additionalProperties: false
+    required: [candidate_id, applied, fired]
+    description: >-
+      The result of applying one candidate practice during the review — the
+      Applied / Catches counter signal. A node reports only candidates it
+      actually applied.
+    properties:
+      candidate_id:
+        $ref: "#/$defs/slug"
+        description: Id of the candidate practice that was applied.
+      applied:
+        const: true
+        description: >-
+          Always true — a candidate_outcome exists only for an applied
+          candidate (a candidate that was N/A is simply not reported).
+      fired:
+        type: boolean
+        description: True if the candidate caught a real, code-verified issue.
+      finding_ref:
+        type: string
+        minLength: 1
+        description: >-
+          Reference to the findings[] entry the candidate surfaced. Required
+          when `fired` is true; omitted otherwise.
+    allOf:
+      - if:
+          required: [fired]
+          properties:
+            fired: { const: true }
+        then:
+          required: [finding_ref]
+
+  source_comparison_entry:
+    type: object
+    additionalProperties: false
+    required: [source_finding, verdict, justification]
+    description: >-
+      One finding from the gathered source's review, verified against the code
+      — the per-finding measurement of the node's review vs the source's.
+    properties:
+      source_finding:
+        type: string
+        minLength: 1
+        description: The source finding being verified — its text or a ref to it.
+      verdict:
+        type: string
+        enum: [match, miss, source-FP]
+        description: >-
+          `match` — the node found it too; `miss` — real, but the node missed
+          it; `source-FP` — verified wrong, a source false positive.
+      justification:
+        type: string
+        minLength: 1
+        description: The code-grounded reasoning behind the verdict.
+
+  candidate_nomination:
+    type: object
+    additionalProperties: false
+    required: [proposed_id, title, body, origin]
+    description: >-
+      A brand-new candidate practice proposed from a verified miss. Distinct
+      from candidate graduation (an existing candidate becoming a check), which
+      is a maintenance task, not a review record.
+    properties:
+      proposed_id:
+        $ref: "#/$defs/slug"
+        description: Proposed slug id for the new candidate practice.
+      title:
+        type: string
+        minLength: 1
+        description: Short title of the proposed candidate practice.
+      body:
+        type: string
+        minLength: 1
+        description: The proposed candidate practice, stated in full.
+      origin:
+        type: string
+        minLength: 1
+        description: The verified miss / finding that motivated the nomination.
+
+  # --- maintenance-task record ---------------------------------------------
+
+  maintenance_record:
+    type: object
+    additionalProperties: false
+    required: [worker_id, methodology_version, outcome, usage]
+    description: >-
+      A node's report on a maintenance task — a batch of methodology-change
+      proposals for the human merge gate. `outcome` selects the field set:
+      `completed` carries `proposals`; `failed` carries a `reason`.
+    properties:
+      worker_id:
+        $ref: "#/$defs/worker_id"
+      methodology_version:
+        $ref: "#/$defs/methodology_version"
+      outcome:
+        type: string
+        enum: [completed, failed]
+        description: >-
+          `completed` — the candidate set was evaluated (an empty `proposals`
+          is a valid result: "nothing should change"). `failed` — the task
+          could not be completed.
+      reason:
+        type: string
+        minLength: 1
+        description: Why the task failed. Present only for outcome `failed`.
+      proposals:
+        type: array
+        description: >-
+          The methodology-change proposals. Present only when `completed`:
+          0+ for a holistic task, exactly 1 for a redraft (the redraft count is
+          enforced by hone-core, not this schema).
+        items:
+          $ref: "#/$defs/proposal"
+      usage:
+        $ref: "#/$defs/usage"
+        description: Per-task cost accounting.
+    allOf:
+      - if:
+          required: [outcome]
+          properties:
+            outcome: { const: completed }
+        then:
+          required: [proposals]
+          properties:
+            reason: false
+        else:
+          required: [reason]
+          properties:
+            proposals: false
+
+  proposal:
+    type: object
+    additionalProperties: false
+    required: [recommendation, subject, rationale, payload]
+    description: >-
+      One methodology-change proposal — the AI-authored part. hone-core
+      attaches the evidence snapshot, version, and lineage itself.
+    properties:
+      recommendation:
+        type: string
+        enum: [graduate, prune-redundant, prune-ineffective, consolidate, revise]
+        description: What the maintenance task found should be done.
+      subject:
+        description: >-
+          The candidate id(s) the proposal acts on — a single slug, except
+          `consolidate`, which carries a list of two or more.
+        oneOf:
+          - $ref: "#/$defs/slug"
+          - type: array
+            minItems: 2
+            items:
+              $ref: "#/$defs/slug"
+      rationale:
+        type: string
+        minLength: 1
+        description: The node's reasoning — shown in the merge-gate evidence panel.
+      payload:
+        type: object
+        description: >-
+          The concrete change. Its shape is pinned to `recommendation` by the
+          conditionals below.
+      redraft_of:
+        type: string
+        minLength: 1
+        description: >-
+          Id of the parent proposal this redrafts. Present only in a redraft
+          maintenance result.
+    allOf:
+      - if:
+          required: [recommendation]
+          properties:
+            recommendation: { const: consolidate }
+        then:
+          properties:
+            subject:
+              type: array
+              minItems: 2
+              items:
+                $ref: "#/$defs/slug"
+        else:
+          properties:
+            subject:
+              $ref: "#/$defs/slug"
+      - if:
+          required: [recommendation]
+          properties:
+            recommendation: { const: graduate }
+        then:
+          properties:
+            payload:
+              $ref: "#/$defs/graduate_payload"
+      - if:
+          required: [recommendation]
+          properties:
+            recommendation: { const: prune-redundant }
+        then:
+          properties:
+            payload:
+              $ref: "#/$defs/prune_redundant_payload"
+      - if:
+          required: [recommendation]
+          properties:
+            recommendation: { const: prune-ineffective }
+        then:
+          properties:
+            payload:
+              $ref: "#/$defs/prune_ineffective_payload"
+      - if:
+          required: [recommendation]
+          properties:
+            recommendation: { const: consolidate }
+        then:
+          properties:
+            payload:
+              $ref: "#/$defs/consolidate_payload"
+      - if:
+          required: [recommendation]
+          properties:
+            recommendation: { const: revise }
+        then:
+          properties:
+            payload:
+              $ref: "#/$defs/revise_payload"
+
+  graduate_payload:
+    type: object
+    additionalProperties: false
+    required: [id, stage, title, body]
+    description: >-
+      The drafted check a `graduate` proposal adds. `body` is a bounded
+      adaptation of the candidate, traceable to it; `id` is the candidate's
+      slug (a candidate and the check it becomes share one id).
+    properties:
+      id:
+        $ref: "#/$defs/slug"
+        description: The check's slug id — the graduating candidate's slug.
+      stage:
+        $ref: "#/$defs/stage_id"
+        description: Id of the stage the new check runs under.
+      title:
+        type: string
+        minLength: 1
+        description: Short check title.
+      body:
+        type: string
+        minLength: 1
+        description: The check, stated in full.
+
+  prune_redundant_payload:
+    type: object
+    additionalProperties: false
+    required: [subsumed_by]
+    description: A `prune-redundant` proposal — the candidate is already covered.
+    properties:
+      subsumed_by:
+        $ref: "#/$defs/slug"
+        description: Id of the existing check that already covers the candidate.
+
+  prune_ineffective_payload:
+    type: object
+    additionalProperties: false
+    maxProperties: 0
+    description: >-
+      A `prune-ineffective` proposal carries no payload — the candidate's
+      pooled stats are the whole case for dropping it.
+
+  consolidate_payload:
+    type: object
+    additionalProperties: false
+    required: [merged]
+    description: A `consolidate` proposal — fold several candidates into one.
+    properties:
+      merged:
+        type: object
+        additionalProperties: false
+        required: [id, title, body, stage]
+        description: The single candidate practice the subjects are merged into.
+        properties:
+          id:
+            $ref: "#/$defs/slug"
+            description: Slug id of the merged candidate.
+          title:
+            type: string
+            minLength: 1
+            description: Short title of the merged candidate.
+          body:
+            type: string
+            minLength: 1
+            description: The merged candidate practice, stated in full.
+          stage:
+            $ref: "#/$defs/stage_id"
+            description: Id of the stage the merged candidate applies under.
+
+  revise_payload:
+    type: object
+    additionalProperties: false
+    required: [new_body]
+    description: A `revise` proposal — restate the candidate's body.
+    properties:
+      new_body:
+        type: string
+        minLength: 1
+        description: The candidate practice's new body text.
