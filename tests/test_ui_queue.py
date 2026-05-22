@@ -6,6 +6,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from common.version import __version__
 from core import core_db, ui
 
 
@@ -27,6 +28,7 @@ def test_queue_home_page_empty(ctx):
     r = ctx.client.get("/")
     assert r.status_code == 200
     assert "Review queue" in r.text and "queue is empty" in r.text
+    assert f"hone-core-{__version__}" in r.text          # base-template footer
 
 
 def test_queue_lists_an_enqueued_review(ctx):

@@ -39,3 +39,5 @@ runtime environment. Current coverage:
   into the corpus (dedup, `.tar.zst` blob, findings, queued review).
 - `test_runtime_config.py` — `core/runtime_config.py`: the `config.yaml`
   operator-tunable layer (defaults, env seeding, file overlay, save).
+- `test_version.py` — `common/version.py`: the release version is valid
+  SemVer and the hone-node startup banner carries it.

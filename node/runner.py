@@ -11,6 +11,7 @@ import time
 
 import httpx
 
+from common.version import __version__ as VERSION
 from node import tasks
 from node.client import EnrollmentError, HoneCoreClient
 from node.config import Config
@@ -118,7 +119,16 @@ def run_once(cfg: Config, client: HoneCoreClient) -> bool:
     return True
 
 
+def _print_banner() -> None:
+    """Stamp the running version to stdout at startup as `hone-node-<version>`,
+       framed so it stands out in `docker logs`."""
+    label = f"hone-node-{VERSION}"
+    bar = "=" * (len(label) + 4)
+    print(f"{bar}\n  {label}\n{bar}", flush=True)
+
+
 def main() -> None:
+    _print_banner()
     cfg = Config.from_env()
     # `docker stop` sends SIGTERM. The node is PID 1, and the kernel does not
     # apply a signal's default action to PID 1 — a SIGTERM left at its OS

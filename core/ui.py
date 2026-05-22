@@ -16,10 +16,12 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
+from common.version import __version__ as VERSION
 from core import core_db, gather, runtime_config
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 templates = Jinja2Templates(directory=os.path.join(_HERE, "templates"))
+templates.env.globals["version"] = VERSION   # rendered in the base footer
 
 router = APIRouter(tags=["ui"])
 
