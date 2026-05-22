@@ -19,8 +19,12 @@ services:
       dockerfile: node/Dockerfile
     image: hone-node
     restart: unless-stopped
+    env_file:
+      - .env                             # every setting in .env reaches the node
     environment:
-      # A node starts from scratch given only these three — see .env.example.
+      # The three required settings, re-asserted so `compose up` fails fast if
+      # one is missing. Optional settings (HONE_NODE_NAME, the poll / backoff
+      # knobs, ...) are picked up from .env above — see .env.example.
       HONE_CORE_URL:     "${HONE_CORE_URL:?set it in .env}"
       HONE_FLEET_SECRET: "${HONE_FLEET_SECRET:?set it in .env}"
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:?set it in .env}"
