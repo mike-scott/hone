@@ -35,3 +35,5 @@ runtime environment. Current coverage:
   failures are transient, `Retry-After`, and the retry loop.
 - `test_gather.py` — the GATHER pass: a gather module's patchsets ingested
   into the corpus (dedup, `.tar.zst` blob, findings, queued review).
+- `test_runtime_config.py` — `core/runtime_config.py`: the `config.yaml`
+  operator-tunable layer (defaults, env seeding, file overlay, save).

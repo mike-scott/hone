@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from core import api, core_db, gather, tls, ui
+from core import api, core_db, gather, runtime_config, tls, ui
 from core.config import Config
 
 logging.basicConfig(
@@ -41,7 +41,11 @@ async def lifespan(app: FastAPI):
     tls.ensure_certs(cfg.cert_dir, [cfg.hostname])
     app.state.ca_cert_pem = tls.ca_cert_pem(cfg.cert_dir)
     log.info("TLS material ready — cert_dir=%s", cfg.cert_dir)
-    gather_task = asyncio.create_task(gather.gather_loop(cfg))
+    # Operator-tunable runtime config (config.yaml on the data volume) — held
+    # live in app.state so a Settings change applies without a restart.
+    app.state.runtime_config = runtime_config.load(cfg.config_path)
+    log.info("runtime config ready — %s", cfg.config_path)
+    gather_task = asyncio.create_task(gather.gather_loop(app))
     try:
         yield
     finally:

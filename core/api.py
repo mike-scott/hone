@@ -160,12 +160,13 @@ def device_authorization(request: Request,
     """Begin node enrollment — issue a device code + user code. The node logs
        the user code for an operator and polls /v1/oauth/token (RFC 8628)."""
     cfg = request.app.state.config
+    rc = request.app.state.runtime_config
     enr = core_db.create_enrollment(
         request.app.state.db,
         node_name=body.node_name if body else None,
         task_types=body.task_types if body else None,
-        ttl_seconds=cfg.device_code_ttl,
-        interval=cfg.device_poll_interval)
+        ttl_seconds=rc.device_code_ttl,
+        interval=rc.device_poll_interval)
     base = cfg.public_url.rstrip("/")
     return {"device_code": enr["device_code"],
             "user_code": enr["user_code"],
@@ -180,7 +181,7 @@ def device_authorization(request: Request,
 def oauth_token(request: Request, body: TokenRequest):
     """Exchange an approved device code, or a refresh token, for a fresh
        bearer-token pair. Device-flow states use the RFC 8628 error codes."""
-    cfg = request.app.state.config
+    rc = request.app.state.runtime_config
     db = request.app.state.db
 
     if body.grant_type == _DEVICE_GRANT:
@@ -209,8 +210,8 @@ def oauth_token(request: Request, body: TokenRequest):
                                 "awaiting operator approval")
         # state == 'approved' — redeem the device code, once
         tok = core_db.issue_tokens(db, enr["node_id"],
-                                   access_ttl=cfg.access_token_ttl,
-                                   refresh_ttl=cfg.refresh_token_ttl or None)
+                                   access_ttl=rc.access_token_ttl,
+                                   refresh_ttl=rc.refresh_token_ttl or None)
         core_db.complete_enrollment(db, enr["id"])
         return _token_response(request, tok)
 
@@ -219,8 +220,8 @@ def oauth_token(request: Request, body: TokenRequest):
             return _oauth_error("invalid_request",
                                 "refresh_token is required")
         tok = core_db.rotate_refresh_token(
-            db, body.refresh_token, access_ttl=cfg.access_token_ttl,
-            refresh_ttl=cfg.refresh_token_ttl or None)
+            db, body.refresh_token, access_ttl=rc.access_token_ttl,
+            refresh_ttl=rc.refresh_token_ttl or None)
         if tok is None:
             return _oauth_error("invalid_grant",
                                 "unknown, expired, or spent refresh token")

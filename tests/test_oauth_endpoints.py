@@ -1,13 +1,14 @@
 """Tests for the /v1/oauth/* enrollment endpoints and bearer auth on the
 main API (core/api.py), driven through FastAPI's TestClient over a real
 temporary database."""
+import copy
 from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from core import api, core_db
+from core import api, core_db, runtime_config
 
 DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
 FLEET = {"X-HONE-Fleet-Secret": "fleet-xyz"}
@@ -23,9 +24,9 @@ def ctx(tmp_path):
                             "-----END CERTIFICATE-----\n"
     app.state.config = type("Cfg", (), {
         "fleet_secret": "fleet-xyz",
-        "device_code_ttl": 900, "device_poll_interval": 5,
-        "access_token_ttl": 3600, "refresh_token_ttl": 0,
         "public_url": "https://core.example:8000"})()
+    app.state.runtime_config = runtime_config.RuntimeConfig(
+        copy.deepcopy(runtime_config.DEFAULTS))
     return SimpleNamespace(client=TestClient(app), db=db)
 
 

@@ -115,13 +115,13 @@ def _select_sources(wanted, available):
     return [s for s in wanted if s in available]
 
 
-def _gather_pass(cfg) -> dict:
+def _gather_pass(db_path, gather_sources) -> dict:
     """One synchronous GATHER pass over the selected gather modules, on its
        own database connection. Returns a per-module tally."""
-    db = core_db.connect(cfg.db_path)
+    db = core_db.connect(db_path)
     tally = {}
     try:
-        for name in _select_sources(cfg.gather_sources, gather_api.available()):
+        for name in _select_sources(gather_sources, gather_api.available()):
             try:
                 tally[name] = _gather_source(db, gather_api.load(name))
             except (Exception, SystemExit) as exc:
@@ -132,23 +132,27 @@ def _gather_pass(cfg) -> dict:
     return tally
 
 
-async def gather_once(cfg) -> None:
+async def gather_once(app) -> None:
     """Run one GATHER pass. Blocking (HTTP / git), so it runs in a worker
-       thread; the event loop keeps serving requests meanwhile."""
-    tally = await asyncio.to_thread(_gather_pass, cfg)
+       thread; the event loop keeps serving requests meanwhile. The live
+       runtime config is read here, so a Settings change applies next pass."""
+    tally = await asyncio.to_thread(
+        _gather_pass, app.state.config.db_path,
+        app.state.runtime_config.gather_sources)
     log.info("GATHER pass complete — %s",
              "; ".join(f"{name}: {t}" for name, t in tally.items())
              or "no sources")
 
 
-async def gather_loop(cfg) -> None:
-    """Run gather_once() every `cfg.gather_interval` seconds until cancelled.
-       A failed pass is logged and the loop continues — one bad pass must not
-       stop GATHER."""
-    log.info("GATHER loop started — interval %ds", cfg.gather_interval)
+async def gather_loop(app) -> None:
+    """Run gather_once() every `gather.interval_seconds` until cancelled — the
+       cadence is re-read from the live runtime config each cycle, so an
+       operator's Settings change applies on the next pass. A failed pass is
+       logged and the loop continues — one bad pass must not stop GATHER."""
+    log.info("GATHER loop started")
     while True:
         try:
-            await gather_once(cfg)
+            await gather_once(app)
         except Exception:
             log.exception("GATHER pass failed")
-        await asyncio.sleep(cfg.gather_interval)
+        await asyncio.sleep(app.state.runtime_config.gather_interval)
