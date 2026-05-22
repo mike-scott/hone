@@ -8,7 +8,7 @@ behind them. Harness machinery — **not** part of
 > **Status.** This describes the **target** architecture — a multi-tenant
 > containerized service. It supersedes the earlier single-host 3-stage
 > description. What runs *today* is a precursor: the loop is driven by hand,
-> `core_db.py` / `gather-modules/` / `refrepo.py` are single-host libraries,
+> `core_db.py` / `core/gather-modules/` / `refrepo.py` are single-host libraries,
 > and `hone.db` is still single-tier. See "Today vs. target" at the end.
 
 ## Governing principle
@@ -43,7 +43,7 @@ A containerized web service — **FastAPI + SQLite (WAL mode), one instance**,
 no AI, and **no kernel git repo**. Five jobs:
 
 1. **GATHER** (cron) — pull qualifying patchsets from the data sources
-   (`gather-modules/`, see `SOURCES.md`) into the corpus, recording each
+   (`core/gather-modules/`, see `SOURCES.md`) into the corpus, recording each
    patchset's declared `base_commit`. The producer that feeds the pipeline.
    The cron cadence is a hone-core **configuration option**, defaulting to
    **every 10 minutes**.
@@ -455,11 +455,11 @@ hone-core, not a node-facing API.
 
 ## Today vs. target
 
-**Exists today** (single-host precursor): `gather-modules/` (the
+**Exists today** (single-host precursor): `core/gather-modules/` (the
 `GatherModule` API), `refrepo.py`, `core_db.py` and a single-tier `hone.db` (44
 patchsets reviewed), `default-methodology.yaml` (the v1 seed methodology) and
 `methodology.schema.yaml` (its validation schema); the loop is run by hand. These become *libraries* of the target —
-`gather-modules/` drives hone-core's GATHER stage, `refrepo.py` goes
+`core/gather-modules/` drives hone-core's GATHER stage, `refrepo.py` goes
 node-side (the node owns its reference repo), and `core_db.py` becomes
 hone-core's data layer, reshaped into the three tiers.
 
