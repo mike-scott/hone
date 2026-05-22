@@ -12,7 +12,7 @@
 #
 # The Claude API token is supplied at runtime and never baked into the image.
 
-FROM python:3.13-slim
+FROM python:3.14-slim
 
 # Container-friendly Python: flushed logs, no .pyc clutter, no pip cache.
 ENV PYTHONUNBUFFERED=1 \

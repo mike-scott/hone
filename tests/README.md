@@ -1,14 +1,18 @@
 # tests
 
-Unit tests for hone. Run from the project root:
+Unit tests for hone. Run from the project root, on the **same Python the
+container images pin** (`core/Dockerfile` — currently 3.14):
 
 ```
-pip install -r core/requirements.txt -r requirements-dev.txt
+python3.14 -m venv .venv && . .venv/bin/activate
+pip install -r core/requirements.txt -r node/requirements.txt -r requirements-dev.txt
 pytest
 ```
 
 `conftest.py` puts the project root on `sys.path` so `core` / `node` import
-as packages. Current coverage:
+as packages, and **fails the run if the interpreter does not match** the
+Python version the Dockerfiles pin — the test environment must match the
+runtime environment. Current coverage:
 
 - `test_completion_record_schema.py` — `core/completion-record.schema.yaml`:
   the schema is valid draft-2020-12, well-formed records validate, malformed
@@ -23,6 +27,8 @@ as packages. Current coverage:
 - `test_oauth_endpoints.py` — the `/v1/oauth/*` device-grant endpoints and
   bearer auth on the main API.
 - `test_ui_enrollment.py` — the operator node-management / enrollment UI.
+- `test_ui_queue.py` — the review-queue home page and the queue query
+  helpers (`review_counts`, `list_reviews`).
 - `test_node_client.py` — the hone-node `HoneCoreClient`: identity
   persistence and the auth-failure paths.
 - `test_node_backoff.py` — the hone-node transient-failure backoff: which

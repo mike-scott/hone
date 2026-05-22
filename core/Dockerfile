@@ -13,7 +13,7 @@
 # (stored on the data volume) and serves HTTPS directly on port 8000 — there
 # is no external TLS-terminating proxy.
 
-FROM python:3.13-slim
+FROM python:3.14-slim
 
 # Container-friendly Python: flushed logs, no .pyc clutter, no pip cache.
 ENV PYTHONUNBUFFERED=1 \
