@@ -112,7 +112,7 @@ The same patchset gathered via two sources is recorded — and reviewed — once
 Dedup is keyed on the thread's **root Message-ID** in the `hone.db` ledger; the
 gather loop applies it via `core_db.is_handled()`. The model — idempotent
 re-ingestion, `change_id`-linked revisions — is specified in `ARCHITECTURE.md`
-(Multi-tenancy → Dedup).
+(Data model → Dedup).
 
 ## Stored patchsets — re-evaluation without re-pulling
 

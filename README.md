@@ -1,7 +1,7 @@
 # hone
 
-A multi-tenant service that blind-reviews Linux kernel patchsets against a
-versioned methodology, then measures itself against external review signal
+A service that blind-reviews Linux kernel patchsets against a versioned
+methodology, then measures itself against external review signal
 (AI bots **and** human maintainers) to self-hone that methodology. It is
 built from two deployable components, split by one governing rule:
 
@@ -26,28 +26,29 @@ see [`ARCHITECTURE.md`](ARCHITECTURE.md):
   arithmetic, serves the operator web UI, and owns `hone.db`. No AI, no
   kernel repo.
 - **AI node** — a containerized worker that starts from scratch: given only
-  four start parameters it bootstraps everything else, builds its own kernel
-  reference repo, and runs a claim loop over review and maintenance tasks.
-  The Claude token never leaves the node.
+  three start parameters it bootstraps everything else, enrols into the fleet,
+  builds its own kernel reference repo, and runs a claim loop over review and
+  maintenance tasks. The Claude token never leaves the node.
 - **`common/`** — the typed models for the REST payloads, shared by both
   tiers; see [`common/README.md`](common/README.md).
 
 ## Database design
 
-`hone.db` is one SQLite database holding three data tiers — see
-[`ARCHITECTURE.md`](ARCHITECTURE.md) → *Multi-tenancy*:
+`hone.db` is one SQLite database; `core_db.py` is its versioned data layer
+(`PRAGMA user_version` + migrations). It holds three groups of data — see
+[`ARCHITECTURE.md`](ARCHITECTURE.md) → *Data model*:
 
-- **Global corpus** — patchsets, messages, reviewer identities; gathered
-  once, shared by all clients.
-- **Global methodology** — the versioned methodology and the pooled
-  candidate-practice counters.
-- **Per-client** — `client_reviews` keyed `(client_id, root_message_id)`
-  and the findings hanging off them; isolated per client.
+- **Corpus** — patchsets, their patch archives, the external review signal,
+  and reviewer identities; gathered once from the data sources.
+- **Methodology** — the versioned methodology and the pooled candidate-
+  practice counters.
+- **Results** — `reviews`, keyed on the patchset's root Message-ID: the claim
+  queue and each patchset's completed review record. One review per patchset.
 
 A patchset's identity — and the cross-source dedup key — is its thread's
-**root Message-ID**; every message and finding key carries a PRIMARY KEY /
-UNIQUE constraint, so re-ingestion is an idempotent no-op. SQLite's WAL mode
-gives concurrent readers plus a serialized writer — exactly what the atomic
+**root Message-ID**; keys carry PRIMARY KEY / UNIQUE constraints, so
+re-ingestion is an idempotent no-op. SQLite's WAL mode gives concurrent
+readers plus a serialized writer — exactly what the atomic
 `UPDATE … RETURNING` claim protocol (lease-stamped, crash-recoverable)
 needs.
 
@@ -56,8 +57,9 @@ needs.
 Two images, two `docker-compose.yml` files, deployed separately. Both build
 from the **project root** so each image can `COPY common/`.
 
-- **hone-core** runs unprivileged on plain HTTP:8000 (TLS terminated
-  upstream) with a liveness probe; one mapped volume holds all of its state.
+- **hone-core** serves HTTPS on :8000 with a TLS certificate it generates on
+  first start; runs unprivileged with a `/healthz` liveness probe; one mapped
+  volume holds all of its state.
 - **AI node** has no inbound ports and no healthcheck — it only dials out;
   the Claude token is injected at runtime, never baked into the image.
 
@@ -81,7 +83,7 @@ deliberately kept out of the node-facing API.
 ## Status
 
 A precursor runs today (a hand-driven single-host loop); the target is the
-multi-tenant containerized service described here. See
+containerized service described here. See
 [`ARCHITECTURE.md`](ARCHITECTURE.md) → *Today vs. target* for what exists
 and what is still to build, and [`API.md`](API.md) → *Open* for the
 unspecified corners of the contract.

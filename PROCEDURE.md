@@ -7,8 +7,8 @@ signal drawn from kernel **mailing-list review threads**, and hones
 improvements.
 
 > This describes the **current single-host loop**, run by hand. The
-> multi-tenant containerized core/node design it is evolving toward is
-> in `ARCHITECTURE.md`; this procedure will be rewritten when that is built.
+> containerized core/node design it is evolving toward is in
+> `ARCHITECTURE.md`; this procedure will be rewritten when that is built.
 
 Files:
 - `core/gather-modules/<name>.py` — gather modules; each subclasses `GatherModule`

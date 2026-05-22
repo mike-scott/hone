@@ -5,8 +5,8 @@ shaped: operational steps live in `PROCEDURE.md`; this file is the *model*
 behind them. Harness machinery — **not** part of
 `~/PATCH-REVIEW-METHODOLOGY.md`.
 
-> **Status.** This describes the **target** architecture — a multi-tenant
-> containerized service. It supersedes the earlier single-host 3-stage
+> **Status.** This describes the **target** architecture — a containerized
+> service. It supersedes the earlier single-host 3-stage
 > description. What runs *today* is a precursor: the loop is driven by hand,
 > `core_db.py` / `core/gather-modules/` / `refrepo.py` are single-host libraries,
 > and `hone.db` is still single-tier. See "Today vs. target" at the end.
@@ -48,11 +48,11 @@ no AI, and **no kernel git repo**. Five jobs:
    The cron cadence is a hone-core **configuration option**, defaulting to
    **every 10 minutes**.
 2. **Serve the REST API** — hand out work claims, accept results, distribute
-   the current methodology, authenticate clients.
+   the current methodology, authenticate nodes.
 3. **Mechanical self-honing** — pooled candidate-practice counters,
    graduation-eligibility checks, threshold prunes (per `SCORING.md`). All
    arithmetic, no judgement.
-4. **Own `hone.db`** — the corpus, the methodology, the per-client results, the
+4. **Own `hone.db`** — the corpus, the methodology, the review results, the
    queues.
 5. **Serve the operator web UI** — the human-facing management surface; see
    *Operator web UI* below.
@@ -86,7 +86,7 @@ reasoning rather than a tool run.
 A node is a **task worker**: it claims tasks over the REST API, does the AI
 work, and reports back. Two task types:
 
-- **review task** — review one patchset for one client.
+- **review task** — review one patchset.
 - **maintenance task** — evaluate the candidate set against the methodology
   and propose changes (see "The merge gate").
 
@@ -149,16 +149,15 @@ Pages:
   queues.
 - **Manual submissions** — patchsets an operator uploads directly (a
   compressed `.tar.zst` patch archive), bypassing GATHER: a list of the
-  client's submissions and an upload form. A manual submission is **reviewed
+  submissions and an upload form. A manual submission is **reviewed
   but does not train the methodology** — with no external-source review to
   compare against, it is excluded from the self-honing loop (no source
   comparison, no candidate counter updates, no candidate nominations); the
   operator simply receives the review. The patchset is flagged `manual` so
   hone-core keeps it out of the self-honing machinery.
-- **Node management** — the registered tenants, the live node fleet, and the
-  **pending-enrollment queue**: an operator enters a node's device-grant
-  *user code* here to approve it and bind the new node to a tenant (see
-  *Auth, enrollment & transport*).
+- **Node management** — the live node fleet and the **pending-enrollment
+  queue**: an operator enters a node's device-grant *user code* here to
+  approve it and admit it to the fleet (see *Auth, enrollment & transport*).
 - **Settings** — the hone-core configuration options.
 - **Merge gate** — disposition the `methodology_proposals` queue (see *The
   merge gate*).
@@ -189,20 +188,18 @@ container image is ephemeral.
   scratch. It starts empty; the node self-populates it (see *AI node*), and a
   restarted node reuses it rather than re-cloning.
 
-## Multi-tenancy — three data tiers
+## Data model
 
-One hone-core instance serves many **pre-registered clients**, each with a client
-key. The tenancy boundary is confined to exactly one layer — *review results*.
-Everything else is shared:
+`hone.db` is one SQLite file holding three groups of data:
 
-| Tier | Contents | Scope |
-| --- | --- | --- |
-| **Global corpus** | `patchsets` (the patch metadata + `base_commit`), `patch_files`, `messages`, `patchset_sources`, reviewer identities (`reviewers`, `reviewer_emails`) | gathered once, shared by all clients |
-| **Global methodology** | the versioned methodology, the candidate practices + their **pooled** counters | shared; all clients' misses hone the one methodology |
-| **Per-client** | `clients` (the registered tenants), `client_reviews` keyed `(client_id, root_message_id)` — the review lifecycle, verdict, token cost — and the classified `findings` hanging off them | isolated per client |
+| Group | Contents |
+| --- | --- |
+| **Corpus** | `patchsets` (patch metadata + `base_commit`), `patch_blobs`, `patchset_sources`, `source_findings`, reviewer identities (`reviewers`, `reviewer_emails`) — gathered once from the data sources |
+| **Methodology** | the versioned methodology, and the candidate practices with their **pooled** self-honing counters |
+| **Results** | `reviews`, keyed on `root_message_id` — the claim queue and, on completion, the review record (verdict, findings, token cost) |
 
-A patchset is gathered once but **reviewed once per client**, independently.
-`patchsets` no longer carries review columns — those move to `client_reviews`.
+A patchset is gathered once and **reviewed once** — `reviews` carries one row
+per patchset.
 
 **Dedup.** A patchset's identity is the **root Message-ID** of its thread, so
 the same submission gathered via two sources is one `patchsets` row. Every
@@ -266,9 +263,8 @@ deterministic instance.
   endpoint (and the operator's approval queue) closed to anyone outside the
   fleet.
 - The **main API** (everything else) is reached with an OAuth **bearer
-  token**. The token carries the node's identity and its tenant (client); it
-  fully replaces the earlier per-request shared-secret + client-key header
-  pair.
+  token**. The token carries the node's identity; it fully replaces the
+  earlier per-request shared-secret + client-key header pair.
 
 **Node enrollment — the device authorization grant (RFC 8628).** A node is
 *added to the fleet by enrolling itself*, gated by a human:
@@ -277,9 +273,9 @@ deterministic instance.
    (presenting the fleet secret) and is issued a short **user code** and a
    verification URL. It logs them and begins polling.
 2. An operator opens hone-core's web UI, enters the user code, reviews the
-   node's self-described metadata, **binds it to a tenant (client)**, names
-   it, and approves — or denies. This human step is the trust anchor; it
-   replaces the earlier admin "pre-register a client key" call.
+   node's self-described metadata, names it, and approves — or denies. This
+   human step is the trust anchor; it replaces the earlier admin
+   "pre-register a client key" call.
 3. The node's poll to `POST /v1/oauth/token` then returns an **access token**,
    a **refresh token**, and hone-core's **CA certificate** (see *Transport*
    below). The node persists all three to its data volume and is now a fleet
@@ -310,10 +306,6 @@ keeping them apart:
   itself established through the gated, human-approved enrollment — not
   pre-provisioned out of band.
 
-**Admin** endpoints (e.g. registering a tenant) use a separate
-`X-HONE-Admin-Token`, an operator credential distinct from any node or fleet
-credential.
-
 ## Work lifecycle & the claim protocol
 
 hone-core does not push work; a node **claims** it. One atomic SQL
@@ -321,21 +313,21 @@ hone-core does not push work; a node **claims** it. One atomic SQL
 `claimed_by` / `claimed_at`. SQLite serializes writers, so two nodes never
 claim the same item.
 
-**Per-client review lifecycle** for a patchset:
+**Review lifecycle** for a patchset:
 
 ```
   (corpus: gathered, base_commit recorded)
         │
-        ▼  a client's node claims it
+        ▼  a node claims it
    claimable ──► claimed ──┬─► reviewed       (terminal — review produced)
         ▲           │      ├─► unappliable    (terminal — patch won't apply, unfixable)
         │           │      └─► deferred       (base tree unobtainable)
         └───────────┴────── lease expires / deferred ──► re-claimable
 
-  corpus-level terminal: skip  (e.g. an unresolvable Date — no client reviews it)
+  corpus-level terminal: skip  (e.g. an unresolvable Date — never reviewed)
 ```
 
-- **claimable** — in the corpus, not yet claimed/reviewed by *this* client.
+- **claimable** — in the corpus, not yet claimed or reviewed.
 - **claimed** — a node holds it; `claimed_at` stamps the lease. The **lease
   time** is a configuration option, default **30 min** — it bounds how long a
   silent node's work is held before re-offer, *not* how long a review may
@@ -343,7 +335,7 @@ claim the same item.
   a separate config option, default **5 min** — comfortably shorter, so a
   healthy node never loses its claim; only a node unreachable for the whole
   lease window is treated as dead and re-offered).
-- **reviewed** — terminal; the client's review + verdict + token cost recorded.
+- **reviewed** — terminal; the review + verdict + token cost recorded.
 - **unappliable** — terminal; the node obtained the base tree but the patch
   will **not** apply (`git apply --check` fails) and the node could not
   reconcile it, so no review was produced. Recorded with the node's reason.
@@ -359,7 +351,7 @@ claim the same item.
 claim protocol re-offers it. No work is lost or stuck. This is what makes the
 worker tier a pool of interchangeable nodes rather than one-shot tasks.
 
-## Self-honing across the tenancy boundary
+## Self-honing across the components
 
 The methodology is global, so the FINDINGS → methodology loop spans both
 components. Each part runs where its nature dictates:
@@ -374,7 +366,7 @@ components. Each part runs where its nature dictates:
 ## The merge gate
 
 A methodology change is the single highest-blast-radius mutation in the system
-— every client's every review is graded against it. So maintenance nodes
+— every review is graded against it. So maintenance nodes
 **propose**; a **human ratifies**. Two orthogonal axes:
 
 **The node's axis — recommendation** (what a maintenance task found). Each
@@ -496,10 +488,10 @@ any failure rejects it at submission, so it never reaches a human:
 *Accept*; the proposal is presented with an **evidence panel** so the decision
 is informed, not a rubber stamp — the diff, the magnitude metrics from layer
 2, the candidate's pooled stats (Applied / Confidence / unique-catches), the
-originating verified misses, and the submitting node's client provenance.
+originating verified misses, and the submitting node's identity.
 
 **4 — Node reputation.** Proposals that fail layer-2 validation or are
-*Rejected* at the gate are counted per enrolled node (and its tenant); a node
+*Rejected* at the gate are counted per enrolled node; a node
 whose proposals are consistently invalid or rejected is flagged for
 **enrollment revocation** — its tokens are revoked and it must re-enroll
 through the operator gate. A bad-acting node is caught by its track record,
@@ -514,14 +506,13 @@ autonomous decision.
 ## REST API
 
 The hone-core↔node wire contract is specified in **`API.md`** — base path
-`/v1`. It has three parts: the **OAuth / enrollment** endpoints
+`/v1`. It has two parts: the **OAuth / enrollment** endpoints
 `POST /v1/oauth/device_authorization` and `POST /v1/oauth/token`
-(fleet-secret-gated); the **work API** — `POST /v1/claims` (claim a task),
+(fleet-secret-gated); and the **work API** — `POST /v1/claims` (claim a task),
 `…/heartbeat`, `…/result` (the completion record), `GET …/blob`,
-`GET …/source-review`, `GET /v1/methodology` (bearer-token-authed); and the
-admin `POST /v1/clients` (register a tenant). The merge gate and the
-node-enrollment approval are **human web UI** on hone-core, not node-facing
-APIs.
+`GET …/source-review`, `GET /v1/methodology` (bearer-token-authed). The merge
+gate and the node-enrollment approval are **human web UI** on hone-core, not
+node-facing APIs.
 
 ## Today vs. target
 
@@ -531,8 +522,8 @@ patchsets reviewed), `core/default-methodology.yaml` (the v1 seed methodology) a
 `core/methodology.schema.yaml` (its validation schema); the loop is run by hand. These become *libraries* of the target —
 `core/gather-modules/` drives hone-core's GATHER stage, `refrepo.py` goes
 node-side (the node owns its reference repo), and `core_db.py` is now
-hone-core's data layer — the three-tier schema (corpus, methodology, and
-per-client results) with versioned migrations.
+hone-core's data layer — the schema (corpus, methodology, review results)
+with versioned migrations.
 
 **To build:** the FastAPI hone-core service (the REST API, the GATHER cron,
 the operator web UI, the methodology store + import/export/distill, the

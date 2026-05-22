@@ -5,8 +5,8 @@ admin surface). Companion to `ARCHITECTURE.md` — that file is the model, this
 is the wire contract. Harness machinery — **not** part of
 `~/PATCH-REVIEW-METHODOLOGY.md`.
 
-Scope: the OAuth / enrollment endpoints, the node-facing work API, and the
-admin endpoint. The merge-gate and node-approval human web UIs are out of
+Scope: the OAuth / enrollment endpoints and the node-facing work API. The
+merge-gate and node-approval human web UIs are out of
 scope (see `ARCHITECTURE.md`).
 
 ## Conventions
@@ -17,11 +17,10 @@ scope (see `ARCHITECTURE.md`).
 - **TLS required** on every request.
 - **Status codes** — `200` ok · `201` created · `204` no content (e.g. an
   empty work queue) · `400` malformed request, including the OAuth device-flow
-  states (see *Node enrollment*) · `401` missing/invalid/expired bearer token,
-  or a bad/missing fleet secret on the OAuth API · `403` authenticated but not
-  permitted (e.g. a revoked node) · `404` not found · `409` conflict (a lapsed
-  or already-resolved claim) · `422` body fails schema validation · `5xx`
-  server fault.
+  states (see *Node enrollment*) · `401` missing/invalid/expired/revoked bearer
+  token, or a bad/missing fleet secret on the OAuth API · `404` not found ·
+  `409` conflict (a lapsed or already-resolved claim) · `422` body fails schema
+  validation · `5xx` server fault.
 - **Error body** — `{"error": {"code": "<machine-code>", "message": "<text>"}}`.
 - **Retry discipline** (see `ARCHITECTURE.md` → Node resilience): a node
   retries `5xx` / timeouts with exponential backoff. A `401` on the main API
@@ -42,7 +41,6 @@ differently:
 | --- | --- | --- |
 | **OAuth / enrollment** | `POST /v1/oauth/*` | `X-HONE-Fleet-Secret` — the fleet-wide shared secret |
 | **Main API** | everything else under `/v1` | `Authorization: Bearer <access_token>` |
-| **Admin** | `POST /v1/clients` | `X-HONE-Admin-Token` |
 
 A node obtains its bearer token by **enrolling** — the device authorization
 grant, next section. The access token is short-lived; on a `401` the node
@@ -50,9 +48,8 @@ refreshes it via `POST /v1/oauth/token` and retries. The fleet secret is used
 **only** on the OAuth endpoints — it is the gate that lets a fleet member
 *begin* enrollment, and it is never sent on the main API.
 
-A missing/bad fleet secret on an OAuth endpoint → `401`. A
-missing/invalid/expired bearer token on the main API → `401`. A valid token
-whose node has been revoked → `403`.
+A missing/bad fleet secret on an OAuth endpoint → `401`. A missing, invalid,
+expired, or revoked bearer token on the main API → `401`.
 
 **TLS.** hone-core generates its own certificate authority and server
 certificate on first startup and serves HTTPS directly. A node receives
@@ -97,9 +94,9 @@ types. The pending enrollment expires `expires_in` seconds after issue.
 ### Operator approval
 
 Out of scope for this wire API: the operator opens hone-core's web UI, enters
-the `user_code`, reviews the node's self-description, **binds the node to a
-tenant (client)**, and approves or denies it (`ARCHITECTURE.md` → Node
-management). This human approval is the trust anchor for adding a node.
+the `user_code`, reviews the node's self-description, and approves or denies
+it (`ARCHITECTURE.md` → Node management). This human approval is the trust
+anchor for adding a node to the fleet.
 
 ### POST /v1/oauth/token — obtain / refresh tokens
 
@@ -147,9 +144,9 @@ A bad/missing fleet secret → `401`.
 
 ## POST /v1/claims — claim the next task
 
-A node claims one unit of work for its client. Atomic (`ARCHITECTURE.md` →
-claim protocol): two nodes never get the same task; a dead node's claim is
-re-offered once its lease lapses.
+A node claims one unit of work. Atomic (`ARCHITECTURE.md` → claim protocol):
+two nodes never get the same task; a dead node's claim is re-offered once its
+lease lapses.
 
 **Request** `{ "worker_id": "<node id>", "task_types": ["review"] }` —
 `task_types` is what this node can handle (`review`, `maintenance`); default
@@ -238,16 +235,6 @@ structure per `core/methodology.schema.yaml`, plus the `candidates[]` array). A
 node applies `checks` + `candidates` alike; the split tells it which
 applications to report as candidate outcomes. Optional `?version=N` pins a
 specific version (for a node finishing an in-flight review).
-
-## POST /v1/clients — register a tenant (admin)
-
-Registers a **client** — a tenant, the per-client review-isolation boundary. A
-node is bound to a tenant when an operator approves its enrollment, so this
-creates the tenant a node can then be assigned to. **No credential is minted
-here** — node credentials come only from enrollment.
-
-Auth: `X-HONE-Admin-Token`. **Request** `{ "name": "<tenant name>" }` ·
-**Response `201`** `{ "id": <int>, "name": "<tenant name>" }`.
 
 ---
 
