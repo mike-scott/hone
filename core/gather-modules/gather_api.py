@@ -29,6 +29,12 @@ and `Finding` below. The CLI shim serialises them to JSON — one object per
 line for `list`, a JSON array for `findings`. In-process, use `load(name)` to
 get a ready module instance and `available()` to enumerate modules.
 """
+# Deferred annotation evaluation — GatherModule defines a `list()` method,
+# which shadows the `list` builtin for the rest of the class body; without
+# this, evaluating a later `-> list[str]` annotation at class-definition time
+# raises TypeError on Python < 3.14 (where annotations are still eager).
+from __future__ import annotations
+
 import dataclasses
 import importlib.util
 import json
