@@ -137,10 +137,12 @@ never lose or double-count work.
 
 hone-core serves a **server-rendered management UI** alongside the REST
 API — one FastAPI app: `/v1/*` for nodes (JSON), the rest for operators
-(HTML). The stack is **Jinja2 templates + Bootstrap 5 + HTMX** — HTMX gives
-live updates and in-page actions with no single-page-app and no JavaScript
-build step (Bootstrap and HTMX are vendored static assets, which is why the
-hone-core image needs no Node toolchain).
+(HTML). The stack is **Jinja2 templates + Bootstrap 5 + HTMX** — the
+**AdminLTE 4** admin theme gives the layout (a fixed sidebar + header, with a
+light/dark toggle), and HTMX gives live updates and in-page actions with no
+single-page-app and no JavaScript build step (AdminLTE, Bootstrap, Bootstrap
+Icons and HTMX are vendored static assets, which is why the hone-core image
+needs no Node toolchain).
 
 Pages:
 - **Overview** — methodology-progress statistics, the patchset queues, node
