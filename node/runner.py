@@ -8,7 +8,7 @@ import logging
 import time
 
 from node import tasks
-from node.client import HoneCoreClient
+from node.client import EnrollmentError, HoneCoreClient
 from node.config import Config
 
 logging.basicConfig(
@@ -21,10 +21,15 @@ log = logging.getLogger("hone.node")
 def bootstrap(cfg: Config, client: HoneCoreClient) -> None:
     """Prepare everything a from-scratch node needs before its first claim.
 
+    Enrolls the node into the fleet via the device-authorization grant if it
+    is not already — this blocks until an operator approves it.
+
     TODO: build / update the reference kernel repo (node.refrepo) under
     cfg.repo_dir; fetch the current methodology (client.get_methodology()).
     """
-    log.info("bootstrap — not yet implemented (repo_dir=%s)", cfg.repo_dir)
+    client.ensure_enrolled()
+    log.info("bootstrap — reference repo + methodology not yet implemented "
+             "(repo_dir=%s)", cfg.repo_dir)
 
 
 def run_once(cfg: Config, client: HoneCoreClient) -> bool:
@@ -53,12 +58,13 @@ def main() -> None:
     try:
         bootstrap(cfg, client)
         # The claim loop. TODO: wrap transient failures in exponential
-        # backoff + jitter (ARCHITECTURE.md → Node resilience); fail fast on
-        # 401/403; persist an in-flight result to cfg.scratch_dir so it
-        # survives an outage / restart.
+        # backoff + jitter (ARCHITECTURE.md → Node resilience); persist an
+        # in-flight result to cfg.scratch_dir so it survives an outage.
         while True:
             did_work = run_once(cfg, client)
             if not did_work:
                 time.sleep(cfg.poll_interval)
+    except EnrollmentError as exc:
+        log.error("node stopping — %s", exc)
     finally:
         client.close()

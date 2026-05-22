@@ -80,6 +80,9 @@ def ensure_certs(cert_dir, hostnames):
             key_encipherment=False, data_encipherment=False,
             key_agreement=False, key_cert_sign=True, crl_sign=True,
             encipher_only=False, decipher_only=False), True)
+        .add_extension(
+            x509.SubjectKeyIdentifier.from_public_key(ca_key.public_key()),
+            False)
         .sign(ca_key, hashes.SHA256()))
 
     # --- the server certificate, signed by the CA --------------------------
@@ -102,6 +105,13 @@ def ensure_certs(cert_dir, hostnames):
         .add_extension(x509.ExtendedKeyUsage(
             [ExtendedKeyUsageOID.SERVER_AUTH]), False)
         .add_extension(_san(hostnames), False)
+        .add_extension(
+            x509.SubjectKeyIdentifier.from_public_key(srv_key.public_key()),
+            False)
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(
+                ca_key.public_key()),
+            False)
         .sign(ca_key, hashes.SHA256()))
 
     _write(paths[_CA_CERT],
