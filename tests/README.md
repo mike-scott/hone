@@ -25,3 +25,5 @@ as packages. Current coverage:
 - `test_ui_enrollment.py` — the operator node-management / enrollment UI.
 - `test_node_client.py` — the hone-node `HoneCoreClient`: identity
   persistence and the auth-failure paths.
+- `test_node_backoff.py` — the hone-node transient-failure backoff: which
+  failures are transient, `Retry-After`, and the retry loop.
