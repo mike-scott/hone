@@ -6,6 +6,7 @@ bootstrap (the reference repo / methodology) and task execution are stubs.
 """
 import logging
 import random
+import signal
 import time
 
 import httpx
@@ -119,6 +120,12 @@ def run_once(cfg: Config, client: HoneCoreClient) -> bool:
 
 def main() -> None:
     cfg = Config.from_env()
+    # `docker stop` sends SIGTERM. The node is PID 1, and the kernel does not
+    # apply a signal's default action to PID 1 — a SIGTERM left at its OS
+    # default is silently dropped, so docker SIGKILLs the node (exit 137).
+    # Route SIGTERM to the SIGINT handler: it raises KeyboardInterrupt, which
+    # unwinds the loop cleanly so `finally` runs.
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
     log.info("hone-node starting — core=%s", cfg.core_url)
     client = HoneCoreClient(cfg)
     try:
@@ -133,5 +140,7 @@ def main() -> None:
                 time.sleep(cfg.poll_interval)
     except EnrollmentError as exc:
         log.error("node stopping — %s", exc)
+    except KeyboardInterrupt:
+        log.info("hone-node stopping (SIGTERM/SIGINT)")
     finally:
         client.close()

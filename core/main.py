@@ -75,14 +75,21 @@ def run():
     """Container entry point — ensure the TLS material exists, then serve
        HTTPS directly with the self-generated server certificate (no external
        TLS-terminating proxy; see ARCHITECTURE.md → Auth, enrollment &
-       transport)."""
+       transport).
+
+       uvicorn installs its own SIGTERM / SIGINT handlers and shuts down
+       gracefully on `docker stop`; `timeout_graceful_shutdown` bounds the
+       connection drain so the container always exits well within docker's
+       stop grace period (10 s by default) instead of being SIGKILLed
+       (exit 137)."""
     import uvicorn
 
     cfg: Config = app.state.config
     _, cert_file, key_file = tls.ensure_certs(cfg.cert_dir, [cfg.hostname])
     log.info("hone-core serving HTTPS on :%d", cfg.http_port)
     uvicorn.run(app, host="0.0.0.0", port=cfg.http_port,
-                ssl_certfile=cert_file, ssl_keyfile=key_file)
+                ssl_certfile=cert_file, ssl_keyfile=key_file,
+                timeout_graceful_shutdown=8)
 
 
 if __name__ == "__main__":
