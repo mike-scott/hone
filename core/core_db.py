@@ -24,10 +24,12 @@ CLI:
   seed-mailmap <path>         merge reviewer identities from a kernel .mailmap
   stats                       row counts, per table
 """
+import hashlib
 import json
 import math
 import os
 import re
+import secrets
 import sqlite3
 import sys
 import time
@@ -221,8 +223,84 @@ CREATE TABLE maintenance_tasks (
 CREATE INDEX idx_maint_claimable ON maintenance_tasks(state, created_at);
 """
 
+_SCHEMA_V2 = """
+-- ---- Migration 2: OAuth node enrollment -----------------------------------
+-- Replaces the per-client `client_key` credential with OAuth. A node enrolls
+-- via the device authorization grant (RFC 8628), an operator approves it, and
+-- it is issued opaque bearer tokens. See API.md and ARCHITECTURE.md
+-- (Auth, enrollment & transport). Migrations run with foreign_keys off, so the
+-- clients rebuild below needs no foreign-key juggling.
+
+-- `clients` loses `client_key`: a client is now purely a tenant; node
+-- credentials come from enrollment, not a pre-shared key. SQLite cannot drop a
+-- UNIQUE column in place, so the table is rebuilt - ids are preserved, so the
+-- reviews.client_id foreign key still resolves.
+CREATE TABLE clients_new (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT,
+    state       TEXT NOT NULL DEFAULT 'active',   -- 'active' | 'disabled'
+    created_at  INTEGER
+);
+INSERT INTO clients_new (id,name,state,created_at)
+    SELECT id,name,state,created_at FROM clients;
+DROP TABLE clients;
+ALTER TABLE clients_new RENAME TO clients;
+
+-- An enrolled node: a worker that completed the device-grant flow and is bound
+-- to one tenant. `task_types` is the node's self-described capability set
+-- (a JSON array). A revoked node must re-enroll through the operator gate.
+CREATE TABLE nodes (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id    INTEGER NOT NULL REFERENCES clients(id),
+    name         TEXT,
+    task_types   TEXT,                            -- JSON array
+    state        TEXT NOT NULL DEFAULT 'active',  -- 'active' | 'revoked'
+    enrolled_at  INTEGER,
+    last_seen    INTEGER
+);
+CREATE INDEX idx_nodes_client ON nodes(client_id);
+
+-- A pending / decided device-authorization enrollment (RFC 8628). The node
+-- holds the `device_code`; only its hash is stored. `user_code` is the short
+-- code the operator types to approve - low-entropy but short-lived and inert
+-- until approved, so it is kept in clear for lookup. `client_id` / `node_id`
+-- are bound when an operator approves.
+CREATE TABLE node_enrollments (
+    id                INTEGER PRIMARY KEY,
+    device_code_hash  TEXT NOT NULL UNIQUE,
+    user_code         TEXT NOT NULL UNIQUE,
+    node_name         TEXT,
+    task_types        TEXT,                       -- JSON array
+    state             TEXT NOT NULL DEFAULT 'pending',  -- pending|approved|denied
+    client_id         INTEGER REFERENCES clients(id),
+    node_id           INTEGER REFERENCES nodes(id),
+    interval_seconds  INTEGER NOT NULL DEFAULT 5,
+    created_at        INTEGER,
+    expires_at        INTEGER,
+    last_polled_at    INTEGER,
+    decided_at        INTEGER,
+    decided_by        TEXT
+);
+
+-- Opaque bearer tokens issued to a node: one row per (access, refresh) pair.
+-- Only the hashes are stored - validation is a hash lookup, revocation a state
+-- flip. A refresh supersedes its row and issues a fresh pair.
+CREATE TABLE node_tokens (
+    id                  INTEGER PRIMARY KEY,
+    node_id             INTEGER NOT NULL REFERENCES nodes(id),
+    access_token_hash   TEXT NOT NULL UNIQUE,
+    access_expires_at   INTEGER NOT NULL,
+    refresh_token_hash  TEXT NOT NULL UNIQUE,
+    refresh_expires_at  INTEGER,                  -- NULL = no expiry
+    state               TEXT NOT NULL DEFAULT 'active',  -- active|superseded|revoked
+    created_at          INTEGER
+);
+CREATE INDEX idx_node_tokens_access ON node_tokens(access_token_hash);
+CREATE INDEX idx_node_tokens_refresh ON node_tokens(refresh_token_hash);
+"""
+
 # index i (0-based) => schema version i+1. Append a new migration to upgrade.
-_MIGRATIONS = [_SCHEMA_V1]
+_MIGRATIONS = [_SCHEMA_V1, _SCHEMA_V2]
 
 
 def connect(path=None):
@@ -236,8 +314,8 @@ def connect(path=None):
     db = sqlite3.connect(path or DB, check_same_thread=False)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA journal_mode=WAL")
+    migrate(db)                          # runs with foreign_keys off (default)
     db.execute("PRAGMA foreign_keys=ON")
-    migrate(db)
     return db
 
 
@@ -275,6 +353,35 @@ def norm_msgid(m):
 def _new_claim_id():
     """A claim id unique across the reviews and maintenance_tasks queues."""
     return uuid.uuid4().hex
+
+
+# --- OAuth credential generation / hashing ---------------------------------
+
+_USER_CODE_ALPHABET = "BCDFGHJKLMNPQRSTVWXZ"   # 20 unambiguous consonants
+
+
+def _token():
+    """A high-entropy opaque secret - a bearer token or a device code."""
+    return secrets.token_urlsafe(32)
+
+
+def _user_code():
+    """A short, human-typable enrollment code, grouped as 'XXXX-XXXX'."""
+    c = "".join(secrets.choice(_USER_CODE_ALPHABET) for _ in range(8))
+    return f"{c[:4]}-{c[4:]}"
+
+
+def _norm_user_code(s):
+    """Normalize an operator-typed user code - upper-cased, hyphen-grouped."""
+    s = (s or "").strip().upper().replace(" ", "")
+    if len(s) == 8 and "-" not in s:
+        s = f"{s[:4]}-{s[4:]}"
+    return s
+
+
+def _hash(secret):
+    """The stored form of a token / device code - the secret is never kept."""
+    return hashlib.sha256(secret.encode()).hexdigest()
 
 
 # ===========================================================================
@@ -443,28 +550,219 @@ def wilson_lower(k, n, z=1.96):
 # Tier 3 - clients
 # ===========================================================================
 
-def register_client(db, client_key, name=None):
-    """Pre-authorize a client key (the admin POST /v1/clients). Idempotent on
-       the key, and fans the existing corpus out to the client. Returns the id."""
-    db.execute("INSERT OR IGNORE INTO clients (client_key,name,created_at) "
-               "VALUES (?,?,?)", (client_key, name, int(time.time())))
+def register_client(db, name=None):
+    """Register a tenant (the admin POST /v1/clients) and fan the existing
+       corpus out to it as claimable reviews. Returns the new client id. A
+       client no longer carries a credential - its nodes authenticate with
+       bearer tokens obtained by enrolling (see the OAuth section below)."""
+    cur = db.execute("INSERT INTO clients (name,created_at) VALUES (?,?)",
+                     (name, int(time.time())))
     db.commit()
-    cid = db.execute("SELECT id FROM clients WHERE client_key=?",
-                     (client_key,)).fetchone()["id"]
+    cid = cur.lastrowid
     enqueue_reviews_for_client(db, cid)
     return cid
 
 
-def get_client(db, client_key):
-    """The client row for a key, as a dict, or None. Disabled clients are
+def get_client(db, client_id):
+    """The client (tenant) row as a dict, or None. Disabled clients are
        included - the caller checks `state`."""
-    row = db.execute("SELECT * FROM clients WHERE client_key=?",
-                     (client_key,)).fetchone()
+    row = db.execute("SELECT * FROM clients WHERE id=?",
+                     (client_id,)).fetchone()
     return dict(row) if row else None
 
 
 def list_clients(db):
     return [dict(r) for r in db.execute("SELECT * FROM clients ORDER BY id")]
+
+
+# ===========================================================================
+# OAuth node enrollment & bearer tokens  (see API.md, ARCHITECTURE.md)
+# ===========================================================================
+
+def create_enrollment(db, node_name=None, task_types=None,
+                      ttl_seconds=900, interval=5):
+    """Begin a device-authorization enrollment (POST /v1/oauth/device_
+       authorization). Returns {device_code, user_code, expires_in, interval}.
+       `device_code` and `user_code` are returned ONCE - only their stored
+       forms are kept (device_code hashed; user_code in clear, for the
+       operator's approval lookup)."""
+    now = int(time.time())
+    device_code = _token()
+    for _ in range(10):                    # retry an (astronomically rare) clash
+        try:
+            db.execute(
+                "INSERT INTO node_enrollments (device_code_hash,user_code,"
+                "node_name,task_types,interval_seconds,created_at,expires_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (_hash(device_code), _user_code(), node_name,
+                 json.dumps(task_types) if task_types is not None else None,
+                 interval, now, now + ttl_seconds))
+            break
+        except sqlite3.IntegrityError:
+            continue
+    else:
+        raise RuntimeError("could not allocate a unique user_code")
+    db.commit()
+    row = db.execute("SELECT user_code FROM node_enrollments "
+                     "WHERE device_code_hash=?", (_hash(device_code),)).fetchone()
+    return {"device_code": device_code, "user_code": row["user_code"],
+            "expires_in": ttl_seconds, "interval": interval}
+
+
+def get_enrollment_by_device_code(db, device_code):
+    """The enrollment row for a device_code, as a dict, or None - the token
+       endpoint's lookup when a node polls."""
+    row = db.execute("SELECT * FROM node_enrollments WHERE device_code_hash=?",
+                     (_hash(device_code),)).fetchone()
+    return dict(row) if row else None
+
+
+def get_enrollment_by_user_code(db, user_code):
+    """The enrollment row for a user_code, as a dict, or None - the operator
+       approval lookup. The code is normalized first."""
+    row = db.execute("SELECT * FROM node_enrollments WHERE user_code=?",
+                     (_norm_user_code(user_code),)).fetchone()
+    return dict(row) if row else None
+
+
+def list_pending_enrollments(db):
+    """Pending, unexpired enrollments awaiting an operator decision."""
+    now = int(time.time())
+    return [dict(r) for r in db.execute(
+        "SELECT * FROM node_enrollments WHERE state='pending' "
+        "AND expires_at>? ORDER BY created_at", (now,))]
+
+
+def set_enrollment_polled(db, enrollment_id, when=None):
+    """Stamp `last_polled_at` - the token endpoint records each poll so a
+       too-fast poll can be answered with `slow_down`."""
+    db.execute("UPDATE node_enrollments SET last_polled_at=? WHERE id=?",
+               (when if when is not None else int(time.time()), enrollment_id))
+    db.commit()
+
+
+def approve_enrollment(db, user_code, client_id, node_name=None,
+                       decided_by=None):
+    """Operator approval: bind the enrollment to a tenant, create its `nodes`
+       row, and mark the enrollment approved. Returns the new node id. Raises
+       KeyError if the user_code is unknown, ValueError if the enrollment is
+       not pending or has expired."""
+    enr = get_enrollment_by_user_code(db, user_code)
+    if enr is None:
+        raise KeyError(user_code)
+    if enr["state"] != "pending":
+        raise ValueError(f"enrollment already {enr['state']}")
+    if enr["expires_at"] is not None and enr["expires_at"] <= int(time.time()):
+        raise ValueError("enrollment expired")
+    now = int(time.time())
+    node_id = db.execute(
+        "INSERT INTO nodes (client_id,name,task_types,state,enrolled_at) "
+        "VALUES (?,?,?,'active',?)",
+        (client_id, node_name or enr["node_name"], enr["task_types"],
+         now)).lastrowid
+    db.execute("UPDATE node_enrollments SET state='approved', client_id=?, "
+               "node_id=?, decided_at=?, decided_by=? WHERE id=?",
+               (client_id, node_id, now, decided_by, enr["id"]))
+    db.commit()
+    return node_id
+
+
+def deny_enrollment(db, user_code, decided_by=None):
+    """Operator denial. Raises KeyError if the user_code is unknown,
+       ValueError if the enrollment is not pending."""
+    enr = get_enrollment_by_user_code(db, user_code)
+    if enr is None:
+        raise KeyError(user_code)
+    if enr["state"] != "pending":
+        raise ValueError(f"enrollment already {enr['state']}")
+    db.execute("UPDATE node_enrollments SET state='denied', decided_at=?, "
+               "decided_by=? WHERE id=?",
+               (int(time.time()), decided_by, enr["id"]))
+    db.commit()
+
+
+def issue_tokens(db, node_id, access_ttl=3600, refresh_ttl=None):
+    """Issue a fresh (access, refresh) token pair for a node. Returns
+       {access_token, refresh_token, expires_in}; the tokens are returned ONCE
+       (only their hashes are stored). `refresh_ttl` None => the refresh token
+       does not expire."""
+    now = int(time.time())
+    access, refresh = _token(), _token()
+    db.execute(
+        "INSERT INTO node_tokens (node_id,access_token_hash,access_expires_at,"
+        "refresh_token_hash,refresh_expires_at,state,created_at) "
+        "VALUES (?,?,?,?,?,'active',?)",
+        (node_id, _hash(access), now + access_ttl, _hash(refresh),
+         now + refresh_ttl if refresh_ttl else None, now))
+    db.commit()
+    return {"access_token": access, "refresh_token": refresh,
+            "expires_in": access_ttl}
+
+
+def resolve_access_token(db, access_token):
+    """The node behind a bearer access token, as a dict (the `nodes` row,
+       including its `client_id`), or None if the token is unknown, expired,
+       superseded/revoked, or its node is revoked. Stamps the node's
+       `last_seen`. This is the per-request auth check for the main API."""
+    now = int(time.time())
+    row = db.execute(
+        "SELECT n.*, t.access_expires_at, t.state AS token_state "
+        "FROM node_tokens t JOIN nodes n ON n.id=t.node_id "
+        "WHERE t.access_token_hash=?", (_hash(access_token),)).fetchone()
+    if row is None or row["token_state"] != "active" \
+            or row["access_expires_at"] <= now or row["state"] != "active":
+        return None
+    db.execute("UPDATE nodes SET last_seen=? WHERE id=?", (now, row["id"]))
+    db.commit()
+    return {k: row[k] for k in row.keys()
+            if k not in ("access_expires_at", "token_state")}
+
+
+def rotate_refresh_token(db, refresh_token, access_ttl=3600, refresh_ttl=None):
+    """The refresh grant: validate a refresh token, supersede its pair, and
+       issue a fresh pair for the same node. Returns the new
+       {access_token, refresh_token, expires_in}, or None if the refresh token
+       is unknown, expired, already used, revoked, or its node is revoked."""
+    now = int(time.time())
+    row = db.execute(
+        "SELECT t.id, t.node_id, t.state, t.refresh_expires_at, "
+        "n.state AS node_state FROM node_tokens t JOIN nodes n ON n.id=t.node_id "
+        "WHERE t.refresh_token_hash=?", (_hash(refresh_token),)).fetchone()
+    if row is None or row["state"] != "active" \
+            or row["node_state"] != "active":
+        return None
+    if row["refresh_expires_at"] is not None \
+            and row["refresh_expires_at"] <= now:
+        return None
+    db.execute("UPDATE node_tokens SET state='superseded' WHERE id=?",
+               (row["id"],))
+    db.commit()
+    return issue_tokens(db, row["node_id"], access_ttl, refresh_ttl)
+
+
+def revoke_node(db, node_id):
+    """Revoke an enrolled node - mark it revoked and kill all its tokens. The
+       node must re-enroll through the operator gate to return."""
+    db.execute("UPDATE nodes SET state='revoked' WHERE id=?", (node_id,))
+    db.execute("UPDATE node_tokens SET state='revoked' WHERE node_id=?",
+               (node_id,))
+    db.commit()
+
+
+def get_node(db, node_id):
+    """The node row as a dict, or None."""
+    row = db.execute("SELECT * FROM nodes WHERE id=?", (node_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def list_nodes(db, client_id=None):
+    """Enrolled nodes, all or for one tenant, as a list of dicts."""
+    if client_id is None:
+        rows = db.execute("SELECT * FROM nodes ORDER BY id")
+    else:
+        rows = db.execute("SELECT * FROM nodes WHERE client_id=? ORDER BY id",
+                          (client_id,))
+    return [dict(r) for r in rows]
 
 
 # ===========================================================================
@@ -788,7 +1086,8 @@ def main():
         print("seeded", seed_mailmap(db, a[2]), "alias email(s)")
     elif cmd == "stats":
         for t in ("patchsets", "patch_blobs", "patchset_sources",
-                  "source_findings", "reviewers", "clients", "reviews",
+                  "source_findings", "reviewers", "clients", "nodes",
+                  "node_enrollments", "node_tokens", "reviews",
                   "maintenance_tasks", "methodology_versions",
                   "methodology_candidates", "methodology_proposals"):
             n = db.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
