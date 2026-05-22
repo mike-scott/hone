@@ -42,14 +42,10 @@ def _when(ts):
 
 
 @router.get("/", response_class=HTMLResponse)
-async def overview(request: Request):
-    return templates.TemplateResponse(request, "overview.html")
-
-
-@router.get("/queue", response_class=HTMLResponse)
 async def queue(request: Request):
-    return templates.TemplateResponse(request, "page.html",
-                                      {"page_title": "Queue management"})
+    """The queue — the operator UI's home page; most UI functionality will
+       land here."""
+    return templates.TemplateResponse(request, "queue.html")
 
 
 @router.get("/submissions", response_class=HTMLResponse)
