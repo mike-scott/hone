@@ -132,7 +132,7 @@ discipline; the API does not enforce ordering).
 **Response `200`** — the distilled methodology the node reviews against, as
 JSON: `{ version, principles[], stages[], checks[], candidates[],
 severity_scale, report_finalization }` (`ARCHITECTURE.md` → distill;
-structure per `methodology.schema.yaml`, plus the `candidates[]` array). A
+structure per `core/methodology.schema.yaml`, plus the `candidates[]` array). A
 node applies `checks` + `candidates` alike; the split tells it which
 applications to report as candidate outcomes. Optional `?version=N` pins a
 specific version (for a node finishing an in-flight review).
@@ -306,7 +306,7 @@ a malformed proposal (counting against the node's reputation). Idempotent on
 ## Open / not yet specified
 
 - A formal JSON Schema for the completion record (mirroring
-  `methodology.schema.yaml`'s role for the methodology).
+  `core/methodology.schema.yaml`'s role for the methodology).
 - Whether the shared-secret is upgraded from a presented header to per-request
   signing.
 - Pagination / listing endpoints, if any prove necessary for operators.

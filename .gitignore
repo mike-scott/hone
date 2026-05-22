@@ -5,8 +5,9 @@ archive/
 # Python bytecode cache.
 __pycache__/
 
-# The SQLite ledger — local accumulated state. Recreate with: hone_db.py init
-hone.db
+# The SQLite database — local state. Recreate with: core/core_db.py init.
+# Covers hone.db, its WAL sidecars, and the preserved hone.db.precursor.
+hone.db*
 
 # Staged base-tree worktrees produced by the STAGE stage (refrepo.py).
 staged/

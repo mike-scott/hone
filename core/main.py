@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from core import api, gather, ui
+from core import api, core_db, gather, ui
 from core.config import Config
 
 logging.basicConfig(
@@ -29,14 +29,19 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 async def lifespan(app: FastAPI):
     cfg: Config = app.state.config
     log.info("hone-core starting — db=%s", cfg.db_path)
-    # TODO: open and migrate the database (the multi-tenant schema).
-    # TODO: bootstrap the methodology — import default-methodology.yaml as
-    #       DB version 1 if the methodology store is empty.
+    db = core_db.connect(cfg.db_path)
+    version = core_db.bootstrap_methodology(
+        db,
+        os.path.join(_HERE, "default-methodology.yaml"),
+        os.path.join(_HERE, "methodology.schema.yaml"))
+    app.state.db = db
+    log.info("database ready — methodology active at version %d", version)
     gather_task = asyncio.create_task(gather.gather_loop(cfg.gather_interval))
     try:
         yield
     finally:
         gather_task.cancel()
+        db.close()
         log.info("hone-core stopping")
 
 

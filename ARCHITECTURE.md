@@ -209,15 +209,15 @@ not the source of truth (the candidate practices are already a table). Three
 operations on the store:
 
 - **Import** — load a methodology from its portable representation —
-  `default-methodology.yaml`, a structured YAML file — into the DB as a new
-  version, **after validating it against `methodology.schema.yaml`** (a
+  `core/default-methodology.yaml`, a structured YAML file — into the DB as a new
+  version, **after validating it against `core/methodology.schema.yaml`** (a
   JSON Schema; a malformed methodology is rejected, not imported).
-  `default-methodology.yaml` (the harness's pure-analysis methodology, a
+  `core/default-methodology.yaml` (the harness's pure-analysis methodology, a
   cleaned derivative of `~/PATCH-REVIEW-METHODOLOGY.md`) ships in the repo and
   bootstraps DB v1; import also brings human-edited revisions back in. The
   host's `~/PATCH-REVIEW-METHODOLOGY.md` is a separate, untouched file.
 - **Export** — render the DB methodology back to YAML (the
-  `default-methodology.yaml` format) — for human reading, offline editing,
+  `core/default-methodology.yaml` format) — for human reading, offline editing,
   backup, and git-tracking; the operator can export over the default and
   commit it.
 - **Distill** — project the canonical methodology + the active candidate
@@ -457,21 +457,22 @@ hone-core, not a node-facing API.
 
 **Exists today** (single-host precursor): `core/gather-modules/` (the
 `GatherModule` API), `refrepo.py`, `core_db.py` and a single-tier `hone.db` (44
-patchsets reviewed), `default-methodology.yaml` (the v1 seed methodology) and
-`methodology.schema.yaml` (its validation schema); the loop is run by hand. These become *libraries* of the target —
+patchsets reviewed), `core/default-methodology.yaml` (the v1 seed methodology) and
+`core/methodology.schema.yaml` (its validation schema); the loop is run by hand. These become *libraries* of the target —
 `core/gather-modules/` drives hone-core's GATHER stage, `refrepo.py` goes
-node-side (the node owns its reference repo), and `core_db.py` becomes
-hone-core's data layer, reshaped into the three tiers.
+node-side (the node owns its reference repo), and `core_db.py` is now
+hone-core's data layer — the three-tier schema (corpus, methodology, and
+per-client results) with versioned migrations.
 
 **To build:** the FastAPI hone-core service (the REST API, the GATHER cron,
 the operator web UI, the methodology store + import/export/distill, the
 `methodology_proposals` queue and merge gate); the node's task execution
-(review + maintenance); the multi-tenant schema migration. Containerization
+(review + maintenance). Containerization
 has **started** — both component images (`core/Dockerfile`,
 `node/Dockerfile`), each with its app skeleton, the `common/` folder, and a
 per-component `docker-compose.yml` in `core/` and `node/` (run separately)
 all exist.
-The bootstrap step imports `default-methodology.yaml` as DB v1; the host's
+The bootstrap step imports `core/default-methodology.yaml` as DB v1; the host's
 `~/PATCH-REVIEW-METHODOLOGY.md` is left unchanged.
 
 **Open / not yet specified:** the architecture and the REST contract are
