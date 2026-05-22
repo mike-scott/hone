@@ -14,5 +14,14 @@ as packages. Current coverage:
   the schema is valid draft-2020-12, well-formed records validate, malformed
   ones are rejected, and the review / maintenance shapes are isolated.
 - `test_api_submit_result.py` — `POST /v1/claims/{claim_id}/result`: the
-  schema validation, `state`/`outcome` guard, and dispatch in `submit_result`
-  (with `core_db` stubbed).
+  schema validation, `state`/`outcome` guard, and dispatch in `submit_result`.
+- `test_tls.py` — `core/tls.py`: the self-generated CA + server certificate
+  (chain, SAN, key identifiers, idempotence).
+- `test_core_db_enrollment.py` — the OAuth enrollment / token data layer
+  (schema migration 2): enrollments, approval, token issue/resolve/rotate,
+  node revocation.
+- `test_oauth_endpoints.py` — the `/v1/oauth/*` device-grant endpoints and
+  bearer auth on the main API.
+- `test_ui_enrollment.py` — the operator node-management / enrollment UI.
+- `test_node_client.py` — the hone-node `HoneCoreClient`: identity
+  persistence and the auth-failure paths.
