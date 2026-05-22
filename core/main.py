@@ -41,7 +41,7 @@ async def lifespan(app: FastAPI):
     tls.ensure_certs(cfg.cert_dir, [cfg.hostname])
     app.state.ca_cert_pem = tls.ca_cert_pem(cfg.cert_dir)
     log.info("TLS material ready — cert_dir=%s", cfg.cert_dir)
-    gather_task = asyncio.create_task(gather.gather_loop(cfg.gather_interval))
+    gather_task = asyncio.create_task(gather.gather_loop(cfg))
     try:
         yield
     finally:

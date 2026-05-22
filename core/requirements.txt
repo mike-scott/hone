@@ -10,3 +10,4 @@ pyyaml>=6.0                # methodology import/export, config files
 jsonschema>=4.23           # validate a methodology against methodology.schema.yaml
 python-multipart>=0.0.12   # form posts + file upload (operator UI, manual submissions)
 cryptography>=43           # first-start TLS CA + server certificate generation
+zstandard>=0.23            # pack gathered patchsets into .tar.zst archives

@@ -27,3 +27,5 @@ as packages. Current coverage:
   persistence and the auth-failure paths.
 - `test_node_backoff.py` — the hone-node transient-failure backoff: which
   failures are transient, `Retry-After`, and the retry loop.
+- `test_gather.py` — the GATHER pass: a gather module's patchsets ingested
+  into the corpus (dedup, `.tar.zst` blob, findings, queued review).
