@@ -19,6 +19,7 @@ class Config:
     hostname:             str   # HONE_HOSTNAME — the TLS cert / verification host
     public_url:           str   # HONE_PUBLIC_URL — base URL nodes/operators reach
     gather_interval:      int   # seconds between GATHER runs (default 600 = 10 min)
+    gather_sources:       tuple # HONE_GATHER_SOURCES — () = every installed source
     lease_seconds:        int   # claim lease (default 1800 = 30 min)
     heartbeat_seconds:    int   # node heartbeat interval (default 300 = 5 min)
     access_token_ttl:     int   # HONE_ACCESS_TOKEN_TTL — node access-token life
@@ -49,6 +50,9 @@ class Config:
             public_url           = (os.environ.get("HONE_PUBLIC_URL")
                                      or f"https://{host}:{ext_port}"),
             gather_interval      = int(os.environ.get("HONE_GATHER_INTERVAL", "600")),
+            gather_sources       = tuple(
+                s.strip() for s in
+                os.environ.get("HONE_GATHER_SOURCES", "").split(",") if s.strip()),
             lease_seconds        = int(os.environ.get("HONE_LEASE_SECONDS", "1800")),
             heartbeat_seconds    = int(os.environ.get("HONE_HEARTBEAT_SECONDS", "300")),
             access_token_ttl     = int(os.environ.get("HONE_ACCESS_TOKEN_TTL", "3600")),

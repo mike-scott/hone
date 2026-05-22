@@ -100,13 +100,28 @@ def _gather_source(db, module) -> dict:
     return stats
 
 
+def _select_sources(wanted, available):
+    """The gather modules to run this pass: the configured subset
+       (`HONE_GATHER_SOURCES`, in the operator's order) intersected with what
+       is installed; or, when none is configured, every installed module. A
+       configured name that is not installed is dropped with a warning."""
+    if not wanted:
+        return list(available)
+    unknown = [s for s in wanted if s not in available]
+    if unknown:
+        log.warning("GATHER: HONE_GATHER_SOURCES names unknown source(s) %s "
+                    "— ignored (installed: %s)",
+                    ", ".join(unknown), ", ".join(available) or "none")
+    return [s for s in wanted if s in available]
+
+
 def _gather_pass(cfg) -> dict:
-    """One synchronous GATHER pass over every registered gather module, on its
+    """One synchronous GATHER pass over the selected gather modules, on its
        own database connection. Returns a per-module tally."""
     db = core_db.connect(cfg.db_path)
     tally = {}
     try:
-        for name in gather_api.available():
+        for name in _select_sources(cfg.gather_sources, gather_api.available()):
             try:
                 tally[name] = _gather_source(db, gather_api.load(name))
             except (Exception, SystemExit) as exc:

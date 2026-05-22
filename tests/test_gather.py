@@ -92,3 +92,25 @@ def test_gather_is_idempotent(db):
     stats = gather._gather_source(db, _FakeModule(_refs()))
     assert stats == {"seen": 2, "gathered": 0, "skipped": 0, "known": 2}
     assert len(core_db.source_findings(db, "<root-1@x>")) == 1   # no re-ingest
+
+
+# --- source selection (HONE_GATHER_SOURCES) --------------------------------
+
+_INSTALLED = ["linux-arm-msm", "sashiko"]
+
+
+def test_select_sources_default_is_every_installed():
+    assert gather._select_sources((), _INSTALLED) == _INSTALLED
+
+
+def test_select_sources_restricts_to_the_configured_set():
+    assert gather._select_sources(("sashiko",), _INSTALLED) == ["sashiko"]
+
+
+def test_select_sources_keeps_the_operators_order():
+    assert gather._select_sources(("sashiko", "linux-arm-msm"),
+                                  _INSTALLED) == ["sashiko", "linux-arm-msm"]
+
+
+def test_select_sources_drops_unknown_names():
+    assert gather._select_sources(("sashiko", "nope"), _INSTALLED) == ["sashiko"]
