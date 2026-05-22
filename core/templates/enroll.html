@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}Enroll a node · hone-core{% endblock %}
+{% block content %}
+<h1 class="h3 mb-4">Enroll a node</h1>
+
+{% if error %}
+<div class="alert alert-warning" style="max-width: 36rem">{{ error }}</div>
+{% endif %}
+
+{% if enrollment %}
+<div class="card" style="max-width: 36rem">
+  <div class="card-body">
+    <p class="mb-3">
+      Node <strong>{{ enrollment.node_name or "unnamed" }}</strong> is
+      requesting to join the fleet.
+    </p>
+    <dl class="row mb-3">
+      <dt class="col-sm-4">User code</dt>
+      <dd class="col-sm-8"><code>{{ enrollment.user_code }}</code></dd>
+      <dt class="col-sm-4">Capabilities</dt>
+      <dd class="col-sm-8">{{ enrollment.task_types_display }}</dd>
+      <dt class="col-sm-4">Requested</dt>
+      <dd class="col-sm-8">{{ enrollment.requested_display }}</dd>
+    </dl>
+    <form method="post"
+          action="/nodes/enrollments/{{ enrollment.user_code }}/approve"
+          class="d-flex gap-2 mb-2">
+      <select name="client_id" class="form-select" required>
+        <option value="" selected disabled>approve to tenant…</option>
+        {% for c in clients %}
+        <option value="{{ c.id }}">{{ c.name or ("client " ~ c.id) }}</option>
+        {% endfor %}
+      </select>
+      <button class="btn btn-success text-nowrap"
+              {% if not clients %}disabled{% endif %}>Approve</button>
+    </form>
+    <form method="post"
+          action="/nodes/enrollments/{{ enrollment.user_code }}/deny">
+      <button class="btn btn-outline-danger">Deny</button>
+    </form>
+    {% if not clients %}
+    <p class="text-warning small mt-2 mb-0">
+      No tenants exist yet — add one on the
+      <a href="/nodes">Node management</a> page first.
+    </p>
+    {% endif %}
+  </div>
+</div>
+{% else %}
+<p class="text-muted">
+  Enter the user code the node logged on startup to review and approve it.
+</p>
+<form method="get" action="/enroll" class="d-flex gap-2"
+      style="max-width: 24rem">
+  <input name="code" class="form-control" placeholder="XXXX-XXXX"
+         value="{{ code or '' }}" autofocus required>
+  <button class="btn btn-primary">Look up</button>
+</form>
+{% endif %}
+{% endblock %}
