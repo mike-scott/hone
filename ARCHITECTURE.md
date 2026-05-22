@@ -158,7 +158,8 @@ Pages:
 - **Node management** — the live node fleet and the **pending-enrollment
   queue**: an operator enters a node's device-grant *user code* here to
   approve it and admit it to the fleet (see *Auth, enrollment & transport*).
-- **Settings** — the hone-core configuration options.
+- **Settings** — view the deployment configuration and edit the
+  operator-tunable settings; see *Configuration & the Settings page*.
 - **Merge gate** — disposition the `methodology_proposals` queue (see *The
   merge gate*).
 - Reporting pages — later.
@@ -187,6 +188,85 @@ container image is ephemeral.
 - **Node** — its volume holds the reference kernel clone(s) and review
   scratch. It starts empty; the node self-populates it (see *AI node*), and a
   restarted node reuses it rather than re-cloning.
+
+## Configuration & the Settings page
+
+hone-core's configuration is in two tiers; the operator web UI's **Settings**
+page is the surface for the second.
+
+**Deployment configuration** — environment variables, set at container start
+(`core/.env`; see `core/.env.example`): the secrets (`HONE_FLEET_SECRET`,
+`HONE_ADMIN_TOKEN`), the TLS / addressing identity (`HONE_HOSTNAME`,
+`HONE_PUBLISH_PORT`, `HONE_PUBLIC_URL`), and the data-volume paths. Changing
+any of these is a **redeploy**, not a UI action — the Settings page shows them
+**read-only** (secrets masked), for reference only.
+
+**Operator-tunable configuration** — the cadences, lifetimes, and thresholds
+an operator may adjust on a running instance. These live in a YAML file on the
+data volume, `HONE_CONFIG` (default `/data/config.yaml`), which the Settings
+page **edits**:
+
+```yaml
+# /data/config.yaml — hone-core operator-tunable settings
+gather:
+  interval_seconds: 600
+  sources: []              # [] = every installed gather module
+work_queue:
+  lease_seconds: 1800
+  heartbeat_seconds: 300
+enrollment:
+  access_token_ttl: 3600
+  refresh_token_ttl: 0     # 0 = no expiry
+  device_code_ttl: 900
+  device_poll_interval: 5
+merge_gate:
+  redraft_cap: 3
+```
+
+**Layering.** On startup hone-core resolves its effective tunable config as
+*built-in defaults* overlaid by *`config.yaml`*. On first run, when no
+`config.yaml` exists, hone-core writes one from the defaults — an env var for
+a tunable key, if set, seeds that key (a convenience for
+infrastructure-as-code). Thereafter **`config.yaml` is authoritative**: the
+Settings page is the way to change a tunable, and an operator's edit is never
+silently overridden by a stale env var.
+
+| Group | Setting | Default |
+| --- | --- | --- |
+| GATHER | cron cadence | 600 s |
+| GATHER | enabled sources | all installed |
+| Work queue | claim lease | 1800 s |
+| Work queue | heartbeat interval | 300 s |
+| Enrollment | access-token TTL | 3600 s |
+| Enrollment | refresh-token TTL | no expiry |
+| Enrollment | device-code TTL | 900 s |
+| Enrollment | device poll interval | 5 s |
+| Merge gate | redraft cap | 3 |
+
+**Applying a change.** hone-core holds the resolved config in memory; saving
+the Settings form validates the inputs, writes `config.yaml`, and updates the
+in-memory copy. A setting consulted per operation (the claim lease, the token
+TTLs) takes effect on the next operation; one consulted by a long-running task
+(the GATHER cadence) takes effect on that task's next iteration — the GATHER
+loop re-reads the live config each cycle rather than capturing it. **No
+restart is needed** for a tunable; only deployment config requires one.
+
+**Page shape.** A grouped form — one section per group above, each input
+labelled with its unit and default. **Save** is a redirect-after-POST; invalid
+input (a non-positive interval, an unknown gather source) is rejected with the
+field flagged and `config.yaml` left untouched. A separate read-only panel
+lists the deployment configuration.
+
+**Authentication.** The Settings page **mutates** hone-core's behaviour, so it
+must sit behind the operator login (session-based; see *Operator web UI*).
+Until that login exists the page — like the rest of the operator UI — is
+unauthenticated; the login is a prerequisite for exposing Settings on an
+untrusted network.
+
+**Not in scope here.** Methodology import/export (export the DB methodology to
+YAML, re-import an edited one — see *Methodology storage*) is operator
+configuration of a different kind; it may be surfaced on or beside the
+Settings page, but the YAML methodology is not part of `config.yaml`.
 
 ## Data model
 
