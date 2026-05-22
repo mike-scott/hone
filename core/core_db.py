@@ -859,6 +859,35 @@ def claim_review(db, worker_id, lease_seconds=1800):
     return dict(row) if row else None
 
 
+def review_counts(db):
+    """The number of reviews in each state, as a dict - every state present,
+       zero-filled."""
+    counts = {s: 0 for s in ("claimable", "claimed", "reviewed",
+                             "unappliable", "deferred")}
+    for row in db.execute("SELECT state, COUNT(*) AS n FROM reviews "
+                          "GROUP BY state"):
+        counts[row["state"]] = row["n"]
+    return counts
+
+
+def list_reviews(db, state=None, limit=200):
+    """The review queue joined with patchset metadata - most recently enqueued
+       first, optionally filtered to one state. Each dict carries the review's
+       root_message_id, state, claimed_by, timestamps, and the patchset's
+       subject + source."""
+    sql = ("SELECT r.root_message_id, r.state, r.claimed_by, r.claimed_at, "
+           "r.completed_at, r.enqueued_at, p.subject, p.source "
+           "FROM reviews r "
+           "LEFT JOIN patchsets p ON p.root_message_id=r.root_message_id ")
+    params = []
+    if state is not None:
+        sql += "WHERE r.state=? "
+        params.append(state)
+    sql += "ORDER BY r.enqueued_at DESC, r.root_message_id LIMIT ?"
+    params.append(limit)
+    return [dict(r) for r in db.execute(sql, params)]
+
+
 def heartbeat(db, claim_id, lease_seconds=1800):
     """Extend a live claim's lease (works for a review or a maintenance
        claim). Returns True if the claim is still valid, False if it has

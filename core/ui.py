@@ -41,11 +41,33 @@ def _when(ts):
         ts, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
 
+_REVIEW_STATES = ("claimable", "claimed", "reviewed", "unappliable", "deferred")
+_STATE_BADGE = {
+    "claimable":   "text-bg-secondary",
+    "claimed":     "text-bg-info",
+    "reviewed":    "text-bg-success",
+    "unappliable": "text-bg-danger",
+    "deferred":    "text-bg-warning",
+}
+
+
 @router.get("/", response_class=HTMLResponse)
-async def queue(request: Request):
-    """The queue — the operator UI's home page; most UI functionality will
-       land here."""
-    return templates.TemplateResponse(request, "queue.html")
+async def queue(request: Request, state: str | None = None):
+    """The review queue — the operator UI's home page. `?state=` filters the
+       listing to one review state; an unknown state is ignored."""
+    db = request.app.state.db
+    if state not in _REVIEW_STATES:
+        state = None
+    reviews = []
+    for r in core_db.list_reviews(db, state=state):
+        r = dict(r)
+        r["enqueued_display"] = _when(r.get("enqueued_at"))
+        r["state_badge"] = _STATE_BADGE.get(r["state"], "text-bg-light")
+        reviews.append(r)
+    counts = core_db.review_counts(db)
+    return templates.TemplateResponse(request, "queue.html", {
+        "counts": counts, "total": sum(counts.values()),
+        "states": _REVIEW_STATES, "reviews": reviews, "filter": state})
 
 
 @router.get("/submissions", response_class=HTMLResponse)

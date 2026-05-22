@@ -1,9 +1,44 @@
 {% extends "base.html" %}
 {% block title %}Queue · hone-core{% endblock %}
 {% block content %}
-<h1 class="h3 mb-4">Queue</h1>
+<h1 class="h3 mb-4">Review queue</h1>
+
+<div class="d-flex flex-wrap gap-2 mb-4">
+  <a href="/" class="btn btn-sm
+     {%- if not filter %} btn-primary{% else %} btn-outline-secondary{% endif %}">
+    All <span class="badge text-bg-light ms-1">{{ total }}</span>
+  </a>
+  {% for s in states %}
+  <a href="/?state={{ s }}" class="btn btn-sm
+     {%- if filter == s %} btn-primary{% else %} btn-outline-secondary{% endif %}">
+    {{ s }} <span class="badge text-bg-light ms-1">{{ counts[s] }}</span>
+  </a>
+  {% endfor %}
+</div>
+
+{% if reviews %}
+<table class="table table-sm align-middle">
+  <thead>
+    <tr><th>Patchset</th><th>Source</th><th>State</th>
+        <th>Worker</th><th>Enqueued</th></tr>
+  </thead>
+  <tbody>
+  {% for r in reviews %}
+    <tr>
+      <td>{{ r.subject or r.root_message_id }}</td>
+      <td>{{ r.source or "—" }}</td>
+      <td><span class="badge {{ r.state_badge }}">{{ r.state }}</span></td>
+      <td>{{ r.claimed_by or "—" }}</td>
+      <td class="text-nowrap">{{ r.enqueued_display }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
 <p class="text-muted">
-  Skeleton &mdash; the operator UI's home page. The patchset queues and most
-  of the management functionality will land here.
+  {% if filter %}No reviews in state <code>{{ filter }}</code>.
+  {% else %}The review queue is empty — patchsets appear here once GATHER has
+  run.{% endif %}
 </p>
+{% endif %}
 {% endblock %}
