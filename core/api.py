@@ -84,10 +84,6 @@ class ResultRequest(BaseModel):
     result: dict | None = None
 
 
-class ClientRequest(BaseModel):
-    name: str | None = None
-
-
 # --- authentication --------------------------------------------------------
 
 def _secret_ok(provided, expected):
@@ -114,21 +110,16 @@ def require_fleet(request: Request,
 
 def require_node(request: Request,
                  authorization: str | None = Header(None)):
-    """Authenticate a node by its OAuth bearer token. Returns the node row
-       (a dict, including its `client_id` tenant). A missing, invalid, expired,
-       or revoked token is a `401`; a token for a disabled tenant is a `403`."""
+    """Authenticate a node by its OAuth bearer token. Returns the node row.
+       A missing, invalid, expired, or revoked token is a `401`."""
     token = _bearer(authorization)
     if not token:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED,
                             "missing bearer token")
-    db = request.app.state.db
-    node = core_db.resolve_access_token(db, token)
+    node = core_db.resolve_access_token(request.app.state.db, token)
     if node is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED,
                             "invalid or expired token")
-    client = core_db.get_client(db, node["client_id"])
-    if client is None or client["state"] != "active":
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "tenant disabled")
     return node
 
 
@@ -243,12 +234,12 @@ def oauth_token(request: Request, body: TokenRequest):
 
 @router.post("/claims")
 def claim_task(request: Request, node: dict = Depends(require_node)):
-    """Claim the next task for the node's tenant — a review task, else a
-       global maintenance task, else 204 when both queues are empty."""
+    """Claim the next task for the node — a review task, else a maintenance
+       task, else 204 when both queues are empty."""
     db = request.app.state.db
     worker_id = str(node["id"])
 
-    review = core_db.claim_review(db, node["client_id"], worker_id)
+    review = core_db.claim_review(db, worker_id)
     if review is not None:
         patchset = core_db.get_patchset(db, review["root_message_id"]) or {}
         return {"task_type": "review",
@@ -354,14 +345,3 @@ def methodology(request: Request):
             "methodology": document,
             "candidates": core_db.list_candidates(request.app.state.db,
                                                   state="trial")}
-
-
-# --- admin -----------------------------------------------------------------
-
-@router.post("/clients", status_code=status.HTTP_201_CREATED,
-             dependencies=[Depends(require_admin)])
-def create_client(body: ClientRequest, request: Request):
-    """Admin — register a tenant. No credential is minted: a node is bound to
-       this tenant when an operator approves its enrollment."""
-    cid = core_db.register_client(request.app.state.db, body.name)
-    return {"id": cid, "name": body.name}

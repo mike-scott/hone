@@ -11,7 +11,6 @@ from core import api, core_db
 
 DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
 FLEET = {"X-HONE-Fleet-Secret": "fleet-xyz"}
-ADMIN = {"X-HONE-Admin-Token": "admin-xyz"}
 
 
 @pytest.fixture
@@ -23,7 +22,7 @@ def ctx(tmp_path):
     app.state.ca_cert_pem = "-----BEGIN CERTIFICATE-----\nTEST\n" \
                             "-----END CERTIFICATE-----\n"
     app.state.config = type("Cfg", (), {
-        "fleet_secret": "fleet-xyz", "admin_token": "admin-xyz",
+        "fleet_secret": "fleet-xyz",
         "device_code_ttl": 900, "device_poll_interval": 5,
         "access_token_ttl": 3600, "refresh_token_ttl": 0,
         "public_url": "https://core.example:8000"})()
@@ -37,8 +36,7 @@ def _device_code(ctx):
 
 def _approved_device_code(ctx):
     da = _device_code(ctx)
-    cid = core_db.register_client(ctx.db, "Acme")
-    core_db.approve_enrollment(ctx.db, da["user_code"], cid)
+    core_db.approve_enrollment(ctx.db, da["user_code"])
     return da
 
 
@@ -133,15 +131,3 @@ def test_bearer_token_authenticates_the_main_api(ctx):
     r = ctx.client.post("/v1/claims", headers={
         "Authorization": f"Bearer {tok['access_token']}"})
     assert r.status_code in (200, 204)        # 204: empty queue
-
-
-# --- admin: tenant registration --------------------------------------------
-
-def test_create_client_registers_a_tenant_without_a_key(ctx):
-    r = ctx.client.post("/v1/clients", json={"name": "Beta"}, headers=ADMIN)
-    assert r.status_code == 201
-    assert "client_key" not in r.json() and r.json()["name"] == "Beta"
-
-
-def test_create_client_requires_the_admin_token(ctx):
-    assert ctx.client.post("/v1/clients", json={"name": "x"}).status_code == 401

@@ -18,10 +18,8 @@ USAGE = {"tokens": 100, "tool_uses": 3, "duration_ms": 9000}
 def client(monkeypatch):
     """A TestClient over the v1 router with core_db and bearer auth stubbed."""
     monkeypatch.setattr(api.core_db, "resolve_access_token",
-                        lambda db, tok: {"id": 1, "client_id": 1}
+                        lambda db, tok: {"id": 1}
                         if tok == "good-token" else None)
-    monkeypatch.setattr(api.core_db, "get_client",
-                        lambda db, cid: {"id": cid, "state": "active"})
     monkeypatch.setattr(api.core_db, "complete_review",
                         lambda db, cid, state, record, mv=None: "ok")
     monkeypatch.setattr(api.core_db, "complete_maintenance_task",

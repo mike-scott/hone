@@ -5,14 +5,14 @@
 
 <h2 class="h5">Pending enrollments</h2>
 <p class="text-muted small">
-  A node joins the fleet by enrolling itself; approve it here and bind it to a
-  tenant. Approval is the trust anchor for adding a node.
+  A node joins the fleet by enrolling itself; approve it here. Approval is the
+  trust anchor for adding a node.
 </p>
 {% if pending %}
 <table class="table table-sm align-middle">
   <thead>
     <tr><th>User code</th><th>Node</th><th>Capabilities</th>
-        <th>Requested</th><th>Approve to tenant</th><th></th></tr>
+        <th>Requested</th><th></th></tr>
   </thead>
   <tbody>
   {% for e in pending %}
@@ -21,22 +21,12 @@
       <td>{{ e.node_name or "—" }}</td>
       <td>{{ e.task_types_display }}</td>
       <td class="text-nowrap">{{ e.requested_display }}</td>
-      <td>
-        <form method="post"
-              action="/nodes/enrollments/{{ e.user_code }}/approve"
-              class="d-flex gap-2">
-          <select name="client_id" class="form-select form-select-sm" required>
-            <option value="" selected disabled>tenant…</option>
-            {% for c in clients %}
-            <option value="{{ c.id }}">{{ c.name or ("client " ~ c.id) }}</option>
-            {% endfor %}
-          </select>
-          <button class="btn btn-sm btn-success text-nowrap"
-                  {% if not clients %}disabled{% endif %}>Approve</button>
+      <td class="text-nowrap">
+        <form method="post" class="d-inline"
+              action="/nodes/enrollments/{{ e.user_code }}/approve">
+          <button class="btn btn-sm btn-success">Approve</button>
         </form>
-      </td>
-      <td>
-        <form method="post"
+        <form method="post" class="d-inline"
               action="/nodes/enrollments/{{ e.user_code }}/deny">
           <button class="btn btn-sm btn-outline-danger">Deny</button>
         </form>
@@ -45,9 +35,6 @@
   {% endfor %}
   </tbody>
 </table>
-{% if not clients %}
-<p class="text-warning small">Add a tenant below before you can approve a node.</p>
-{% endif %}
 {% else %}
 <p class="text-muted">No node is waiting for approval.</p>
 {% endif %}
@@ -56,7 +43,7 @@
 {% if nodes %}
 <table class="table table-sm align-middle">
   <thead>
-    <tr><th>ID</th><th>Name</th><th>Tenant</th><th>Capabilities</th>
+    <tr><th>ID</th><th>Name</th><th>Capabilities</th>
         <th>State</th><th>Last seen</th></tr>
   </thead>
   <tbody>
@@ -64,7 +51,6 @@
     <tr>
       <td>{{ n.id }}</td>
       <td>{{ n.name or "—" }}</td>
-      <td>{{ n.tenant }}</td>
       <td>{{ n.task_types_display }}</td>
       <td>
         {% if n.state == "active" %}
@@ -81,22 +67,4 @@
 {% else %}
 <p class="text-muted">No nodes enrolled yet.</p>
 {% endif %}
-
-<h2 class="h5 mt-4">Tenants</h2>
-{% if clients %}
-<ul class="list-unstyled">
-  {% for c in clients %}
-  <li><code>#{{ c.id }}</code> {{ c.name or "—" }}
-      <span class="text-muted small">({{ c.state }})</span></li>
-  {% endfor %}
-</ul>
-{% else %}
-<p class="text-muted">No tenants yet.</p>
-{% endif %}
-<form method="post" action="/nodes/tenants" class="d-flex gap-2"
-      style="max-width: 24rem">
-  <input name="name" class="form-control form-control-sm"
-         placeholder="new tenant name" required>
-  <button class="btn btn-sm btn-primary text-nowrap">Add tenant</button>
-</form>
 {% endblock %}

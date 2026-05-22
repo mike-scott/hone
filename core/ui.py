@@ -12,7 +12,7 @@ import datetime
 import json
 import os
 
-from fastapi import APIRouter, Form, Request
+from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
@@ -62,12 +62,8 @@ async def submissions(request: Request):
 
 @router.get("/nodes", response_class=HTMLResponse)
 async def nodes(request: Request):
-    """The node fleet: the pending-enrollment queue, the enrolled nodes, and
-       the tenants a node can be bound to."""
+    """The node fleet: the pending-enrollment queue and the enrolled nodes."""
     db = request.app.state.db
-    clients = core_db.list_clients(db)
-    tenant = {c["id"]: (c["name"] or f"client {c['id']}") for c in clients}
-
     pending = []
     for e in core_db.list_pending_enrollments(db):
         e = dict(e)
@@ -78,13 +74,12 @@ async def nodes(request: Request):
     fleet = []
     for n in core_db.list_nodes(db):
         n = dict(n)
-        n["tenant"] = tenant.get(n["client_id"], f"client {n['client_id']}")
         n["task_types_display"] = _types(n.get("task_types"))
         n["last_seen_display"] = _when(n.get("last_seen"))
         fleet.append(n)
 
     return templates.TemplateResponse(request, "nodes.html", {
-        "pending": pending, "nodes": fleet, "clients": clients})
+        "pending": pending, "nodes": fleet})
 
 
 @router.get("/enroll", response_class=HTMLResponse)
@@ -92,8 +87,7 @@ async def enroll(request: Request, code: str | None = None):
     """A node's enrollment verification page — the `verification_uri` it logs.
        The operator enters the user code and approves the node."""
     db = request.app.state.db
-    ctx = {"code": code, "enrollment": None, "error": None,
-           "clients": core_db.list_clients(db)}
+    ctx = {"code": code, "enrollment": None, "error": None}
     if code:
         enr = core_db.get_enrollment_by_user_code(db, code)
         if enr is None:
@@ -109,12 +103,11 @@ async def enroll(request: Request, code: str | None = None):
 
 
 @router.post("/nodes/enrollments/{user_code}/approve")
-async def approve_enrollment(request: Request, user_code: str,
-                             client_id: int = Form(...)):
-    """Approve a pending enrollment and bind the node to a tenant."""
+async def approve_enrollment(request: Request, user_code: str):
+    """Approve a pending enrollment — the node joins the fleet."""
     try:
         core_db.approve_enrollment(request.app.state.db, user_code,
-                                   client_id, decided_by="operator")
+                                   decided_by="operator")
     except (KeyError, ValueError):
         pass                               # already decided / expired / gone
     return RedirectResponse("/nodes", status_code=303)
@@ -128,13 +121,6 @@ async def deny_enrollment(request: Request, user_code: str):
                                 decided_by="operator")
     except (KeyError, ValueError):
         pass
-    return RedirectResponse("/nodes", status_code=303)
-
-
-@router.post("/nodes/tenants")
-async def add_tenant(request: Request, name: str = Form(...)):
-    """Register a tenant a node can be assigned to at approval."""
-    core_db.register_client(request.app.state.db, name.strip() or None)
     return RedirectResponse("/nodes", status_code=303)
 
 

@@ -42,21 +42,13 @@ def test_enroll_page_unknown_code(ctx):
     assert "No enrollment found" in r.text
 
 
-def test_add_tenant(ctx):
-    r = ctx.client.post("/nodes/tenants", data={"name": "Acme Corp"})
-    assert r.status_code == 200 and "Acme Corp" in r.text
-    assert len(core_db.list_clients(ctx.db)) == 1
-
-
-def test_approve_enrollment_binds_the_node_to_the_tenant(ctx):
-    cid = core_db.register_client(ctx.db, "Acme")
+def test_approve_enrollment(ctx):
     enr = core_db.create_enrollment(ctx.db, node_name="builder-7")
-    r = ctx.client.post(f"/nodes/enrollments/{enr['user_code']}/approve",
-                        data={"client_id": cid})
+    r = ctx.client.post(f"/nodes/enrollments/{enr['user_code']}/approve")
     assert r.status_code == 200
     assert "No node is waiting" in r.text          # off the pending queue
     nodes = core_db.list_nodes(ctx.db)
-    assert len(nodes) == 1 and nodes[0]["client_id"] == cid
+    assert len(nodes) == 1 and nodes[0]["name"] == "builder-7"
 
 
 def test_deny_enrollment(ctx):

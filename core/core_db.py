@@ -4,13 +4,12 @@
 A SQLite store (WAL mode) holding the system's three data tiers:
 
   1. corpus       patchsets gathered from the data sources, their patch
-                  archives, and the external review signal on them - gathered
-                  once, shared by every client.
+                  archives, and the external review signal on them.
   2. methodology  the versioned methodology document, the candidate practices
                   on trial (with their self-honing counters), and the
                   merge-gate proposal queue.
-  3. results      each client's reviews of patchsets, and the claim queue
-                  that hands that work to nodes.
+  3. results      the review of each patchset, and the claim queue that
+                  hands that work to nodes.
 
 Schema changes are versioned: PRAGMA user_version records the file's schema
 version and connect() applies any newer migration. Harness machinery; NOT the
@@ -299,8 +298,86 @@ CREATE INDEX idx_node_tokens_access ON node_tokens(access_token_hash);
 CREATE INDEX idx_node_tokens_refresh ON node_tokens(refresh_token_hash);
 """
 
+_SCHEMA_V3 = """
+-- ---- Migration 3: remove multi-tenancy ------------------------------------
+-- hone-core hones one methodology; the per-client tier (a patchset reviewed
+-- once per client) was complexity the use case did not need. A patchset is
+-- now reviewed once, and a node enrols into the fleet, not into a tenant.
+-- Migrations run with foreign_keys off, so the table rebuilds are unencumbered.
+
+-- reviews: drop client_id; key on root_message_id alone (one review per
+-- patchset). A pre-migration db that had several clients keeps one review
+-- row per patchset (INSERT OR IGNORE on the new primary key).
+CREATE TABLE reviews_new (
+    root_message_id      TEXT PRIMARY KEY REFERENCES patchsets(root_message_id),
+    state                TEXT NOT NULL DEFAULT 'claimable',
+    claim_id             TEXT,
+    claimed_by           TEXT,
+    claimed_at           INTEGER,
+    lease_expires        INTEGER,
+    heartbeat_at         INTEGER,
+    methodology_version  INTEGER REFERENCES methodology_versions(version),
+    record               TEXT,
+    completed_at         INTEGER,
+    enqueued_at          INTEGER
+) WITHOUT ROWID;
+INSERT OR IGNORE INTO reviews_new
+    (root_message_id,state,claim_id,claimed_by,claimed_at,lease_expires,
+     heartbeat_at,methodology_version,record,completed_at,enqueued_at)
+    SELECT root_message_id,state,claim_id,claimed_by,claimed_at,lease_expires,
+           heartbeat_at,methodology_version,record,completed_at,enqueued_at
+    FROM reviews;
+DROP TABLE reviews;
+ALTER TABLE reviews_new RENAME TO reviews;
+CREATE INDEX idx_reviews_claimable ON reviews(state, enqueued_at);
+CREATE INDEX idx_reviews_claim ON reviews(claim_id);
+
+-- nodes: drop client_id (the tenant binding).
+CREATE TABLE nodes_new (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    name         TEXT,
+    task_types   TEXT,                            -- JSON array
+    state        TEXT NOT NULL DEFAULT 'active',  -- 'active' | 'revoked'
+    enrolled_at  INTEGER,
+    last_seen    INTEGER
+);
+INSERT INTO nodes_new (id,name,task_types,state,enrolled_at,last_seen)
+    SELECT id,name,task_types,state,enrolled_at,last_seen FROM nodes;
+DROP TABLE nodes;
+ALTER TABLE nodes_new RENAME TO nodes;
+
+-- node_enrollments: drop client_id.
+CREATE TABLE node_enrollments_new (
+    id                INTEGER PRIMARY KEY,
+    device_code_hash  TEXT NOT NULL UNIQUE,
+    user_code         TEXT NOT NULL UNIQUE,
+    node_name         TEXT,
+    task_types        TEXT,
+    state             TEXT NOT NULL DEFAULT 'pending',  -- pending|approved|completed|denied
+    node_id           INTEGER REFERENCES nodes(id),
+    interval_seconds  INTEGER NOT NULL DEFAULT 5,
+    created_at        INTEGER,
+    expires_at        INTEGER,
+    last_polled_at    INTEGER,
+    decided_at        INTEGER,
+    decided_by        TEXT
+);
+INSERT INTO node_enrollments_new
+    (id,device_code_hash,user_code,node_name,task_types,state,node_id,
+     interval_seconds,created_at,expires_at,last_polled_at,decided_at,decided_by)
+    SELECT id,device_code_hash,user_code,node_name,task_types,state,node_id,
+           interval_seconds,created_at,expires_at,last_polled_at,decided_at,
+           decided_by
+    FROM node_enrollments;
+DROP TABLE node_enrollments;
+ALTER TABLE node_enrollments_new RENAME TO node_enrollments;
+
+-- the tenant table is gone.
+DROP TABLE clients;
+"""
+
 # index i (0-based) => schema version i+1. Append a new migration to upgrade.
-_MIGRATIONS = [_SCHEMA_V1, _SCHEMA_V2]
+_MIGRATIONS = [_SCHEMA_V1, _SCHEMA_V2, _SCHEMA_V3]
 
 
 def connect(path=None):
@@ -547,35 +624,6 @@ def wilson_lower(k, n, z=1.96):
 
 
 # ===========================================================================
-# Tier 3 - clients
-# ===========================================================================
-
-def register_client(db, name=None):
-    """Register a tenant (the admin POST /v1/clients) and fan the existing
-       corpus out to it as claimable reviews. Returns the new client id. A
-       client no longer carries a credential - its nodes authenticate with
-       bearer tokens obtained by enrolling (see the OAuth section below)."""
-    cur = db.execute("INSERT INTO clients (name,created_at) VALUES (?,?)",
-                     (name, int(time.time())))
-    db.commit()
-    cid = cur.lastrowid
-    enqueue_reviews_for_client(db, cid)
-    return cid
-
-
-def get_client(db, client_id):
-    """The client (tenant) row as a dict, or None. Disabled clients are
-       included - the caller checks `state`."""
-    row = db.execute("SELECT * FROM clients WHERE id=?",
-                     (client_id,)).fetchone()
-    return dict(row) if row else None
-
-
-def list_clients(db):
-    return [dict(r) for r in db.execute("SELECT * FROM clients ORDER BY id")]
-
-
-# ===========================================================================
 # OAuth node enrollment & bearer tokens  (see API.md, ARCHITECTURE.md)
 # ===========================================================================
 
@@ -641,12 +689,11 @@ def set_enrollment_polled(db, enrollment_id, when=None):
     db.commit()
 
 
-def approve_enrollment(db, user_code, client_id, node_name=None,
-                       decided_by=None):
-    """Operator approval: bind the enrollment to a tenant, create its `nodes`
-       row, and mark the enrollment approved. Returns the new node id. Raises
-       KeyError if the user_code is unknown, ValueError if the enrollment is
-       not pending or has expired."""
+def approve_enrollment(db, user_code, node_name=None, decided_by=None):
+    """Operator approval: create the enrollment's `nodes` row and mark the
+       enrollment approved. Returns the new node id. Raises KeyError if the
+       user_code is unknown, ValueError if the enrollment is not pending or
+       has expired."""
     enr = get_enrollment_by_user_code(db, user_code)
     if enr is None:
         raise KeyError(user_code)
@@ -656,13 +703,12 @@ def approve_enrollment(db, user_code, client_id, node_name=None,
         raise ValueError("enrollment expired")
     now = int(time.time())
     node_id = db.execute(
-        "INSERT INTO nodes (client_id,name,task_types,state,enrolled_at) "
-        "VALUES (?,?,?,'active',?)",
-        (client_id, node_name or enr["node_name"], enr["task_types"],
-         now)).lastrowid
-    db.execute("UPDATE node_enrollments SET state='approved', client_id=?, "
-               "node_id=?, decided_at=?, decided_by=? WHERE id=?",
-               (client_id, node_id, now, decided_by, enr["id"]))
+        "INSERT INTO nodes (name,task_types,state,enrolled_at) "
+        "VALUES (?,?,'active',?)",
+        (node_name or enr["node_name"], enr["task_types"], now)).lastrowid
+    db.execute("UPDATE node_enrollments SET state='approved', node_id=?, "
+               "decided_at=?, decided_by=? WHERE id=?",
+               (node_id, now, decided_by, enr["id"]))
     db.commit()
     return node_id
 
@@ -709,10 +755,10 @@ def issue_tokens(db, node_id, access_ttl=3600, refresh_ttl=None):
 
 
 def resolve_access_token(db, access_token):
-    """The node behind a bearer access token, as a dict (the `nodes` row,
-       including its `client_id`), or None if the token is unknown, expired,
-       superseded/revoked, or its node is revoked. Stamps the node's
-       `last_seen`. This is the per-request auth check for the main API."""
+    """The node behind a bearer access token, as a dict (the `nodes` row), or
+       None if the token is unknown, expired, superseded/revoked, or its node
+       is revoked. Stamps the node's `last_seen`. This is the per-request auth
+       check for the main API."""
     now = int(time.time())
     row = db.execute(
         "SELECT n.*, t.access_expires_at, t.state AS token_state "
@@ -764,14 +810,9 @@ def get_node(db, node_id):
     return dict(row) if row else None
 
 
-def list_nodes(db, client_id=None):
-    """Enrolled nodes, all or for one tenant, as a list of dicts."""
-    if client_id is None:
-        rows = db.execute("SELECT * FROM nodes ORDER BY id")
-    else:
-        rows = db.execute("SELECT * FROM nodes WHERE client_id=? ORDER BY id",
-                          (client_id,))
-    return [dict(r) for r in rows]
+def list_nodes(db):
+    """Every enrolled node, as a list of dicts."""
+    return [dict(r) for r in db.execute("SELECT * FROM nodes ORDER BY id")]
 
 
 # ===========================================================================
@@ -779,48 +820,26 @@ def list_nodes(db, client_id=None):
 # ===========================================================================
 
 def enqueue_reviews_for_patchset(db, root_message_id):
-    """Fan a gathered patchset out to every active client as a claimable
-       review (idempotent; a skipped patchset is not fanned out). Returns the
-       number of rows created."""
+    """Enqueue a gathered patchset as a claimable review (idempotent; a
+       skipped patchset is not enqueued). Returns 1 if a review row was
+       created, else 0."""
     root = norm_msgid(root_message_id)
     ps = db.execute("SELECT state FROM patchsets WHERE root_message_id=?",
                     (root,)).fetchone()
     if not ps or ps["state"] != "gathered":
         return 0
-    now = int(time.time())
-    client_ids = [r["id"] for r in db.execute(
-        "SELECT id FROM clients WHERE state='active'")]
-    n = 0
-    for cid in client_ids:
-        n += db.execute("INSERT OR IGNORE INTO reviews "
-                        "(client_id,root_message_id,state,enqueued_at) "
-                        "VALUES (?,?,'claimable',?)",
-                        (cid, root, now)).rowcount
+    n = db.execute("INSERT OR IGNORE INTO reviews "
+                   "(root_message_id,state,enqueued_at) VALUES (?,'claimable',?)",
+                   (root, int(time.time()))).rowcount
     db.commit()
     return n
 
 
-def enqueue_reviews_for_client(db, client_id):
-    """Give a (newly registered) client a claimable review for every gathered
-       patchset already in the corpus. Returns the number of rows created."""
-    now = int(time.time())
-    roots = [r["root_message_id"] for r in db.execute(
-        "SELECT root_message_id FROM patchsets WHERE state='gathered'")]
-    n = 0
-    for root in roots:
-        n += db.execute("INSERT OR IGNORE INTO reviews "
-                        "(client_id,root_message_id,state,enqueued_at) "
-                        "VALUES (?,?,'claimable',?)",
-                        (client_id, root, now)).rowcount
-    db.commit()
-    return n
-
-
-def claim_review(db, client_id, worker_id, lease_seconds=1800):
-    """Atomically claim the oldest reviewable patchset for a client: one that
-       is 'claimable', or a 'claimed' one whose lease has expired (its worker
+def claim_review(db, worker_id, lease_seconds=1800):
+    """Atomically claim the oldest reviewable patchset: one that is
+       'claimable', or a 'claimed' one whose lease has expired (its worker
        died). Marks it 'claimed' under a fresh claim_id + lease. Returns a dict
-       {claim_id, client_id, root_message_id}, or None if the queue is empty.
+       {claim_id, root_message_id}, or None if the queue is empty.
 
        SQLite serializes writers, so two workers cannot claim the same row; a
        crashed worker's claim is reclaimed once its lease elapses."""
@@ -829,14 +848,13 @@ def claim_review(db, client_id, worker_id, lease_seconds=1800):
     row = db.execute(
         "UPDATE reviews SET state='claimed', claim_id=?, claimed_by=?, "
         "claimed_at=?, lease_expires=?, heartbeat_at=? "
-        "WHERE client_id=? AND root_message_id=("
+        "WHERE root_message_id=("
         "  SELECT root_message_id FROM reviews "
-        "  WHERE client_id=? AND (state='claimable' "
-        "        OR (state='claimed' AND lease_expires<=?)) "
+        "  WHERE state='claimable' "
+        "        OR (state='claimed' AND lease_expires<=?) "
         "  ORDER BY enqueued_at, root_message_id LIMIT 1) "
-        "RETURNING claim_id, client_id, root_message_id",
-        (claim_id, worker_id, now, now + lease_seconds, now,
-         client_id, client_id, now)).fetchone()
+        "RETURNING claim_id, root_message_id",
+        (claim_id, worker_id, now, now + lease_seconds, now, now)).fetchone()
     db.commit()
     return dict(row) if row else None
 
@@ -1095,7 +1113,7 @@ def main():
         print("seeded", seed_mailmap(db, a[2]), "alias email(s)")
     elif cmd == "stats":
         for t in ("patchsets", "patch_blobs", "patchset_sources",
-                  "source_findings", "reviewers", "clients", "nodes",
+                  "source_findings", "reviewers", "nodes",
                   "node_enrollments", "node_tokens", "reviews",
                   "maintenance_tasks", "methodology_versions",
                   "methodology_candidates", "methodology_proposals"):
