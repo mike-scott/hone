@@ -5,8 +5,11 @@ and X-HONE-Client-Key (the tenant identity); the admin endpoint uses
 X-HONE-Admin-Token. Handlers are thin: validate, call core_db, shape the
 response — all state lives in the database.
 """
+import os
 import secrets
 
+import jsonschema
+import yaml
 from fastapi import (APIRouter, Depends, Header, HTTPException, Request,
                      Response, status)
 from pydantic import BaseModel
@@ -14,6 +17,46 @@ from pydantic import BaseModel
 from core import core_db
 
 router = APIRouter(prefix="/v1", tags=["v1"])
+
+
+# --- completion-record schema ----------------------------------------------
+# Every node result (POST /v1/claims/{claim_id}/result) is validated against
+# core/completion-record.schema.yaml before it reaches the database. That
+# schema is a oneOf of two shapes; we validate each task type against its own
+# branch, so a review claim cannot be closed with a maintenance-shaped record.
+
+_SCHEMA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "completion-record.schema.yaml")
+with open(_SCHEMA_PATH, encoding="utf-8") as _f:
+    _RECORD_SCHEMA = yaml.safe_load(_f)
+
+
+def _branch_validator(branch):
+    """A draft-2020-12 validator for one $defs branch of the completion-record
+       schema (review_record / maintenance_record), with $defs in scope so the
+       branch's internal $refs resolve."""
+    return jsonschema.Draft202012Validator(
+        {"$schema": _RECORD_SCHEMA["$schema"],
+         "$defs": _RECORD_SCHEMA["$defs"],
+         "$ref": f"#/$defs/{branch}"})
+
+
+_REVIEW_VALIDATOR = _branch_validator("review_record")
+_MAINTENANCE_VALIDATOR = _branch_validator("maintenance_record")
+
+
+def _validate_record(validator, record, what):
+    """Validate a completion record against its schema branch. Raises 422 with
+       the first error's location and message; a no-op when the record is
+       valid. The record's referential integrity is still checked downstream."""
+    errors = sorted(validator.iter_errors(record),
+                    key=lambda e: str(list(e.absolute_path)))
+    if errors:
+        e = errors[0]
+        loc = "/".join(str(p) for p in e.absolute_path) or "<root>"
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"{what} failed schema validation at {loc}: {e.message}")
 
 
 # --- request bodies --------------------------------------------------------
@@ -113,7 +156,9 @@ def heartbeat(claim_id: str, request: Request):
 
 @router.post("/claims/{claim_id}/result", dependencies=[Depends(require_node)])
 def submit_result(claim_id: str, body: ResultRequest, request: Request):
-    """Submit a completion record. Idempotent on the claim id. `status` is
+    """Submit a completion record. The record is validated against
+       core/completion-record.schema.yaml — a malformed record is rejected 422
+       and never reaches the database. Idempotent on the claim id. `status` is
        'ok', or 'lapsed' when the claim was reclaimed — on 'lapsed' the node
        discards the result, the reclaim already covered the work."""
     db = request.app.state.db
@@ -121,6 +166,13 @@ def submit_result(claim_id: str, body: ResultRequest, request: Request):
         if body.state is None or body.record is None:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
                                 "a review result needs `state` and `record`")
+        _validate_record(_REVIEW_VALIDATOR, body.record,
+                          "review completion record")
+        if body.state != body.record.get("outcome"):
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"`state` ({body.state!r}) does not match the record's "
+                f"`outcome` ({body.record.get('outcome')!r})")
         try:
             outcome = core_db.complete_review(db, claim_id, body.state,
                                               body.record,
@@ -131,6 +183,8 @@ def submit_result(claim_id: str, body: ResultRequest, request: Request):
         if body.result is None:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
                                 "a maintenance result needs `result`")
+        _validate_record(_MAINTENANCE_VALIDATOR, body.result,
+                          "maintenance-task record")
         outcome = core_db.complete_maintenance_task(db, claim_id, body.result)
     else:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
