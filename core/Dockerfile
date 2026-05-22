@@ -52,7 +52,8 @@ ENV HONE_DATA=/data \
     HONE_CONFIG=/data/config.yaml \
     HONE_METHODOLOGY_DIR=/data/methodology \
     HONE_ARCHIVE_DIR=/data/archive \
-    HONE_CERT_DIR=/data/tls
+    HONE_CERT_DIR=/data/tls \
+    HONE_HTTP_PORT=8000
 VOLUME ["/data"]
 EXPOSE 8000
 

@@ -17,12 +17,16 @@ services:
     image: hone-core
     restart: unless-stopped
     ports:
-      - "${HONE_HTTP_PORT:-8000}:8000"    # HTTPS — hone-core terminates TLS itself
+      # host:container — HONE_PUBLISH_PORT is host-side only; the container
+      # always listens on 8000. HTTPS: hone-core terminates TLS itself.
+      - "${HONE_PUBLISH_PORT:-8000}:8000"
+    env_file:
+      - .env                             # every setting in .env reaches the container
     environment:
+      # Required settings, re-asserted so `compose up` fails fast if missing.
       HONE_FLEET_SECRET: "${HONE_FLEET_SECRET:?set it in .env}"
       HONE_ADMIN_TOKEN:  "${HONE_ADMIN_TOKEN:?set it in .env}"
       HONE_HOSTNAME:     "${HONE_HOSTNAME:?set it in .env}"
-      HONE_PUBLIC_URL:   "${HONE_PUBLIC_URL:-}"
     volumes:
       - hone-core-data:/data             # db, config, methodology files, source archives
 

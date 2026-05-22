@@ -31,6 +31,10 @@ class Config:
         data = os.environ.get("HONE_DATA", "/data")
         host = os.environ.get("HONE_HOSTNAME", "localhost")
         port = int(os.environ.get("HONE_HTTP_PORT", "8000"))
+        # The externally reachable port for the default public URL is the host
+        # side of the container's port mapping (HONE_PUBLISH_PORT); a
+        # non-containerised run has no mapping, so fall back to the listen port.
+        ext_port = os.environ.get("HONE_PUBLISH_PORT") or str(port)
         return cls(
             data_dir             = data,
             db_path              = os.environ.get("HONE_DB", f"{data}/hone.db"),
@@ -43,7 +47,7 @@ class Config:
             http_port            = port,
             hostname             = host,
             public_url           = (os.environ.get("HONE_PUBLIC_URL")
-                                     or f"https://{host}:{port}"),
+                                     or f"https://{host}:{ext_port}"),
             gather_interval      = int(os.environ.get("HONE_GATHER_INTERVAL", "600")),
             lease_seconds        = int(os.environ.get("HONE_LEASE_SECONDS", "1800")),
             heartbeat_seconds    = int(os.environ.get("HONE_HEARTBEAT_SECONDS", "300")),
