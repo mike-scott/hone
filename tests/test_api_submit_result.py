@@ -10,16 +10,18 @@ from fastapi.testclient import TestClient
 
 from core import api
 
-HEADERS = {"X-HONE-Fleet-Secret": "test-fleet", "X-HONE-Client-Key": "ck_ok"}
+HEADERS = {"Authorization": "Bearer good-token"}
 USAGE = {"tokens": 100, "tool_uses": 3, "duration_ms": 9000}
 
 
 @pytest.fixture
 def client(monkeypatch):
-    """A TestClient over the v1 router with core_db stubbed out."""
+    """A TestClient over the v1 router with core_db and bearer auth stubbed."""
+    monkeypatch.setattr(api.core_db, "resolve_access_token",
+                        lambda db, tok: {"id": 1, "client_id": 1}
+                        if tok == "good-token" else None)
     monkeypatch.setattr(api.core_db, "get_client",
-                        lambda db, key: {"id": 1, "state": "active"}
-                        if key == "ck_ok" else None)
+                        lambda db, cid: {"id": cid, "state": "active"})
     monkeypatch.setattr(api.core_db, "complete_review",
                         lambda db, cid, state, record, mv=None: "ok")
     monkeypatch.setattr(api.core_db, "complete_maintenance_task",
@@ -123,9 +125,7 @@ def test_unknown_task_type_rejected(client):
     assert resp.status_code == 422
 
 
-def test_bad_fleet_secret_rejected(client):
+def test_missing_bearer_token_rejected(client):
     resp = client.post("/v1/claims/claim-1/result",
-                        json={"task_type": "maintenance", "result": {}},
-                        headers={"X-HONE-Fleet-Secret": "wrong",
-                                 "X-HONE-Client-Key": "ck_ok"})
+                        json={"task_type": "maintenance", "result": {}})
     assert resp.status_code == 401

@@ -271,7 +271,7 @@ CREATE TABLE node_enrollments (
     user_code         TEXT NOT NULL UNIQUE,
     node_name         TEXT,
     task_types        TEXT,                       -- JSON array
-    state             TEXT NOT NULL DEFAULT 'pending',  -- pending|approved|denied
+    state             TEXT NOT NULL DEFAULT 'pending',  -- pending|approved|completed|denied
     client_id         INTEGER REFERENCES clients(id),
     node_id           INTEGER REFERENCES nodes(id),
     interval_seconds  INTEGER NOT NULL DEFAULT 5,
@@ -678,6 +678,15 @@ def deny_enrollment(db, user_code, decided_by=None):
     db.execute("UPDATE node_enrollments SET state='denied', decided_at=?, "
                "decided_by=? WHERE id=?",
                (int(time.time()), decided_by, enr["id"]))
+    db.commit()
+
+
+def complete_enrollment(db, enrollment_id):
+    """Mark an approved enrollment redeemed - the token endpoint calls this
+       once it has issued the node's tokens, so the device code is single-use
+       (a replay then gets `invalid_grant`)."""
+    db.execute("UPDATE node_enrollments SET state='completed' WHERE id=?",
+               (enrollment_id,))
     db.commit()
 
 

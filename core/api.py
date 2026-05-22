@@ -7,11 +7,13 @@ response — all state lives in the database.
 """
 import os
 import secrets
+import time
 
 import jsonschema
 import yaml
 from fastapi import (APIRouter, Depends, Header, HTTPException, Request,
                      Response, status)
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from core import core_db
@@ -61,8 +63,15 @@ def _validate_record(validator, record, what):
 
 # --- request bodies --------------------------------------------------------
 
-class ClaimRequest(BaseModel):
-    worker_id: str | None = None          # the node's id, recorded as claimed_by
+class DeviceAuthRequest(BaseModel):
+    node_name: str | None = None          # the node's self-described label
+    task_types: list[str] | None = None   # capabilities, shown at approval
+
+
+class TokenRequest(BaseModel):
+    grant_type: str
+    device_code: str | None = None        # the device-code grant
+    refresh_token: str | None = None      # the refresh grant
 
 
 class ResultRequest(BaseModel):
@@ -87,25 +96,40 @@ def _secret_ok(provided, expected):
         secrets.compare_digest(provided, expected)
 
 
-def require_node(request: Request,
-                 fleet_secret: str | None = Header(
-                     None, alias="X-HONE-Fleet-Secret"),
-                 client_key: str | None = Header(
-                     None, alias="X-HONE-Client-Key")):
-    """Authenticate a node. The fleet secret gates the whole fleet; the client
-       key identifies the tenant. Returns the client row (a dict). A bad
-       fleet secret or client key is a hard 401/403 — not retryable."""
-    cfg = request.app.state.config
-    if not _secret_ok(fleet_secret, cfg.fleet_secret):
+def _bearer(authorization):
+    """The token from an `Authorization: Bearer <token>` header, or None."""
+    if authorization and authorization.lower().startswith("bearer "):
+        return authorization[7:].strip() or None
+    return None
+
+
+def require_fleet(request: Request,
+                  fleet_secret: str | None = Header(
+                      None, alias="X-HONE-Fleet-Secret")):
+    """Gate the OAuth / enrollment endpoints with the fleet shared secret —
+       the one and only place the fleet secret is used."""
+    if not _secret_ok(fleet_secret, request.app.state.config.fleet_secret):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "bad fleet secret")
-    if not client_key:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "missing client key")
-    client = core_db.get_client(request.app.state.db, client_key)
-    if client is None:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "unknown client key")
-    if client["state"] != "active":
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "client disabled")
-    return client
+
+
+def require_node(request: Request,
+                 authorization: str | None = Header(None)):
+    """Authenticate a node by its OAuth bearer token. Returns the node row
+       (a dict, including its `client_id` tenant). A missing, invalid, expired,
+       or revoked token is a `401`; a token for a disabled tenant is a `403`."""
+    token = _bearer(authorization)
+    if not token:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED,
+                            "missing bearer token")
+    db = request.app.state.db
+    node = core_db.resolve_access_token(db, token)
+    if node is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED,
+                            "invalid or expired token")
+    client = core_db.get_client(db, node["client_id"])
+    if client is None or client["state"] != "active":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "tenant disabled")
+    return node
 
 
 def require_admin(request: Request,
@@ -116,17 +140,115 @@ def require_admin(request: Request,
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "bad admin token")
 
 
+def _oauth_error(code, message, status_code=status.HTTP_400_BAD_REQUEST):
+    """An OAuth error body — `error.code` is the RFC 8628 device-flow code a
+       node branches on (authorization_pending, slow_down, ...)."""
+    return JSONResponse(status_code=status_code,
+                        content={"error": {"code": code, "message": message}})
+
+
+def _token_response(request: Request, tok):
+    """The successful /v1/oauth/token body — the bearer-token pair plus
+       hone-core's CA certificate, which the node pins for the main API."""
+    return {"access_token": tok["access_token"],
+            "token_type": "Bearer",
+            "expires_in": tok["expires_in"],
+            "refresh_token": tok["refresh_token"],
+            "ca_cert": request.app.state.ca_cert_pem}
+
+
+# --- OAuth: node enrollment (RFC 8628 device authorization grant) ----------
+
+_DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
+
+
+@router.post("/oauth/device_authorization",
+             dependencies=[Depends(require_fleet)])
+def device_authorization(request: Request,
+                         body: DeviceAuthRequest | None = None):
+    """Begin node enrollment — issue a device code + user code. The node logs
+       the user code for an operator and polls /v1/oauth/token (RFC 8628)."""
+    cfg = request.app.state.config
+    enr = core_db.create_enrollment(
+        request.app.state.db,
+        node_name=body.node_name if body else None,
+        task_types=body.task_types if body else None,
+        ttl_seconds=cfg.device_code_ttl,
+        interval=cfg.device_poll_interval)
+    base = cfg.public_url.rstrip("/")
+    return {"device_code": enr["device_code"],
+            "user_code": enr["user_code"],
+            "verification_uri": f"{base}/enroll",
+            "verification_uri_complete":
+                f"{base}/enroll?code={enr['user_code']}",
+            "expires_in": enr["expires_in"],
+            "interval": enr["interval"]}
+
+
+@router.post("/oauth/token", dependencies=[Depends(require_fleet)])
+def oauth_token(request: Request, body: TokenRequest):
+    """Exchange an approved device code, or a refresh token, for a fresh
+       bearer-token pair. Device-flow states use the RFC 8628 error codes."""
+    cfg = request.app.state.config
+    db = request.app.state.db
+
+    if body.grant_type == _DEVICE_GRANT:
+        if not body.device_code:
+            return _oauth_error("invalid_request", "device_code is required")
+        enr = core_db.get_enrollment_by_device_code(db, body.device_code)
+        if enr is None:
+            return _oauth_error("invalid_grant", "unknown device code")
+        if enr["state"] == "denied":
+            return _oauth_error("access_denied",
+                                "the operator denied this enrollment")
+        if enr["state"] == "completed":
+            return _oauth_error("invalid_grant",
+                                "device code already redeemed")
+        if enr["state"] == "pending":
+            now = int(time.time())
+            if enr["expires_at"] is not None and enr["expires_at"] <= now:
+                return _oauth_error("expired_token",
+                                    "the device code has expired")
+            too_soon = (enr["last_polled_at"] is not None and
+                        now - enr["last_polled_at"] < enr["interval_seconds"])
+            core_db.set_enrollment_polled(db, enr["id"], now)
+            if too_soon:
+                return _oauth_error("slow_down", "polling too fast")
+            return _oauth_error("authorization_pending",
+                                "awaiting operator approval")
+        # state == 'approved' — redeem the device code, once
+        tok = core_db.issue_tokens(db, enr["node_id"],
+                                   access_ttl=cfg.access_token_ttl,
+                                   refresh_ttl=cfg.refresh_token_ttl or None)
+        core_db.complete_enrollment(db, enr["id"])
+        return _token_response(request, tok)
+
+    if body.grant_type == "refresh_token":
+        if not body.refresh_token:
+            return _oauth_error("invalid_request",
+                                "refresh_token is required")
+        tok = core_db.rotate_refresh_token(
+            db, body.refresh_token, access_ttl=cfg.access_token_ttl,
+            refresh_ttl=cfg.refresh_token_ttl or None)
+        if tok is None:
+            return _oauth_error("invalid_grant",
+                                "unknown, expired, or spent refresh token")
+        return _token_response(request, tok)
+
+    return _oauth_error("unsupported_grant_type",
+                        f"unsupported grant_type {body.grant_type!r}")
+
+
 # --- claims ----------------------------------------------------------------
 
 @router.post("/claims")
-def claim_task(request: Request, body: ClaimRequest | None = None,
-               client: dict = Depends(require_node)):
-    """Claim the next task for the client — a review task, else a global
-       maintenance task, else 204 when both queues are empty."""
+def claim_task(request: Request, node: dict = Depends(require_node)):
+    """Claim the next task for the node's tenant — a review task, else a
+       global maintenance task, else 204 when both queues are empty."""
     db = request.app.state.db
-    worker_id = (body.worker_id if body and body.worker_id else "unidentified")
+    worker_id = str(node["id"])
 
-    review = core_db.claim_review(db, client["id"], worker_id)
+    review = core_db.claim_review(db, node["client_id"], worker_id)
     if review is not None:
         patchset = core_db.get_patchset(db, review["root_message_id"]) or {}
         return {"task_type": "review",
@@ -239,8 +361,7 @@ def methodology(request: Request):
 @router.post("/clients", status_code=status.HTTP_201_CREATED,
              dependencies=[Depends(require_admin)])
 def create_client(body: ClientRequest, request: Request):
-    """Admin — register a client and return its generated key. The operator
-       hands that key to the client's node(s)."""
-    key = "ck_" + secrets.token_urlsafe(24)
-    cid = core_db.register_client(request.app.state.db, key, body.name)
-    return {"id": cid, "client_key": key, "name": body.name}
+    """Admin — register a tenant. No credential is minted: a node is bound to
+       this tenant when an operator approves its enrollment."""
+    cid = core_db.register_client(request.app.state.db, body.name)
+    return {"id": cid, "name": body.name}

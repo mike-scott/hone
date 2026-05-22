@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from core import api, core_db, gather, ui
+from core import api, core_db, gather, tls, ui
 from core.config import Config
 
 logging.basicConfig(
@@ -36,6 +36,11 @@ async def lifespan(app: FastAPI):
         os.path.join(_HERE, "methodology.schema.yaml"))
     app.state.db = db
     log.info("database ready — methodology active at version %d", version)
+    # TLS: generate the CA + server certificate on first start, and hold the
+    # CA in memory — every enrollment hands it to the node (API.md → token).
+    tls.ensure_certs(cfg.cert_dir, [cfg.hostname])
+    app.state.ca_cert_pem = tls.ca_cert_pem(cfg.cert_dir)
+    log.info("TLS material ready — cert_dir=%s", cfg.cert_dir)
     gather_task = asyncio.create_task(gather.gather_loop(cfg.gather_interval))
     try:
         yield
@@ -64,3 +69,21 @@ def create_app() -> FastAPI:
 
 
 app = create_app()
+
+
+def run():
+    """Container entry point — ensure the TLS material exists, then serve
+       HTTPS directly with the self-generated server certificate (no external
+       TLS-terminating proxy; see ARCHITECTURE.md → Auth, enrollment &
+       transport)."""
+    import uvicorn
+
+    cfg: Config = app.state.config
+    _, cert_file, key_file = tls.ensure_certs(cfg.cert_dir, [cfg.hostname])
+    log.info("hone-core serving HTTPS on :%d", cfg.http_port)
+    uvicorn.run(app, host="0.0.0.0", port=cfg.http_port,
+                ssl_certfile=cert_file, ssl_keyfile=key_file)
+
+
+if __name__ == "__main__":
+    run()
