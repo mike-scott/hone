@@ -9,8 +9,9 @@
 #
 #   docker build -f core/Dockerfile -t hone-core .
 #
-# TLS is terminated upstream (an ingress / reverse proxy); this container
-# serves plain HTTP on port 8000.
+# hone-core generates its own TLS CA + server certificate on first start
+# (stored on the data volume) and serves HTTPS directly on port 8000 — there
+# is no external TLS-terminating proxy.
 
 FROM python:3.13-slim
 
@@ -39,7 +40,7 @@ COPY core/ core/
 
 # Run unprivileged; hone.db lives on a persistent volume.
 RUN useradd --create-home --uid 10001 hone \
- && mkdir -p /data/archive /data/methodology \
+ && mkdir -p /data/archive /data/methodology /data/tls \
  && chown -R hone:hone /app /data
 USER hone
 
@@ -50,15 +51,18 @@ ENV HONE_DATA=/data \
     HONE_DB=/data/hone.db \
     HONE_CONFIG=/data/config.yaml \
     HONE_METHODOLOGY_DIR=/data/methodology \
-    HONE_ARCHIVE_DIR=/data/archive
+    HONE_ARCHIVE_DIR=/data/archive \
+    HONE_CERT_DIR=/data/tls
 VOLUME ["/data"]
 EXPOSE 8000
 
-# Liveness probe — the app must serve GET /healthz.
-# (python, not curl: the slim image ships no curl.)
+# Liveness probe — the app must serve GET /healthz over HTTPS. The cert is
+# self-generated, so the probe does not verify it. (python, not curl: the
+# slim image ships no curl.)
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"
+  CMD python -c "import ssl, urllib.request; urllib.request.urlopen('https://127.0.0.1:8000/healthz', context=ssl._create_unverified_context())"
 
-# uvicorn runs the FastAPI app; GATHER runs as an in-process scheduled task.
-# exec form → uvicorn is PID 1 and receives SIGTERM directly for a clean stop.
-CMD ["uvicorn", "core.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# `python -m core.main` runs main.run(): it generates the TLS material on
+# first start, then serves the FastAPI app over HTTPS (GATHER runs in-process).
+# exec form → the process is PID 1 and gets SIGTERM directly for a clean stop.
+CMD ["python", "-m", "core.main"]

@@ -42,8 +42,8 @@ class Config:
             admin_token          = os.environ.get("HONE_ADMIN_TOKEN", ""),
             http_port            = port,
             hostname             = host,
-            public_url           = os.environ.get("HONE_PUBLIC_URL",
-                                                  f"https://{host}:{port}"),
+            public_url           = (os.environ.get("HONE_PUBLIC_URL")
+                                     or f"https://{host}:{port}"),
             gather_interval      = int(os.environ.get("HONE_GATHER_INTERVAL", "600")),
             lease_seconds        = int(os.environ.get("HONE_LEASE_SECONDS", "1800")),
             heartbeat_seconds    = int(os.environ.get("HONE_HEARTBEAT_SECONDS", "300")),
