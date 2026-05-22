@@ -5,8 +5,9 @@ admin surface). Companion to `ARCHITECTURE.md` — that file is the model, this
 is the wire contract. Harness machinery — **not** part of
 `~/PATCH-REVIEW-METHODOLOGY.md`.
 
-Scope: the node-facing API and the admin endpoint. The merge-gate human web UI
-is out of scope (see `ARCHITECTURE.md`).
+Scope: the OAuth / enrollment endpoints, the node-facing work API, and the
+admin endpoint. The merge-gate and node-approval human web UIs are out of
+scope (see `ARCHITECTURE.md`).
 
 ## Conventions
 
@@ -15,31 +16,132 @@ is out of scope (see `ARCHITECTURE.md`).
   download).
 - **TLS required** on every request.
 - **Status codes** — `200` ok · `201` created · `204` no content (e.g. an
-  empty work queue) · `400` malformed request · `401` bad/missing fleet
-  secret · `403` bad/unknown/revoked client key · `404` not found · `409`
-  conflict (a lapsed or already-resolved claim) · `422` body fails schema
-  validation · `5xx` server fault.
+  empty work queue) · `400` malformed request, including the OAuth device-flow
+  states (see *Node enrollment*) · `401` missing/invalid/expired bearer token,
+  or a bad/missing fleet secret on the OAuth API · `403` authenticated but not
+  permitted (e.g. a revoked node) · `404` not found · `409` conflict (a lapsed
+  or already-resolved claim) · `422` body fails schema validation · `5xx`
+  server fault.
 - **Error body** — `{"error": {"code": "<machine-code>", "message": "<text>"}}`.
 - **Retry discipline** (see `ARCHITECTURE.md` → Node resilience): a node
-  retries `5xx` / timeouts with exponential backoff; it does **not** retry
-  `4xx` — those are misconfiguration or a lapsed claim, which retrying cannot
-  fix.
+  retries `5xx` / timeouts with exponential backoff. A `401` on the main API
+  means the access token expired — the node refreshes it (see *Node
+  enrollment*) and retries the call once. Other `4xx` are **not** retried — a
+  lapsed claim or misconfiguration, which retrying cannot fix.
 - **Idempotency** — `POST …/result` is idempotent on `claim_id` (below).
   `POST /v1/claims` is *not* idempotent, but a claim whose response is lost
   self-heals: the lease expires and the work is re-offered.
 
-## Authentication
+## Authentication & transport
 
-Two credentials, both presented on **every** node request, over TLS:
+hone-core is its own OAuth 2.0 authorization server (see `ARCHITECTURE.md` →
+Auth, enrollment & transport). The API has two channels, authenticated
+differently:
 
-| Header | Credential | Role |
+| Channel | Endpoints | Credential |
 | --- | --- | --- |
-| `X-HONE-Fleet-Secret` | the hone-core shared-secret | coarse fleet/transport gate — every node has it |
-| `X-HONE-Client-Key` | the client key | tenant identity — pre-registered, per-client |
+| **OAuth / enrollment** | `POST /v1/oauth/*` | `X-HONE-Fleet-Secret` — the fleet-wide shared secret |
+| **Main API** | everything else under `/v1` | `Authorization: Bearer <access_token>` |
+| **Admin** | `POST /v1/clients` | `X-HONE-Admin-Token` |
 
-A missing/bad fleet secret → `401`; a missing/unknown/revoked client key →
-`403`. Admin endpoints instead use `X-HONE-Admin-Token` (an operator
-credential, distinct from any client key).
+A node obtains its bearer token by **enrolling** — the device authorization
+grant, next section. The access token is short-lived; on a `401` the node
+refreshes it via `POST /v1/oauth/token` and retries. The fleet secret is used
+**only** on the OAuth endpoints — it is the gate that lets a fleet member
+*begin* enrollment, and it is never sent on the main API.
+
+A missing/bad fleet secret on an OAuth endpoint → `401`. A
+missing/invalid/expired bearer token on the main API → `401`. A valid token
+whose node has been revoked → `403`.
+
+**TLS.** hone-core generates its own certificate authority and server
+certificate on first startup and serves HTTPS directly. A node receives
+hone-core's CA certificate in its enrollment token response and validates the
+TLS of every main-API call against it; the OAuth channel, contacted before the
+node holds the CA, is trusted on first use and authenticated by the fleet
+secret. Every request is over TLS.
+
+---
+
+## Node enrollment — the device authorization grant
+
+A node is added to the fleet by **enrolling itself**, gated by an operator's
+approval — the OAuth 2.0 Device Authorization Grant (RFC 8628). This replaces
+the earlier admin-issued client key. Every enrollment request carries
+`X-HONE-Fleet-Secret`; none carries a bearer token (the node has none yet).
+
+### POST /v1/oauth/device_authorization — begin enrollment
+
+The node's first call to hone-core.
+
+**Request** `{ "node_name": "<optional label>", "task_types": ["review"] }` —
+the node's self-description, shown to the operator at approval. Both fields
+optional; `task_types` defaults to `["review"]`.
+
+**Response `200`**
+```json
+{
+  "device_code": "<opaque secret>",
+  "user_code": "WDJB-MJHT",
+  "verification_uri": "https://<core>/enroll",
+  "verification_uri_complete": "https://<core>/enroll?code=WDJB-MJHT",
+  "expires_in": 900,
+  "interval": 5
+}
+```
+The node logs `user_code` + `verification_uri` for the operator, then polls
+`POST /v1/oauth/token` every `interval` seconds. `device_code` is the node's
+secret handle for that polling; `user_code` is the short code the operator
+types. The pending enrollment expires `expires_in` seconds after issue.
+
+### Operator approval
+
+Out of scope for this wire API: the operator opens hone-core's web UI, enters
+the `user_code`, reviews the node's self-description, **binds the node to a
+tenant (client)**, and approves or denies it (`ARCHITECTURE.md` → Node
+management). This human approval is the trust anchor for adding a node.
+
+### POST /v1/oauth/token — obtain / refresh tokens
+
+Two grants, both carrying `X-HONE-Fleet-Secret`.
+
+**Device-code grant** — the node polls with
+```json
+{ "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+  "device_code": "<from device_authorization>" }
+```
+
+**Refresh grant** — renew an expired access token:
+```json
+{ "grant_type": "refresh_token", "refresh_token": "<opaque>" }
+```
+
+**Response `200`** — enrollment approved, or refresh accepted:
+```json
+{
+  "access_token": "<opaque>",
+  "token_type": "Bearer",
+  "expires_in": 3600,
+  "refresh_token": "<opaque>",
+  "ca_cert": "-----BEGIN CERTIFICATE-----\n…"
+}
+```
+`ca_cert` — hone-core's self-generated CA certificate, PEM — lets the node
+validate the TLS of every later main-API call. It is returned on the
+device-code grant (first enrollment); the node persists it with the tokens.
+
+**Response `400`** — the device-code grant is not yet complete; `error.code`
+is one of (RFC 8628):
+
+| `error.code` | Meaning — node action |
+| --- | --- |
+| `authorization_pending` | the operator has not approved yet — keep polling |
+| `slow_down` | polling too fast — add 5 s to the interval |
+| `access_denied` | the operator denied the enrollment — stop |
+| `expired_token` | the `device_code` expired — restart from `device_authorization` |
+| `invalid_grant` | unknown/spent `device_code` or `refresh_token` — stop |
+
+A bad/missing fleet secret → `401`.
 
 ---
 
@@ -137,11 +239,15 @@ node applies `checks` + `candidates` alike; the split tells it which
 applications to report as candidate outcomes. Optional `?version=N` pins a
 specific version (for a node finishing an in-flight review).
 
-## POST /v1/clients — pre-authorize a client (admin)
+## POST /v1/clients — register a tenant (admin)
 
-Auth: `X-HONE-Admin-Token`. **Request** `{ "name": "<client name>" }` ·
-**Response `201`** `{ "client_key": "<generated>", "name": "<client name>" }`.
-The returned key is what that client's nodes present as `X-HONE-Client-Key`.
+Registers a **client** — a tenant, the per-client review-isolation boundary. A
+node is bound to a tenant when an operator approves its enrollment, so this
+creates the tenant a node can then be assigned to. **No credential is minted
+here** — node credentials come only from enrollment.
+
+Auth: `X-HONE-Admin-Token`. **Request** `{ "name": "<tenant name>" }` ·
+**Response `201`** `{ "id": <int>, "name": "<tenant name>" }`.
 
 ---
 
@@ -317,6 +423,8 @@ a malformed proposal (counting against the node's reputation). Idempotent on
 
 ## Open / not yet specified
 
-- Whether the shared-secret is upgraded from a presented header to per-request
-  signing.
+- Whether the fleet secret on the OAuth API is upgraded from a presented
+  header to per-request signing.
+- Access / refresh token lifetimes (hone-core config) and whether the refresh
+  token rotates on use.
 - Pagination / listing endpoints, if any prove necessary for operators.

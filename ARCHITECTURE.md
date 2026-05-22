@@ -30,7 +30,7 @@ Every design decision below follows from this one line.
   │                                  │        │  - owns its own kernel repo   │
   │  · cron: GATHER from sources     │  REST  │  - scratch storage            │
   │  · serve REST: claims, results,  │◄──────►│                               │
-  │    methodology, client auth      │  /TLS  │  task worker:                 │
+  │    methodology, node enroll      │  /TLS  │  task worker:                 │
   │  · mechanical self-honing        │        │   claim → do AI work → report │
   │  · owns hone.db                   │        │   (review tasks +             │
   └────────────────────────────────┘         │    maintenance tasks)         │
@@ -64,13 +64,16 @@ independently of it.
 ### AI node
 
 A containerized worker that **starts from scratch**. Given only its start
-parameters — a Claude API token, the hone-core URL, the hone-core
-shared-secret, and a client key — plus a mapped storage volume, it bootstraps
-everything else itself. The node image bakes in **nothing** deployment- or
-domain-specific (no methodology, no kernel tree): on start it fetches the
-methodology from hone-core, and it **builds its own reference kernel
-git repo at runtime** in its storage volume — so it can check out any base
-commit, with no shared tree to thrash and nothing to pre-provision.
+parameters — a Claude API token, the hone-core URL, and the fleet secret —
+plus a mapped storage volume, it bootstraps everything else itself. On first
+start it **enrolls into the fleet** (the device-authorization grant; see
+*Auth, enrollment & transport*), obtaining its bearer credentials and
+hone-core's CA certificate before it does any work. The node image bakes in
+**nothing** deployment- or domain-specific (no methodology, no kernel tree):
+on start it fetches the methodology from hone-core, and it **builds its own
+reference kernel git repo at runtime** in its storage volume — so it can check
+out any base commit, with no shared tree to thrash and nothing to
+pre-provision.
 
 The review is **pure analysis** — a node reads the patch and the surrounding
 code and reasons about it. It does **not** build the kernel or run review
@@ -108,9 +111,12 @@ never lose or double-count work.
   worker node has nothing to do but reconnect; this covers the node's initial
   connection at startup too). Initial and maximum backoff are configuration
   options, defaulting to **1 s** and **5 min**; `429` honours `Retry-After`.
-- **Fail fast on misconfiguration.** `401` / `403` (bad shared-secret or
-  client key) and other `4xx` are not transient — the node surfaces the error
-  and stops rather than spinning; retrying cannot fix a bad credential.
+- **Refresh, then fail fast.** A `401` on the main API means the access token
+  has expired — the node refreshes it (`POST /v1/oauth/token`, the refresh
+  grant) and retries the call once. A refresh that itself fails permanently, a
+  `403` (the node's enrollment was revoked), or a bad fleet secret are *not*
+  transient — the node surfaces the error and stops rather than spinning;
+  retrying cannot fix a revoked node or a bad credential.
 - **Idempotent submission.** `POST …/result` is idempotent, keyed on the claim
   id — a re-submit after a lost response is a safe no-op. Heartbeat and the
   `GET`s are naturally idempotent. A claim whose *response* is lost simply
@@ -149,7 +155,10 @@ Pages:
   comparison, no candidate counter updates, no candidate nominations); the
   operator simply receives the review. The patchset is flagged `manual` so
   hone-core keeps it out of the self-honing machinery.
-- **Node management** — registered clients and the live node fleet.
+- **Node management** — the registered tenants, the live node fleet, and the
+  **pending-enrollment queue**: an operator enters a node's device-grant
+  *user code* here to approve it and bind the new node to a tenant (see
+  *Auth, enrollment & transport*).
 - **Settings** — the hone-core configuration options.
 - **Merge gate** — disposition the `methodology_proposals` queue (see *The
   merge gate*).
@@ -172,8 +181,10 @@ Each service maps **one local volume** as its data store; everything else in a
 container image is ephemeral.
 
 - **hone-core** — its volume holds `hone.db`, the hone-core config, the
-  methodology import/export files, and the gathered patchset-source archives
-  (public-inbox clones). hone-core's entire owned state, in one place.
+  **self-generated TLS CA and server certificate** (created once on first
+  start), the methodology import/export files, and the gathered
+  patchset-source archives (public-inbox clones). hone-core's entire owned
+  state, in one place.
 - **Node** — its volume holds the reference kernel clone(s) and review
   scratch. It starts empty; the node self-populates it (see *AI node*), and a
   restarted node reuses it rather than re-cloning.
@@ -188,7 +199,7 @@ Everything else is shared:
 | --- | --- | --- |
 | **Global corpus** | `patchsets` (the patch metadata + `base_commit`), `patch_files`, `messages`, `patchset_sources`, reviewer identities (`reviewers`, `reviewer_emails`) | gathered once, shared by all clients |
 | **Global methodology** | the versioned methodology, the candidate practices + their **pooled** counters | shared; all clients' misses hone the one methodology |
-| **Per-client** | `clients` (the authorized client keys), `client_reviews` keyed `(client_id, root_message_id)` — the review lifecycle, verdict, token cost — and the classified `findings` hanging off them | isolated per client |
+| **Per-client** | `clients` (the registered tenants), `client_reviews` keyed `(client_id, root_message_id)` — the review lifecycle, verdict, token cost — and the classified `findings` hanging off them | isolated per client |
 
 A patchset is gathered once but **reviewed once per client**, independently.
 `patchsets` no longer carries review columns — those move to `client_reviews`.
@@ -239,15 +250,69 @@ Import/export keep the methodology portable and human-editable; distillation
 keeps what reaches a node lean. The merge gate mutates the canonical store
 (a new version); the next distillation propagates it to nodes.
 
-## Auth & transport
+## Auth, enrollment & transport
 
-Two credentials, two layers, both presented on every request, all over TLS:
+hone-core is its own **OAuth 2.0 authorization server**. There is no external
+identity provider — consistent with hone-core being one self-contained,
+deterministic instance.
 
-- **shared-secret** — the coarse fleet/transport gate; every node has it
-  (request signing / enrollment).
-- **client key** — the fine-grained tenant identity. A client is
-  **pre-authorized** on hone-core (an admin endpoint registers the
-  key); a node acts on behalf of exactly one client.
+**Two channels, authenticated differently.**
+
+- The **OAuth / enrollment API** (`/v1/oauth/*`) is the *bootstrap* channel. A
+  brand-new node has only three things: the hone-core URL, the **fleet
+  secret**, and its Claude API token. The fleet secret — a fleet-wide shared
+  secret every node is given — gates the OAuth API and **nothing else**: it is
+  what lets a fleet member *begin* enrollment, and it keeps the enrollment
+  endpoint (and the operator's approval queue) closed to anyone outside the
+  fleet.
+- The **main API** (everything else) is reached with an OAuth **bearer
+  token**. The token carries the node's identity and its tenant (client); it
+  fully replaces the earlier per-request shared-secret + client-key header
+  pair.
+
+**Node enrollment — the device authorization grant (RFC 8628).** A node is
+*added to the fleet by enrolling itself*, gated by a human:
+
+1. On first start the node calls `POST /v1/oauth/device_authorization`
+   (presenting the fleet secret) and is issued a short **user code** and a
+   verification URL. It logs them and begins polling.
+2. An operator opens hone-core's web UI, enters the user code, reviews the
+   node's self-described metadata, **binds it to a tenant (client)**, names
+   it, and approves — or denies. This human step is the trust anchor; it
+   replaces the earlier admin "pre-register a client key" call.
+3. The node's poll to `POST /v1/oauth/token` then returns an **access token**,
+   a **refresh token**, and hone-core's **CA certificate** (see *Transport*
+   below). The node persists all three to its data volume and is now a fleet
+   member.
+
+Access tokens are short-lived; the node refreshes them with the refresh token
+over the OAuth channel. An access token is **opaque** — hone-core stores only
+its hash and validates it by lookup, so revoking a node is a single database
+update. (hone-core is one instance; a per-request database lookup is the
+existing pattern, and opaque tokens keep revocation immediate and add no
+cryptographic key management.)
+
+**Transport — a self-provisioned TLS CA.** On **first startup** hone-core
+generates, once, a private **certificate authority** and a server certificate
+signed by it, and stores them on its data volume (reused on every later
+start). hone-core serves HTTPS directly with that certificate — there is no
+external TLS-terminating proxy to provision.
+
+The two channels bootstrap trust differently, and that is the reason for
+keeping them apart:
+
+- The **OAuth channel** is contacted before the node holds hone-core's CA, so
+  the node trusts that first connection on first use; the fleet secret is what
+  authenticates the exchange.
+- The **CA certificate is delivered to the node during enrollment** (in the
+  token response). From then on the node validates the TLS of **every
+  non-OAuth call** against that CA. "The node trusts hone-core" is therefore
+  itself established through the gated, human-approved enrollment — not
+  pre-provisioned out of band.
+
+**Admin** endpoints (e.g. registering a tenant) use a separate
+`X-HONE-Admin-Token`, an operator credential distinct from any node or fleet
+credential.
 
 ## Work lifecycle & the claim protocol
 
@@ -434,10 +499,11 @@ is informed, not a rubber stamp — the diff, the magnitude metrics from layer
 originating verified misses, and the submitting node's client provenance.
 
 **4 — Node reputation.** Proposals that fail layer-2 validation or are
-*Rejected* at the gate are counted per client key; a client whose proposals
-are consistently invalid or rejected is flagged for key revocation. A
-bad-acting node is caught by its track record, through the existing
-client-key auth model.
+*Rejected* at the gate are counted per enrolled node (and its tenant); a node
+whose proposals are consistently invalid or rejected is flagged for
+**enrollment revocation** — its tokens are revoked and it must re-enroll
+through the operator gate. A bad-acting node is caught by its track record,
+through the existing node-enrollment auth model.
 
 A fifth option — having other nodes **vote** on a proposal — is deliberately
 *not* adopted: it would rest trust on an honest-majority assumption about
@@ -448,10 +514,14 @@ autonomous decision.
 ## REST API
 
 The hone-core↔node wire contract is specified in **`API.md`** — base path
-`/v1`: `POST /v1/claims` (claim a task), `…/heartbeat`, `…/result` (the review
-completion record), `GET …/blob`, `GET …/source-review`, `GET /v1/methodology`,
-and the admin `POST /v1/clients`. The merge gate is a **human web UI** on
-hone-core, not a node-facing API.
+`/v1`. It has three parts: the **OAuth / enrollment** endpoints
+`POST /v1/oauth/device_authorization` and `POST /v1/oauth/token`
+(fleet-secret-gated); the **work API** — `POST /v1/claims` (claim a task),
+`…/heartbeat`, `…/result` (the completion record), `GET …/blob`,
+`GET …/source-review`, `GET /v1/methodology` (bearer-token-authed); and the
+admin `POST /v1/clients` (register a tenant). The merge gate and the
+node-enrollment approval are **human web UI** on hone-core, not node-facing
+APIs.
 
 ## Today vs. target
 
