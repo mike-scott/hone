@@ -29,6 +29,8 @@ runtime environment. Current coverage:
 - `test_ui_enrollment.py` — the operator node-management / enrollment UI.
 - `test_ui_queue.py` — the review-queue home page and the queue query
   helpers (`review_counts`, `list_reviews`).
+- `test_ui_settings.py` — the Settings page: rendering, masked secrets,
+  save-and-apply, and the validation rejections.
 - `test_node_client.py` — the hone-node `HoneCoreClient`: identity
   persistence and the auth-failure paths.
 - `test_node_backoff.py` — the hone-node transient-failure backoff: which

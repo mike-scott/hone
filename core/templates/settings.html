@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Settings · hone-core{% endblock %}
+{% block content %}
+<h1 class="h3 mb-4">Settings</h1>
+
+{% if saved %}
+<div class="alert alert-success" style="max-width: 40rem">Settings saved.</div>
+{% endif %}
+
+<form method="post" action="/settings" style="max-width: 40rem">
+  {% for group, fields in groups %}
+  <h2 class="h5 mt-4">{{ group.replace("_", " ").title() }}</h2>
+  {% for f in fields %}
+  <div class="mb-3">
+    <label class="form-label" for="{{ f.name }}">{{ f.label }}</label>
+    <input class="form-control{% if f.error %} is-invalid{% endif %}"
+           id="{{ f.name }}" name="{{ f.name }}" value="{{ f.value }}">
+    {% if f.error %}
+    <div class="invalid-feedback">{{ f.error }}</div>
+    {% else %}
+    <div class="form-text">{{ f.unit }}</div>
+    {% endif %}
+  </div>
+  {% endfor %}
+  {% endfor %}
+  <button class="btn btn-primary mt-2">Save</button>
+</form>
+
+<h2 class="h5 mt-5">Deployment configuration</h2>
+<p class="text-muted small">
+  Set at container start (`core/.env`); change these by redeploying
+  (ARCHITECTURE.md &rarr; Configuration &amp; the Settings page).
+</p>
+<table class="table table-sm" style="max-width: 40rem">
+  <tbody>
+  {% for label, value in deployment %}
+    <tr>
+      <th class="fw-normal text-muted" style="width: 12rem">{{ label }}</th>
+      <td><code>{{ value }}</code></td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

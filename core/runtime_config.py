@@ -58,6 +58,26 @@ _ENV_SEEDS = {
 }
 
 
+# Settings-form schema — drives the operator UI's Settings page and the
+# validation of a submission. `kind`: "int" (a positive integer), "int0"
+# (>= 0), "csv" (a comma-separated list).
+FIELDS = [
+    ("gather", "interval_seconds", "GATHER cadence", "seconds", "int"),
+    ("gather", "sources", "Enabled gather sources",
+     "comma-separated, in priority order; empty = every installed source",
+     "csv"),
+    ("work_queue", "lease_seconds", "Claim lease", "seconds", "int"),
+    ("work_queue", "heartbeat_seconds", "Heartbeat interval", "seconds", "int"),
+    ("enrollment", "access_token_ttl", "Access-token TTL", "seconds", "int"),
+    ("enrollment", "refresh_token_ttl", "Refresh-token TTL",
+     "seconds (0 = never expires)", "int0"),
+    ("enrollment", "device_code_ttl", "Device-code TTL", "seconds", "int"),
+    ("enrollment", "device_poll_interval", "Device poll interval",
+     "seconds", "int"),
+    ("merge_gate", "redraft_cap", "Merge-gate redraft cap", "count", "int"),
+]
+
+
 class RuntimeConfig:
     """The resolved operator-tunable config — the defaults overlaid with the
        config.yaml file. Flat properties expose the values consumers use."""
@@ -168,3 +188,36 @@ def load(path):
 def save(path, runtime_config):
     """Persist a RuntimeConfig to `path` — the Settings page calls this."""
     _write(path, runtime_config.as_dict())
+
+
+def parse_form(form, valid_sources=None):
+    """Validate a Settings-page submission. `form` maps each 'group.key' to its
+       posted value. Returns (RuntimeConfig, {}) on success, or
+       (None, {'group.key': message}) on failure — the caller writes
+       config.yaml only on success. `valid_sources`, if given, constrains the
+       gather sources to the installed modules."""
+    data = copy.deepcopy(DEFAULTS)
+    errors = {}
+    for group, key, label, _unit, kind in FIELDS:
+        name = f"{group}.{key}"
+        raw = (form.get(name) or "").strip()
+        if kind == "csv":
+            items = _csv(raw)
+            unknown = ([s for s in items if s not in valid_sources]
+                       if valid_sources is not None else [])
+            if unknown:
+                errors[name] = "unknown source(s): " + ", ".join(unknown)
+            else:
+                data[group][key] = items
+            continue
+        try:
+            value = int(raw)
+        except ValueError:
+            errors[name] = f"{label} must be a whole number"
+            continue
+        floor = 0 if kind == "int0" else 1
+        if value < floor:
+            errors[name] = f"{label} must be {floor} or more"
+        else:
+            data[group][key] = value
+    return (None, errors) if errors else (RuntimeConfig(data), {})

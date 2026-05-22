@@ -16,7 +16,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from core import core_db
+from core import core_db, gather, runtime_config
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 templates = Jinja2Templates(directory=os.path.join(_HERE, "templates"))
@@ -150,7 +150,66 @@ async def merge_gate(request: Request):
                                       {"page_title": "Merge gate"})
 
 
+# --- settings --------------------------------------------------------------
+
+def _deployment_view(cfg):
+    """The read-only deployment-config rows for the Settings page (secrets
+       masked — they are set at container start, not editable here)."""
+    def masked(v):
+        return "•••••••• (set)" if v else "(unset)"
+    return [
+        ("Hostname", cfg.hostname),
+        ("Public URL", cfg.public_url),
+        ("HTTP port", cfg.http_port),
+        ("Data directory", cfg.data_dir),
+        ("Fleet secret", masked(cfg.fleet_secret)),
+        ("Admin token", masked(cfg.admin_token)),
+    ]
+
+
+def _settings_fields(values, errors=None):
+    """The Settings form fields, grouped. `values` maps 'group.key' to the
+       value to show in the input; `errors` maps it to a message."""
+    errors = errors or {}
+    groups = {}
+    for group, key, label, unit, _kind in runtime_config.FIELDS:
+        name = f"{group}.{key}"
+        groups.setdefault(group, []).append({
+            "name": name, "label": label, "unit": unit,
+            "value": values.get(name, ""), "error": errors.get(name)})
+    return list(groups.items())
+
+
 @router.get("/settings", response_class=HTMLResponse)
 async def settings(request: Request):
-    return templates.TemplateResponse(request, "page.html",
-                                      {"page_title": "Settings"})
+    """View the deployment configuration and edit the operator-tunable
+       settings (ARCHITECTURE.md → Configuration & the Settings page)."""
+    rc = request.app.state.runtime_config.as_dict()
+    values = {}
+    for group, key, _label, _unit, kind in runtime_config.FIELDS:
+        v = rc[group][key]
+        values[f"{group}.{key}"] = ", ".join(v) if kind == "csv" else v
+    return templates.TemplateResponse(request, "settings.html", {
+        "groups": _settings_fields(values),
+        "deployment": _deployment_view(request.app.state.config),
+        "saved": request.query_params.get("saved") == "1"})
+
+
+@router.post("/settings")
+async def save_settings(request: Request):
+    """Validate the submission, persist it to config.yaml, and update the
+       live config — no restart needed. Invalid input re-renders the form with
+       the fields flagged; config.yaml is left untouched."""
+    form = await request.form()
+    rc, errors = runtime_config.parse_form(
+        form, valid_sources=gather.gather_api.available())
+    if not errors:
+        runtime_config.save(request.app.state.config.config_path, rc)
+        request.app.state.runtime_config = rc
+        return RedirectResponse("/settings?saved=1", status_code=303)
+    submitted = {f"{g}.{k}": (form.get(f"{g}.{k}") or "")
+                 for g, k, *_ in runtime_config.FIELDS}
+    return templates.TemplateResponse(request, "settings.html", {
+        "groups": _settings_fields(submitted, errors),
+        "deployment": _deployment_view(request.app.state.config),
+        "saved": False}, status_code=400)
