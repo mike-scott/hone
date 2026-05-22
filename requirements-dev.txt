@@ -1,0 +1,8 @@
+# hone — test / development dependencies.
+# Install alongside the service requirements, then run pytest:
+#   pip install -r core/requirements.txt -r requirements-dev.txt
+#   pytest
+#
+# fastapi, jsonschema and pyyaml come from core/requirements.txt.
+pytest>=8.0
+httpx>=0.27        # transport for fastapi.testclient.TestClient
