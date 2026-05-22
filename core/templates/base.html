@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}hone-core{% endblock %}</title>
+  <link rel="stylesheet" href="/static/bootstrap.min.css">
+</head>
+<body>
+  <nav class="navbar navbar-expand-md navbar-dark bg-dark">
+    <div class="container-fluid">
+      <a class="navbar-brand" href="/">hone</a>
+      <ul class="navbar-nav flex-row gap-3">
+        <li class="nav-item"><a class="nav-link" href="/">Overview</a></li>
+        <li class="nav-item"><a class="nav-link" href="/queue">Queue</a></li>
+        <li class="nav-item"><a class="nav-link" href="/submissions">Submissions</a></li>
+        <li class="nav-item"><a class="nav-link" href="/nodes">Nodes</a></li>
+        <li class="nav-item"><a class="nav-link" href="/merge-gate">Merge gate</a></li>
+        <li class="nav-item"><a class="nav-link" href="/settings">Settings</a></li>
+      </ul>
+    </div>
+  </nav>
+  <main class="container-fluid py-4">
+    {% block content %}{% endblock %}
+  </main>
+  <script src="/static/bootstrap.bundle.min.js"></script>
+  <script src="/static/htmx.min.js"></script>
+</body>
+</html>
