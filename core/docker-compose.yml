@@ -1,0 +1,34 @@
+# hone-core — the control-plane service, deployed on its own (one instance).
+#
+#   cd core && cp .env.example .env     # fill in the secrets
+#   docker compose up --build
+#
+# The build context is the project root (..) because the image needs
+# common/. hone-core serves HTTPS directly with a TLS certificate it
+# generates on first start. hone-node is a separate deployment — see node/.
+
+name: hone-core
+
+services:
+  hone-core:
+    build:
+      context: ..                        # project root — the build needs common/
+      dockerfile: core/Dockerfile
+    image: hone-core
+    restart: unless-stopped
+    ports:
+      # host:container — HONE_PUBLISH_PORT is host-side only; the container
+      # always listens on 8000. HTTPS: hone-core terminates TLS itself.
+      - "${HONE_PUBLISH_PORT:-8000}:8000"
+    env_file:
+      - .env                             # every setting in .env reaches the container
+    environment:
+      # Required settings, re-asserted so `compose up` fails fast if missing.
+      HONE_FLEET_SECRET: "${HONE_FLEET_SECRET:?set it in .env}"
+      HONE_ADMIN_TOKEN:  "${HONE_ADMIN_TOKEN:?set it in .env}"
+      HONE_HOSTNAME:     "${HONE_HOSTNAME:?set it in .env}"
+    volumes:
+      - hone-core-data:/data             # db, config, methodology files, source archives
+
+volumes:
+  hone-core-data:

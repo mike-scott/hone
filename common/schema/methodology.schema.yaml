@@ -1,0 +1,492 @@
+# methodology.schema.yaml — JSON Schema (draft 2020-12) for a hone
+# methodology document.
+#
+# Validates `core/default-methodology.yaml` and any exported / imported
+# methodology. Every property carries a `description`, so this schema
+# doubles as the functional specification of the methodology format.
+#
+# Validate (run from the project root):
+#   python3 -c "import yaml,jsonschema; \
+#     jsonschema.validate( \
+#       yaml.safe_load(open('core/default-methodology.yaml')), \
+#       yaml.safe_load(open('common/schema/methodology.schema.yaml')))"
+#
+# Invariants this schema deliberately enforces structurally:
+#   - every object is closed (additionalProperties: false) — a stray or
+#     misspelled key fails validation rather than being silently ignored.
+#   - `checks` entries forbid an `order` field (additionalProperties: false)
+#     AND a `severity` field — checks are an unordered set processed in any
+#     order by design, AND severity is a per-finding property assigned at
+#     report-finalization time, not a property of the check that produced
+#     the finding.
+#   - `severity_scale.levels` is exactly five entries
+#     (minItems / maxItems: 5) — the rubric is structurally five-level.
+#   - `severity_scale.weighting` requires a non-negative number for every
+#     one of the five tags.
+#
+# Invariants JSON Schema cannot express, left to the importer:
+#   - id uniqueness within `principles` / `stages` / `checks`;
+#   - referential integrity of `checks[].stage` against `stages[].id`;
+#   - within `severity_scale.levels`, the five tags appear exactly once
+#     each, in the order critical, major, moderate, minor, nit;
+#   - `severity_scale.weighting` is monotonically non-decreasing from
+#     nit through critical (the schema enforces only non-negativity);
+#   - within each severity level, `criteria[].id` is unique;
+#   - across the whole rubric, `anchors[].id` is globally unique;
+#   - anchor `example_patch` references resolve to known patchsets in
+#     `patchsets` (warning, not rejection — anchors may pre-date the
+#     gathering of their referenced example).
+
+$schema: "https://json-schema.org/draft/2020-12/schema"
+$id: "urn:hone:methodology-schema"
+title: hone methodology
+description: >-
+  A patch-review methodology — the principles, stages, and bug-class checks a
+  review node applies to a kernel patch. The canonical copy is DB-resident and
+  versioned; this schema validates the YAML file form (the import / export
+  representation, and the `core/default-methodology.yaml` seed).
+
+type: object
+additionalProperties: false
+required:
+  - name
+  - version
+  - description
+  - principles
+  - stages
+  - checks
+  - documentation_review
+  - report_finalization
+  - operations
+
+properties:
+
+  name:
+    type: string
+    minLength: 1
+    description: Human-readable name of the methodology.
+
+  version:
+    type: integer
+    minimum: 1
+    description: >-
+      Monotonic methodology version. hone-core bumps it on every
+      accepted merge-gate change; the seed file is version 1.
+
+  description:
+    type: string
+    minLength: 1
+    description: >-
+      Why the methodology exists and what it is for — motivating prose for a
+      human reader. Not an operative instruction a node executes.
+
+  principles:
+    type: array
+    minItems: 1
+    description: >-
+      The foundational review stances. Principles are unconditionally in force
+      and are NOT a rankable set — they carry no priority or weight. They are
+      operator-only: a review node can never add or alter a principle. Ids
+      must be unique within this list.
+    items:
+      $ref: "#/$defs/principle"
+
+  stages:
+    type: array
+    minItems: 1
+    description: >-
+      The ordered macro-structure of a review (0 -> 1 -> 2 -> 3 -> S). Unlike
+      checks, stages ARE a sequence. Operator-only: a node cannot add or alter
+      a stage. Ids must be unique within this list.
+    items:
+      $ref: "#/$defs/stage"
+
+  checks:
+    type: array
+    minItems: 1
+    description: >-
+      The bug-class checks — an UNORDERED set, each an independent analysis
+      applied in any order (a node may even parallelise them). A graduated
+      candidate practice becomes a new check here; checks are the only part of
+      the methodology a node can grow (via the merge gate). Ids must be unique
+      within this list. Checks do NOT carry a `severity` field — severity is a
+      per-finding property assigned at report-finalization time; the same
+      check can produce findings at any severity depending on the specific
+      impact and reachability of the instance.
+    items:
+      $ref: "#/$defs/check"
+
+  documentation_review:
+    type: object
+    additionalProperties: false
+    required: [title, body]
+    description: The review procedure specific to documentation patches.
+    properties:
+      title:
+        type: string
+        minLength: 1
+        description: Section title.
+      body:
+        type: string
+        minLength: 1
+        description: The documentation-review procedure, in full.
+
+  report_finalization:
+    type: object
+    additionalProperties: false
+    required: [body, severity_scale]
+    description: >-
+      How to convert the staged analysis into the delivered review, plus the
+      severity scale every finding is tagged against.
+    properties:
+      body:
+        type: string
+        minLength: 1
+        description: The report-finalization procedure, in full.
+      severity_scale:
+        $ref: "#/$defs/severity_scale"
+        description: >-
+          The finding-severity rubric. See `$defs/severity_scale`.
+
+  operations:
+    $ref: "#/$defs/operations"
+    description: >-
+      The four operation prompts — one per node task type. See
+      `$defs/operations`.
+
+$defs:
+
+  slug:
+    type: string
+    pattern: "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
+    description: >-
+      A kebab-case identifier — starts with a lowercase letter, then lowercase
+      letters and digits in single-hyphen-separated words. Meaningful and
+      unbounded, so ids stay readable and scale to hundreds of checks; the
+      leading-letter rule also rules out opaque ordinals like `2a`.
+
+  severity_tag:
+    type: string
+    enum: [critical, major, moderate, minor, nit]
+    description: >-
+      One of the five severity tags. Used as the `tag` of each
+      `severity_scale.levels[]` entry, as the required key set of
+      `severity_scale.weighting`, and as the non-null values of
+      `severity_scale.cross_kind_defaults`.
+
+  severity_tag_or_null:
+    anyOf:
+      - type: "null"
+      - $ref: "#/$defs/severity_tag"
+    description: >-
+      Either a severity tag or null. Null means "no default — assign
+      per-content"; a tag means findings of the relevant scope start at
+      that severity absent specific reasons to deviate.
+
+  principle:
+    type: object
+    additionalProperties: false
+    required: [id, title, body]
+    description: One foundational review stance.
+    properties:
+      id:
+        $ref: "#/$defs/slug"
+        description: >-
+          Stable slug id, e.g. `trailers-are-not-evidence`. Referenced by name
+          from methodology prose and from review output.
+      title:
+        type: string
+        minLength: 1
+        description: Short principle title.
+      body:
+        type: string
+        minLength: 1
+        description: The principle, stated in full.
+
+  stage:
+    type: object
+    additionalProperties: false
+    required: [id, title, applies, body]
+    description: One stage of the ordered review macro-structure.
+    properties:
+      id:
+        type: string
+        pattern: "^[0-9A-Za-z]+$"
+        description: >-
+          Short stage id (`0`, `1`, `2`, `3`, `S`). Stages are an ordered,
+          stable set, so ids stay terse and ordinal.
+      title:
+        type: string
+        minLength: 1
+        description: Stage title.
+      applies:
+        type: string
+        minLength: 1
+        description: One line stating which patches this stage applies to.
+      body:
+        type: string
+        minLength: 1
+        description: The stage procedure, in full.
+
+  check:
+    type: object
+    additionalProperties: false   # forbids `order` AND `severity` —
+                                   # checks are unordered AND severity is
+                                   # per-finding, not per-check, by design
+    required: [id, stage, title, body]
+    description: >-
+      One bug-class check. Order-independent: a check carries no `order` /
+      priority field — anything with a real processing-order dependency must
+      be a stage, not a check. Severity-independent: a check carries no
+      `severity` field — severity is assigned per-finding at
+      report-finalization time, and the same check can produce findings at
+      any of the five severities depending on the specific impact and
+      reachability of the instance.
+    properties:
+      id:
+        $ref: "#/$defs/slug"
+        description: >-
+          Stable slug id, e.g. `object-lifetime`. A graduated candidate keeps
+          its slug, so a candidate practice and the check it becomes share one
+          id.
+      stage:
+        type: string
+        pattern: "^[0-9A-Za-z]+$"
+        description: >-
+          Id of the stage this check runs under. Must match a `stages[].id`
+          (referential integrity is enforced by the importer, not this schema).
+      title:
+        type: string
+        minLength: 1
+        description: Short check title.
+      body:
+        type: string
+        minLength: 1
+        description: The check, stated in full.
+
+  severity_scale:
+    type: object
+    additionalProperties: false
+    required: [levels, weighting, uncertainty_rule, cross_kind_defaults]
+    description: >-
+      The finding-severity rubric. Five levels, each with a `meaning`
+      paragraph, a `blocks_merge` boolean, and structured `criteria` that a
+      node's severity_rationale references by id when assigning a finding's
+      severity. Rubric-wide policy (`weighting`, `uncertainty_rule`,
+      `cross_kind_defaults`) governs statistical aggregation and
+      ambiguous-case resolution. The rubric is per-finding, not per-check:
+      checks and candidate practices carry no severity field of their own —
+      severity is assigned to each finding at report-finalization time, and
+      the same check or candidate can produce findings at any of the five
+      severities.
+    properties:
+      levels:
+        type: array
+        minItems: 5
+        maxItems: 5
+        description: >-
+          Exactly five severity levels, in the order critical, major,
+          moderate, minor, nit (most severe first). Tag-uniqueness and
+          tag-ordering are enforced by the importer; the schema enforces
+          only the count.
+        items:
+          $ref: "#/$defs/severity_level"
+      weighting:
+        type: object
+        additionalProperties: false
+        required: [critical, major, moderate, minor, nit]
+        description: >-
+          Numeric weight per severity tag, consumed by statistical
+          aggregation (severity_weighted_catch_rate and similar metrics).
+          The schema enforces non-negativity; the importer additionally
+          enforces monotonic non-decrease from nit through critical.
+        properties:
+          critical:
+            type: number
+            minimum: 0
+            description: Weight for `critical` findings.
+          major:
+            type: number
+            minimum: 0
+            description: Weight for `major` findings.
+          moderate:
+            type: number
+            minimum: 0
+            description: Weight for `moderate` findings.
+          minor:
+            type: number
+            minimum: 0
+            description: Weight for `minor` findings.
+          nit:
+            type: number
+            minimum: 0
+            description: Weight for `nit` findings.
+      uncertainty_rule:
+        type: string
+        enum: [default_to_lower, default_to_higher, require_rationale]
+        description: >-
+          How a node resolves a finding whose criteria match two levels.
+          `default_to_lower` and `default_to_higher` pick automatically;
+          `require_rationale` forces the node to record an explicit
+          justification in its severity_rationale rather than defaulting.
+      cross_kind_defaults:
+        type: object
+        additionalProperties: false
+        required: [series, cross_patch, patch]
+        description: >-
+          Default severity for concerns by `patch_scope.kind` (the concern's
+          scope across the patch series). A null value means no default —
+          assign per-content. A tag value means findings of that scope kind
+          start at that severity absent specific reasons to deviate.
+        properties:
+          series:
+            $ref: "#/$defs/severity_tag_or_null"
+            description: "Default for `kind: series` concerns."
+          cross_patch:
+            $ref: "#/$defs/severity_tag_or_null"
+            description: "Default for `kind: cross_patch` concerns."
+          patch:
+            $ref: "#/$defs/severity_tag_or_null"
+            description: "Default for `kind: patch` concerns."
+
+  severity_level:
+    type: object
+    additionalProperties: false
+    required: [tag, meaning, blocks_merge, criteria, anchors]
+    description: One level of the finding-severity rubric.
+    properties:
+      tag:
+        $ref: "#/$defs/severity_tag"
+        description: The severity tag for this level.
+      meaning:
+        type: string
+        minLength: 1
+        description: >-
+          Human-readable summary of what a finding at this severity means.
+          Preserved as prose for human readers; a node's structured
+          severity_rationale references the `criteria` below by id, not
+          this prose.
+      blocks_merge:
+        type: boolean
+        description: Whether a finding at this severity blocks the merge.
+      criteria:
+        type: array
+        minItems: 1
+        description: >-
+          Structured criteria decomposing the meaning prose into id-addressable
+          categories. A node's severity_rationale.matched_criteria references
+          criteria by id. Ids are unique within this level (importer-enforced).
+        items:
+          $ref: "#/$defs/severity_criterion"
+      anchors:
+        type: array
+        description: >-
+          Calibration anchors — concrete examples drawn from the corpus that
+          help a node converge on consistent severity assignments over time
+          for similar bug classes. May be empty in the seed methodology;
+          accumulates as audit reveals drift. Anchor ids are globally unique
+          across the whole rubric (importer-enforced).
+        items:
+          $ref: "#/$defs/severity_anchor"
+
+  severity_criterion:
+    type: object
+    additionalProperties: false
+    required: [id, description]
+    description: One criterion within a severity level.
+    properties:
+      id:
+        $ref: "#/$defs/slug"
+        description: >-
+          Stable slug id, e.g. `memory-unsafety`. Unique within the level.
+          Referenced by a node's severity_rationale.matched_criteria.
+      description:
+        type: string
+        minLength: 1
+        description: What kind of finding matches this criterion.
+
+  severity_anchor:
+    type: object
+    additionalProperties: false
+    required: [id, description]
+    description: >-
+      One calibration anchor — a concrete example pinning a severity
+      assignment to a real case from the corpus.
+    properties:
+      id:
+        $ref: "#/$defs/slug"
+        description: >-
+          Stable slug id, e.g. `anchor-critical-001`. Globally unique
+          across the rubric.
+      description:
+        type: string
+        minLength: 1
+        description: What the anchor illustrates.
+      example_patch:
+        type: string
+        minLength: 1
+        description: >-
+          Optional Message-ID of a real patchset in the corpus that
+          exemplifies this severity assignment. Not all anchors point to
+          specific patches; the importer warns (does not reject) if the
+          reference does not resolve in `patchsets`.
+      example_concern_text:
+        type: string
+        minLength: 1
+        description: >-
+          Optional. The concern text that exemplifies the assignment.
+      notes:
+        type: string
+        minLength: 1
+        description: Optional. Free-form notes about the anchor.
+  operations:
+    type: object
+    additionalProperties: false
+    required: [prepare, review, train, draft]
+    description: >-
+      The four operation prompts. One entry per node task type
+      (prepare / review / train / draft). All four are required —
+      a methodology with missing operations cannot serve a full
+      claim mix and would let the node defeat its prompt by absence.
+    properties:
+      prepare:
+        $ref: "#/$defs/operation"
+        description: The prepare-task operation prompt.
+      review:
+        $ref: "#/$defs/operation"
+        description: The review-task operation prompt.
+      train:
+        $ref: "#/$defs/operation"
+        description: The train-task operation prompt.
+      draft:
+        $ref: "#/$defs/operation"
+        description: The draft-task operation prompt.
+
+  operation:
+    type: object
+    additionalProperties: false
+    required: [guidance, return]
+    description: >-
+      One operation prompt — the guidance text sent to a node for the
+      operation, plus a prose description of the expected return.
+    properties:
+      guidance:
+        type: string
+        minLength: 1
+        description: >-
+          The prompt sent to the node for this operation. The
+          substance of how the node executes — methodology
+          application, reasoning protocol, output discipline.
+          During the bootstrap phase a guidance string may begin
+          with "TODO:" and a placeholder pointing at the relevant
+          docs/ARCHITECTURE.md / docs/API.md sections; the schema does not
+          structurally distinguish placeholders from final prompts.
+      return:
+        type: string
+        minLength: 1
+        description: >-
+          Prose description of the expected return shape from the
+          node, complementing the formal contract in
+          common/schema/completion-record.schema.yaml. The schema is
+          machine-validated at submission; this prose tells the
+          node what to produce.

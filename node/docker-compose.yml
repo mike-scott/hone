@@ -1,0 +1,35 @@
+# hone-node — an AI review node, deployed on its own, separately from
+# hone-core (typically on a different host; one deployment per client).
+#
+#   cd node && cp .env.example .env      # fill in the three settings
+#   docker compose up --build
+#   docker compose up --scale hone-node=3   # run several nodes
+#
+# The build context is the project root (..) because the image needs
+# common/. The node reaches hone-core at $HONE_CORE_URL and retries with
+# backoff if it is unreachable — there is no compose-level dependency on it.
+# On first start each node enrolls and waits for an operator to approve it.
+
+name: hone-node
+
+services:
+  hone-node:
+    build:
+      context: ..                        # project root — the build needs common/
+      dockerfile: node/Dockerfile
+    image: hone-node
+    restart: unless-stopped
+    env_file:
+      - .env                             # every setting in .env reaches the node
+    environment:
+      # The three required settings, re-asserted so `compose up` fails fast if
+      # one is missing. Optional settings (HONE_NODE_NAME, the poll / backoff
+      # knobs, ...) are picked up from .env above — see .env.example.
+      HONE_CORE_URL:     "${HONE_CORE_URL:?set it in .env}"
+      HONE_FLEET_SECRET: "${HONE_FLEET_SECRET:?set it in .env}"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:?set it in .env}"
+    volumes:
+      - hone-node-data:/data             # linux clones + scratch (self-populated)
+
+volumes:
+  hone-node-data:

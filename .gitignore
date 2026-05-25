@@ -1,0 +1,12 @@
+# Python bytecode cache.
+__pycache__/
+
+# Local docker-compose secrets — never commit. (.env.example is the template.)
+.env
+
+# Local docker-compose overrides — host-specific testing accommodations,
+# never committed. The committed docker-compose.yml is the deployment shape.
+docker-compose.override.yml
+
+# Ignore .claude settings
+.claude

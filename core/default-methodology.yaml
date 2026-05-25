@@ -1,0 +1,1516 @@
+name: hone default methodology
+version: 1
+description: |
+  A repeatable, staged process to run on every kernel patch — by analysis
+  alone. This methodology validates *correctness*, specifically *semantics*.
+
+  The review nodes read patches and reason about them; they do not build the
+  kernel or run tooling. The value of this document is its precise wording —
+  the disciplined manual pass it prescribes.
+
+principles:
+  - id: set-current-date
+    title: Establish the current date
+    body: |
+      Establish this as an absolute fact: the current date is %DATE%.
+      Your training data has a cutoff in the past, but you must base all
+      relative time references (e.g., 'today', 'last week', 'next year')
+      strictly on this current date.
+
+  - id: surface-checks-are-style-only
+    title: Surface checks are style-only
+    body: |
+      Surface and style checks say nothing about correctness. A patch can
+      pass every style and formatting check — `checkpatch` is one example —
+      and still be semantically broken. Passing such a check says nothing
+      about correctness. This methodology validates *semantics*.
+
+  - id: absence-is-not-proof
+    title: Absence of a finding is not proof
+    body: |
+      An analysis, classification, or judgement is only as good as its
+      completeness. A "clean" result — no finding — is meaningless
+      unless the work that produced it was itself complete. A truncated
+      search, a half-read function, or a silently narrowed scope yields
+      a false "clean": it reports nothing because it *looked* at
+      nothing, not because there is nothing there. Confirm the work
+      actually covered what it claims to cover — count the hits, read
+      the whole function, verify the scope. An unverified "clean" rests
+      on the gap, not on the substance.
+
+  - id: trailers-are-not-evidence
+    title: Trailers are not evidence
+    body: |
+      External endorsements are not verification you performed yourself.
+      `Reviewed-by`, `Tested-by`, `Acked-by`, and a high `vN` are other
+      people's conclusions — not grounds to lower scrutiny, nor evidence
+      that the work this operation requires has been done. Bugs survive
+      many review rounds (the qmp-combo UAF shipped at v2,
+      multiply-reviewed, caught only post-submission). For review
+      specifically: assume the patchset is wrong until your own analysis
+      proves otherwise, start from "there is probably something wrong
+      here" and make it earn the verdict. For any operation: a verdict
+      must rest on your own findings, never on pedigree.
+
+  - id: safe-is-a-finding
+    title: '"Safe" is a finding — record why'
+    body: |
+      When edge-case analysis concludes "no crash," classify the reason:
+      (a) safe by explicit, intentional design; (b) safe only by accident —
+      a caller-side coincidence, or a guard that covers it but was added for
+      another reason; (c) safe for *current* callers but not guaranteed by
+      any contract. Only (a) may be dropped silently. (b) and (c) are
+      **reportable observations** — into the written record, and for
+      exported interfaces onto the list as a hardening note. The edge case
+      you trace and then wave away as "handled" is the one the next patch
+      reintroduces.
+
+stages:
+  - id: "0"
+    title: Base & apply gate
+    applies: Every patch. A failure here stops everything else.
+    body: |
+      **Base-commit gate — do this before anything else.** A series carries
+      a `base-commit:` line, and the cover letter often gives a `git
+      describe` string (e.g. `v7.1-rc4-100-g8bc67e4db64a`). The repo used to
+      apply and review the patchset must have `HEAD` *at that exact
+      base-commit*.
+
+      If `HEAD` is not the base-commit, **stop and say so** — do not
+      silently review against a different tree, and do not assume "close
+      enough." A `git describe` string is not a tag:
+      `v7.1-rc4-100-g8bc67e4db64a` means 100 commits *after* the `v7.1-rc4`
+      tag — checking out the tag leaves you 100 commits behind the real
+      base. The wrong base invalidates every Stage 2 "parity with the
+      original function" comparison and produces both spurious apply
+      failures and missed real ones.
+
+      If the exact base-commit genuinely cannot be obtained, every
+      base-dependent finding must be explicitly labelled provisional.
+
+      **Applies cleanly.** Confirm the patch (or series, in order) applies
+      to the base — `git apply --check`. This is lightweight and
+      toolchain-free. A patch that does not apply cleanly to its stated base
+      cannot be reviewed against that base.
+
+  - id: "1"
+    title: Format-specifier check
+    applies: Any patch that adds or modifies a format-string call.
+    body: |
+      **Format-specifier check.** For every format-string call the patch
+      adds or modifies, match each `%` conversion to the C type of its
+      argument. Cover the whole `printk` family and every other
+      format-taking call: `printk`, `pr_*`, `dev_*` / `netdev_*` /
+      `bdev_*`, `seq_printf` / `seq_buf_*`, `sprintf` / `snprintf` /
+      `scnprintf` / `vsnprintf`, `kasprintf`, `WARN*` / `BUG*` with a
+      message, `panic`, `trace_*`, and any `__printf`-annotated subsystem
+      helper.
+
+      With no `-Wformat` build step, this check covers *all* mismatches by
+      reasoning — for every format call in the diff:
+      - *Size and kind* — `%d` for a `u64`, `%s` for an integer. Confirm the
+        conversion's width and category match the argument's C type.
+      - *Signedness* — `%d`/`%i` on an `unsigned` argument, or `%u`/`%x` on
+        a signed one. These are not interchangeable; a mismatch misprints
+        once the value crosses the sign boundary.
+      - *Kernel `%p` extensions* — `%pe`, `%pOF`, `%pK`, `%pM`, `%pIS`,
+        `%pS`, … — confirm the pointer's type matches the extension.
+
+      A type-incorrect specifier is graded **`minor`**: usually harmless
+      today (a signedness mismatch misprints only once the value exceeds
+      `INT_MAX`) but latent — it misprints the moment the field's range
+      grows, and the wrong specifier spreads by copy-paste. Cost is low and
+      bounded: only the format calls *in the diff* (a handful at most, often
+      none), each a local specifier-vs-argument-type check — no call graph,
+      no whole-function reading.
+
+  - id: "2"
+    title: Manual semantic review
+    applies: Any patch touching C code.
+    body: |
+      Whole classes of bug are not caught by surface review. Stage 2 is two
+      steps: **scope the change via its call graph**, then apply the
+      Stage-2 bug-class checks over everything in scope. The Stage-2 checks
+      are an **unordered set** — each one an independent bug-class analysis,
+      with no sequence and no dependency between them; apply them in any
+      order.
+
+      **Scope — build the call graph, both directions** (trace the call
+      graph from the changed code outward).
+
+      Build it on the **whole patchset applied** — the series tip — never
+      per-patch. A per-patch graph of an API-introducing patch shows that
+      API with *zero callers* and hides every caller/callee relationship
+      that spans patches, which is exactly what Stage S's API-add-then-use
+      check needs. (Per-patch intermediate states are inspected only for
+      Stage S bisectability.) For a lone non-series patch the tip is just
+      base+patch. Findings are still attributed to the specific patch that
+      introduces them.
+
+      - **Caller tree** (upstream): every function that reaches the changed
+        code, transitively, up to the subsystem entry points. Note each
+        caller's **execution context** — process, softirq, or hard IRQ. If
+        the change can now sleep (a new mutex, allocation,
+        `synchronize_rcu()`) and any caller is in atomic/IRQ context, that
+        is a bug.
+      - **Callee tree** (downstream): every function the change calls — did
+        it break a precondition or contract a callee relies on (argument
+        range, a lock expected held, state expected set)?
+      - If the patch changes an **internal API** (signature, semantics,
+        locking rules), the caller tree *is* the set of sites that must be
+        updated; verify every site across **all architectures**, not just
+        the local one, and that none was missed.
+
+      **The enumeration must be complete.** A search piped through `head`,
+      or searching one file when the field/symbol spans several, silently
+      narrows the scope — and every later "all N sites are handled"
+      conclusion inherits that truncation (the `absence-is-not-proof` principle, applied to scoping).
+      Count the hits, confirm the count, and never review a truncated list.
+
+      The functions in that graph — not just the literally-changed lines —
+      are the review unit. The scope of a modified function is the **whole
+      function**: a three-line addition inherits every counter, lock, and
+      shared field it manipulates near the change. Shared state (counters,
+      locks, flags) must also be traced *across* patches in a series —
+      **Stage S** is the dedicated pass for that.
+
+      Apply every Stage-2 check to each in-scope function — in any order, as
+      an unordered set of independent bug-class analyses; write the answer
+      to each — "N/A" is valid only when deliberate — then run the subsystem
+      checklist.
+
+  - id: "3"
+    title: Adversarial self-review
+    applies: Every C-code patch.
+    body: |
+      Write down 3–5 things a hostile maintainer — or an AI review bot —
+      would attack about this patch, and answer each in writing. A weak
+      answer is a real finding: fix it or document it. The surviving answers
+      become cover-letter and review-reply material.
+
+  - id: "S"
+    title: Series-level review
+    applies: Every patch series — reviewed as a unit, not as N independent patches.
+    body: |
+      A patch series is reviewed as a **unit**, not as N independent
+      patches. Stage S brackets the per-patch stages — do the first half
+      before Stage 0, the second half after Stage 3.
+
+      **Before the per-patch passes — frame the series:**
+      - Read the cover letter — the series' stated contract. What is it for;
+        does the patch split match it; is each patch one self-contained
+        logical change? Note its claims and any declared non-goals; the
+        integrate step verifies them against the code.
+      - Map the dependency order — which patch introduces what a later one
+        uses.
+
+      **After the per-patch passes — integrate:**
+      - **Bisectability.** Applied in order, *each* patch must leave a
+        kernel that builds and runs (`submitting-patches.rst`: "Each patch
+        should yield a kernel which builds and runs properly"). A `git
+        bisect` landing mid-series must not hit a broken tree. This is a
+        property to *reason about* — read each intermediate state and
+        confirm it is self-consistent.
+      - **API-add-then-use.** When the series adds an API early and uses it
+        later, the early patch *cannot be fully judged alone* — review the
+        new API's contract against every caller across the series. Do the
+        callers rely on guarantees the API actually provides? An API-add
+        patch with no callers yet is only decidable against the patches
+        that use it.
+      - **Cross-patch state and lifetime.** Trace every shared counter,
+        lock, flag, or allocation whose life spans patches — added in A,
+        used in B, freed in C. A bug can live purely in the interaction
+        (patch A's new guard meeting patch B's pre-existing decrement).
+      - **Churn.** A later patch reworking or reverting an earlier patch's
+        own lines means the split is wrong — ask for a re-split.
+      - **Cumulative diff.** Read `git diff base..tip` once — the net effect
+        of the whole series, separate from the per-patch diffs; per-patch
+        review can miss what only the whole shows.
+      - **Cover letter vs. docs vs. code.** The cover letter is the series'
+        stated contract — verify the cumulative diff against it, **both
+        directions**. *Completeness:* is every fix, behaviour, or feature it
+        claims actually delivered? *Scope:* does the series do anything
+        **material the cover letter does not disclose** — an undisclosed
+        behaviour change, an unrelated fix riding along, a security-relevant
+        change not called out? The undisclosed direction is the dangerous
+        one: a change nobody was told to look at evades review. Also confirm
+        the cover letter's stated *justification* holds against the code,
+        and that anything it declares out of scope ("not in this series")
+        really is absent. This is the series-level analog of the
+        `efficacy-and-root-cause` check.
+        When the series also carries a **documentation patch**, that doc is
+        a *second, independent* statement of intent — check all three pairs,
+        not just each against the code: cover letter ↔ docs ↔ code. A
+        cover-letter↔docs contradiction is a finding in itself, and it often
+        *resolves* a doc↔code mismatch — whichever of the two agrees with
+        the third is the correct one.
+
+      The series verdict is **not** the AND of the per-patch verdicts: a
+      series of individually-clean patches can still be wrong as a whole.
+
+checks:
+  - id: object-lifetime
+    stage: "2"
+    title: Object lifetime / use-after-free
+    body: |
+      For every pointer dereferenced: who allocates it, who frees it,
+      *when*? Red flags — `devm_*` allocations (freed when the
+      **provider** device unbinds; a consumer or framework callback can
+      still run afterward); pointers reached via callbacks registered
+      with another subsystem; any path where the caller lives in a
+      different driver. A freed `devm_kzalloc` object is a **silent**
+      use-after-free: the slab page stays mapped, so the stale read
+      returns plausible data and does *not* crash. "It didn't crash in
+      testing" proves nothing.
+      *Question:* can the object this pointer refers to be freed while
+      this code still runs?
+
+  - id: concurrency
+    stage: "2"
+    title: Concurrency / locking
+    body: |
+      For every shared field the patch reads or writes: search the
+      whole driver for that field. List **every** reader and **every**
+      writer, and the lock held at each. Is the patch's access locked
+      consistently with the others?
+
+      A lockless "fast path" check *before* taking the lock is
+      **double-checked locking** — a named antipattern the kernel
+      formally models in
+      `Documentation/litmus-tests/locking/DCL-broken.litmus` (result:
+      *Sometimes* — it breaks). The lock plus a `READ_ONCE()` lockless
+      check is **not** enough; `DCL-fixed.litmus` shows the minimum
+      correct form needs `smp_load_acquire()` on the lockless read and
+      `smp_store_release()` on the publish — and even that presumes the
+      `lock-storage-lifetime` check holds (the lock's object is alive). A
+      plain lockless access is a
+      data race under the kernel memory model: a single shared location
+      needs at least `READ_ONCE()`/`WRITE_ONCE()`; communicating
+      *between* two locations locklessly (publish data, then raise a
+      flag) additionally needs release/acquire ordering —
+      `WRITE_ONCE`/`READ_ONCE` stop tearing but do not order one
+      variable against another.
+
+      The fix for any of these (TOCTOU, DCL) is to **collapse the
+      window**: hold the lock continuously across check-and-act, or use
+      a kernel combined primitive that does both atomically —
+      `cmpxchg`/`try_cmpxchg`, `atomic_dec_and_test`,
+      `atomic_dec_and_lock`, `atomic_dec_and_mutex_lock`,
+      `refcount_dec_and_lock`, `kref_put`. These exist precisely to
+      remove check→use windows; a hand-rolled "check then act" usually
+      shouldn't.
+
+      **Userspace double-fetch** is a second TOCTOU class, distinct
+      from the kernel-internal races above. If the patch reads a
+      `__user` pointer (`get_user`, `copy_from_user`, `__get_user`) in
+      code that reads the same user address *again* — re-validating a
+      field, or copying a length-determined amount where the length is
+      re-fetched — a concurrent userspace thread can change the value
+      in the window. The rule, stated verbatim in
+      `Documentation/userspace-api/seccomp_filter.rst`: *fetch once
+      into kernel memory, then validate and use only the kernel copy* —
+      never re-dereference the user pointer.
+
+      Then map reachability: for each changed function, which
+      subsystems/threads invoke it (process / softirq / IRQ; which
+      framework)? Two call paths with no common lock are a race
+      surface.
+
+      Check lock **ordering**, not only presence: if the change takes
+      two locks, every other path that takes the same pair must take
+      them in the same order — a reversed pair is an AB-BA deadlock.
+      Trace acquisition order across the call graph (the caller/callee
+      trees above).
+      *Question:* what else can touch this field concurrently, from
+      where?
+
+  - id: lock-storage-lifetime
+    stage: "2"
+    title: Lock-storage lifetime — a lock cannot protect its own object
+    body: |
+      Check *where the lock itself lives*. A lock embedded in a
+      `devm_*`-allocated, refcounted, or otherwise freeable object
+      cannot guard that object's lifetime: `mutex_lock()` grants no
+      implicit reference to its memory
+      (`Documentation/locking/mutex-design.rst` — *"Memory areas where
+      held locks reside must not be freed"*; the mutex *"does not
+      provide an implicit reference for the memory it occupies"*). If a
+      consumer can invoke the code after an independent teardown has
+      freed the object, the embedded lock is unusable in that window —
+      and the textbook fix for a `concurrency` TOCTOU ("just take the
+      lock") is
+      then itself a use-after-free on the lock. When the
+      `object-lifetime` and `concurrency` checks both
+      fire on the same object they are usually **one** bug: lifetime
+      must be solved first — by a reference count, by RCU (the kernel's
+      canonical mechanism for a lockless reader racing a freeing
+      updater — `Documentation/RCU/`), or by a framework guarantee that
+      the object outlives every caller (`locking.rst`: *"this is only
+      guaranteed while you hold the lock … The solution … is to use a
+      reference count"*) — only then is the lock safe to take.
+      *Question:* is the lock's own storage guaranteed live in every
+      context that acquires it?
+
+  - id: integer-safety
+    stage: "2"
+    title: Integer safety
+    body: |
+      Counters, sizes, indices, lengths: can they underflow (an
+      unsigned `--` at 0 wraps to `UINT_MAX`), overflow, or carry a
+      signedness bug? Every decrement — is the balance proven, or
+      guarded?
+
+  - id: error-teardown
+    stage: "2"
+    title: Error and teardown paths
+    body: |
+      Every early `return` / `goto`: is cleanup complete and balanced —
+      locks, refcounts, allocations, counters? Does a newly added early
+      return skip a needed unlock or decrement?
+
+  - id: efficacy-and-root-cause
+    stage: "2"
+    title: Efficacy, then root cause vs symptom
+    body: |
+      *First, does the patch even work?* Take the exact failing
+      scenario from the commit message, trace it line by line through
+      the **patched** code, and confirm the outcome genuinely changes.
+      A patch can pass every other Stage-2 check — well-formed,
+      correctly locked, no UAF —
+      and still fix **nothing**: e.g. a guard whose condition is
+      bypassed on the very path the bug lives on, so the steady state
+      is identical to before the patch. "Well-formed" is not
+      "effective"; verify effectiveness explicitly. *Then, root cause
+      vs symptom:* does it fix the cause or mask it? Converting a loud
+      failure (oops, WARN) into a silent one (corruption, wrong state)
+      is a regression even when the crash "goes away."
+
+  - id: function-contract
+    stage: "2"
+    title: New or generalised functions — contract and input domain
+    body: |
+      Analyse every function the patch *introduces*, and every function
+      it *generalises*, as an interface for arbitrary callers — not
+      just this series' call sites; doubly so for `EXPORT_SYMBOL*`.
+      - *Out-parameter table.* For each return path, tabulate the
+        return value against each `*out` parameter's value and whether
+        it was written. Flag any path that leaves an `*out` a caller
+        may read unwritten, or two paths that signal the same logical
+        outcome differently — e.g. one returns `NULL`, another returns
+        non-`NULL` with a count of `0`. An inconsistent return contract
+        is a footgun even when today's callers happen to cope.
+      - *Full input domain.* Exercise the whole declared domain of each
+        parameter, not the subset current callers pass: a `const struct
+        cpumask *` includes the empty mask; an `unsigned int` count
+        includes `0`; a pointer includes `NULL`. If the kerneldoc says
+        "CPUs to consider," the empty set is in-domain. For a callback
+        registered **per-instance** (multi-instance cpuhp states,
+        notifier chains), the invocation domain is every `(instance,
+        event)` pair: it fires for *every* registered instance on
+        *every* event, so "this event does not concern this instance"
+        is the common input, not an edge — handle it first.
+        (`blk_mq_hctx_can_offline_hk_cpu()` judged an `hctx` against an
+        offlining CPU without first checking that CPU was mapped to
+        that `hctx`, so a single stranded hctx vetoed every unrelated
+        CPU-offline in the system.)
+      - *Domain-widening.* When a patch widens the set of values
+        something can take, every invariant that silently relied on the
+        old, narrower range must be re-proven. Two shapes recur:
+        - *Parameter widened.* A hardcoded constant becomes a
+          parameter. `group_cpus_evenly()` could never return `nummasks
+          == 0` only because its universe was hardwired to the
+          never-empty `cpu_possible_mask`; `group_mask_cpus_evenly()`
+          parameterised that mask and inherited an empty-input case its
+          callers were never written for.
+        - *Computation changed.* A value's range widens with no
+          signature change. `num = cpumask_weight(online_mask)` is
+          always ≥ 1, but `num = cpumask_weight_and(online_mask,
+          hk_mask)` can be 0. Re-derive the range of every value whose
+          computation the patch touched, then re-check each downstream
+          consumer — e.g. `min_not_zero(num, max)` silently relied on
+          `num ≥ 1`; once `num` can be 0 it returns `max`, the opposite
+          of what a starved state wants.
+
+  - id: preexisting-issues
+    stage: "2"
+    title: Pre-existing issues near the change — two tiers (bounded)
+    body: |
+      While walking the other Stage-2 checks, also evaluate *unchanged*
+      code near the
+      patch as code in its own right. A patch hunk hands you
+      surrounding code for free; if it is itself buggy, it is worth
+      saying so. Two scopes, both bounded:
+
+      - *Tier 1 — hunk context lines.* The unchanged ` `-prefixed lines
+        already shown in the diff. Near-free — you are reading them
+        anyway.
+      - *Tier 2 — the whole body of a function the patch modifies.*
+        Read the entire modified function, not just its hunks. A real
+        pre-existing bug often sits a dozen lines outside the hunk. To
+        give such a finding an anchor, **expand the hunk** in Report
+        finalization: re-quote the intervening unchanged lines as
+        ` `-prefixed context and bump the `@@` line counts so the
+        comment lands on the offending line.
+
+      Tier 1 is the floor — always done. Tier 2 is not automatic: it
+      costs real reading and widens the false-positive surface, so it
+      is a *declared* choice, never a silent default. Run Tier 2 when
+      **either** the requester asked for a deeper review, **or** you
+      judge it warranted — and when you judge it warranted, say so.
+      Carve-out: if a modified function is small (≈60 lines or fewer),
+      reading it whole is nearly as free as Tier 1 — just do it.
+      Whichever the case, the scope actually reviewed must be **known
+      to the reader**: the final report states explicitly whether
+      Tier 2 was performed, and on which patches (see Report
+      finalization).
+
+      Both tiers stop there — never the rest of the file, never
+      callers. A finding with no line in (or expandable from) a hunk
+      has nowhere to anchor; raise it elsewhere (a separate patch, a
+      note to the maintainer).
+
+      Apply a **higher confidence bar** than for patch-introduced
+      findings: code that has shipped for years is usually correct for
+      a non-obvious reason (an invariant a caller guarantees, a lock
+      held further up). Flag it only if you would bet on it; otherwise
+      phrase it as a question. Tier 2's wider reading carries a wider
+      false-positive surface — hold the bar.
+
+      These are **not** the submitter's responsibility. In Report
+      finalization they go in a separate "Pre-existing / not introduced
+      by this series" group; every such comment must **state explicitly
+      that the issue pre-dates the patch** ("This isn't introduced by
+      your change, but since it's in the function you are editing —
+      …") and is marked **non-blocking** — the right disposition is a
+      separate patch or the maintainer's call, never a gate on this
+      series.
+
+  - id: documented-contract
+    stage: "2"
+    title: Documented-contract conformance — the commit message is not authority
+    body: |
+      When a hunk removes or alters code whose observable effect is
+      fixed by a *documented contract*, verify the change against the
+      document — never against the commit message's account of it. A
+      documented contract includes: man pages, `Documentation/ABI/`,
+      syscall / `prctl` / ioctl / uAPI semantics, kerneldoc, the design
+      rationale recorded in the commit that *introduced* the code, and
+      in-tree design comments. A commit message asserting that the new
+      behaviour is the "correct" or "intended" semantics does **not**
+      lower scrutiny: recover what observable contract the touched code
+      satisfied, and if the change contradicts it with no explicit,
+      justified declaration of an intentional break, that is a
+      regression — rated by true impact (an undisclosed ABI change is
+      `major`/`critical`, not a `minor` cleanup). The check also turns
+      inward: a commit message that overstates its own coverage, or
+      makes a false structural claim about its own patch (e.g. "defined
+      in an internal header" when the symbol is in fact tree-wide), is
+      itself a finding. This is the per-patch analog of Stage S's
+      "cover letter vs docs vs code", and the operational form of
+      the `trailers-are-not-evidence` principle applied to the patch's own message.
+
+  - id: subsystem-checklists
+    stage: "2"
+    title: Subsystem checklists
+    body: |
+      The other Stage-2 checks are the *general* semantic layer. Where
+      the kernel
+      ships a subsystem-specific review checklist, reason against it as
+      well. The most important: any patch using RCU (`rcu_read_lock()`,
+      `call_rcu()`, `rcu_dereference()`, `list_*_rcu()`,
+      `synchronize_rcu()`, …) must be walked through
+      `Documentation/RCU/checklist.rst` — a maintained 17-point review
+      checklist (a document to reason against, not a tool). Recurring
+      misses it catches: RCU protects *readers*, not updaters —
+      concurrent updaters still need their own mutual exclusion;
+      publish with `rcu_assign_pointer()`, never a plain store;
+      `rcu_dereference()` is valid only inside a read-side critical
+      section and its result must not be re-fetched; `synchronize_rcu()`
+      can block, so never from atomic context.
+
+documentation_review:
+  title: Documentation patches
+  body: |
+    Applies to any patch touching `Documentation/`, `kernel-parameters.txt`,
+    kerneldoc `/** */` comments, or `Documentation/ABI/`. A documentation
+    patch is not second-class: its correctness *is* its accuracy, and
+    accuracy is verifiable — against the code and the tree. Run Stage 0
+    (apply) and the intent review below; grade findings on the normal
+    severity scale.
+
+    **Examine intent — treat the page like a cover letter.** A doc page is a
+    statement of intent, not a bag of facts: what the feature is *for*, when
+    to use it, the mental model, the declared scope and limits.
+    - *Capture the intent first, then verify.* A doc that accurately
+      restates *what* the code does but never conveys *why* or *when* is a
+      weak doc even at full factual accuracy — `nit`/`minor`.
+    - *Check both directions.* doc→code: every claim is true of the code.
+      code→doc: no user-visible behaviour is left undocumented — accurate-
+      but-incomplete is a real defect.
+    - *The doc may be the spec.* Unlike a cover letter — transient, code is
+      ground truth — a doc is permanent, and admin- and ABI-facing docs *are*
+      the contract. When doc and code disagree, do not reflexively fix the
+      doc: decide which expresses the intended contract; the mismatch may be
+      a code bug the doc surfaced.
+    - *Deprecated / removed references.* Every parameter, `CONFIG_*`,
+      function, syscall, path, or sibling feature the doc names or
+      cross-references must still exist and not be deprecated — verify by
+      locating it (`__setup` / `module_param` handler, Kconfig symbol).
+      Examples must not use APIs listed in
+      `Documentation/process/deprecated.rst`.
+    - *Format and placement* match the file's conventions
+      (`kernel-parameters.txt` entry format and ordering; an addition under
+      `Documentation/ABI/` is a stability commitment — flag it as one).
+
+    Strictness stops at accuracy: hold the doc to describing correctly
+    whatever exists — do not NAK a `docs:` patch for the merits of the
+    feature it documents; that belongs to the patches that implement it.
+
+report_finalization:
+  body: |
+    The staged analysis — complete and correct — is organised by bug class,
+    not by where the reader's eyes are.
+    A maintainer cannot absorb "the `function-contract` check found an
+    inconsistent return
+    contract" in the abstract. The last step converts the analysis into a
+    review the way it lands on a mailing list: **every finding anchored to
+    the line of code it is about.**
+
+    Do this once, after all stages are done — do not skip it because the
+    analysis "is already written down."
+
+    1. **Enumerate every finding**, nit through critical, from all stages.
+       Nothing is too small to inline; nothing is dropped because it is
+       "only a nit." the `safe-is-a-finding` principle's reportable observations (safe-by-accident,
+       safe-by-no-contract) are findings too.
+    2. **For each finding, pick the single most relevant anchor line** — the
+       one line of the patch (or of the pre-existing file) where a reviewer
+       would put the comment so the reader instantly sees what it is about.
+       One anchor per finding; if a finding spans hunks, anchor it where the
+       fix would land.
+    3. **Write each finding as an inline review comment**, the way a
+       reviewer replies on-list: quote the relevant diff/code context, then
+       below it the comment — a severity tag
+       (`nit`/`minor`/`moderate`/`major`/`critical`, per the scale below),
+       what is wrong, why it matters, and a concrete suggested change.
+       Plain, specific, actionable; no restating the obvious.
+    4. **Group inline comments under the patch they belong to.** Use the
+       patch's own `N/M` ordering.
+    5. **Patchset-wide findings go in one comment block on the cover
+       letter** (`0/M`) — anything not localisable to a single patch:
+       series-level churn, a cover-letter claim contradicted across patches,
+       Stage S verdicts, residual gates (e.g. Stage 3 adversarial
+       self-review not performed, or a verification a reviewer would expect
+       that this analysis-only pass cannot supply). Do not scatter a
+       whole-series point across individual patches.
+    6. **State the review scope.** In the cover-letter block, say explicitly
+       whether the `preexisting-issues` Tier-2 pre-existing scan was
+       performed, and on which
+       patches (e.g. "Tier-2 pre-existing scan: patches 4 and 5; Tier 1 only
+       elsewhere"). The reader must know the floor and the ceiling of what
+       was actually checked.
+    7. **End with the verdict** — the series verdict and what, concretely,
+       would change it.
+
+    The staged analysis is the evidence; the finalized report is the
+    deliverable. A finding the maintainer cannot locate in the code is a
+    finding that will not be fixed.
+
+    Severity is *impact × reachability*, not impact alone. Every finding
+    carries exactly one tag. `critical`/`major`/`moderate`/`minor` block the
+    merge; only `nit` does not. The Linux kernel is an enormous, long-lived
+    codebase — unaddressed `minor` issues accrete into real debt, so a
+    discerning reviewer holds the line on them rather than waving them
+    through as "good enough." Two modifiers:
+
+    - *Reachability rates it down.* An impact-`critical` bug behind a path no
+      realistic configuration reaches is rated down — and the assumed
+      reachability is stated in the comment. (Why the patch-3 empty-mask
+      contract is `minor`, not a latent `critical`.)
+    - *Pre-existing (`preexisting-issues`) findings are non-blocking
+      regardless of tag.* Tag
+      them for impact as normal, but per the `preexisting-issues` check the
+      disposition is a separate
+      patch, never a gate on this series.
+  severity_scale:
+    # Rubric-wide policy. The `weighting` is used by statistical
+    # aggregation (severity_weighted_catch_rate, etc.); the
+    # `uncertainty_rule` resolves findings that match criteria from
+    # two levels; `cross_kind_defaults` set defaults for concerns whose
+    # patch_scope kind is series or cross_patch.
+    weighting:
+      critical: 2.0
+      major: 1.0
+      moderate: 0.5
+      minor: 0.25
+      nit: 0.1
+    uncertainty_rule: default_to_lower
+    cross_kind_defaults:
+      series: major
+      cross_patch: major
+      patch: null
+    # The five levels, most severe first. Each level keeps the existing
+    # `tag` / `meaning` / `blocks_merge` shape and adds structured
+    # `criteria` and `anchors`. Criteria carry stable IDs that a node's
+    # severity_rationale references when assigning a finding's severity.
+    # Anchors are calibration examples drawn from the corpus; they start
+    # empty and accumulate as audit reveals drift.
+    levels:
+      - tag: critical
+        meaning: |
+          Memory unsafety (UAF, OOB write, double-free), data corruption or
+          loss, a security-exploitable flaw, or a crash/deadlock reachable in
+          normal operation. Unsafe to ship.
+        blocks_merge: true
+        criteria:
+          - id: memory-unsafety
+            description: |
+              Use-after-free, out-of-bounds read or write, double-free,
+              uninitialised-memory use, or similar memory-safety violation
+              reachable through normal operation. Includes silent UAF cases
+              where the stale read returns plausible data and does not crash
+              in testing — testing absence is not proof of absence.
+          - id: data-corruption-or-loss
+            description: |
+              Persistent corruption or loss of correctness in stored,
+              in-flight, or in-memory data — durable damage the system cannot
+              recover from on its own. Cache or buffer corruption that
+              propagates to userspace counts; transient internal
+              inconsistencies that self-heal do not.
+          - id: security-exploit
+            description: |
+              A reachable security exploit — privilege escalation, sandbox or
+              namespace escape, info-leak from sensitive memory,
+              authentication or capability bypass, or similar exploitable
+              flaw. Reachability must be through normal operation, not a
+              pathological configuration.
+          - id: crash-or-deadlock-in-normal-operation
+            description: |
+              A reachable kernel panic, oops, BUG(), WARN_ON on a hot path,
+              livelock, or deadlock that occurs under normal
+              (non-pathological) operation. Crashes only triggerable through
+              configurations no realistic deployment uses are rated down —
+              see the moderate `correctness-defect-non-mainstream` criterion.
+        anchors: []
+
+      - tag: major
+        meaning: |
+          A genuine functional defect reachable in realistic use, not directly
+          memory-unsafe: breaks an existing feature, disables a core operation
+          (CPU hotplug, suspend, boot), or fails to fix what the commit
+          message claims (efficacy failure).
+        blocks_merge: true
+        criteria:
+          - id: breaks-existing-feature
+            description: |
+              A feature that previously worked in realistic use no longer
+              works — a functional regression that is not itself memory-unsafe
+              (the critical `memory-unsafety` criterion covers that case).
+              Includes silent feature disablement (the feature appears to run
+              but produces wrong results) and explicit feature breakage (the
+              feature errors out where it previously succeeded).
+          - id: disables-core-operation
+            description: |
+              Disables a core kernel operation — CPU hotplug, suspend/resume,
+              boot, kexec, module load/unload, or other foundational
+              machinery — without itself being memory-unsafe. The existing
+              `function-contract` check's `blk_mq_hctx_can_offline_hk_cpu()`
+              example (a stranded hctx vetoing every unrelated CPU-offline)
+              is the prototypical shape.
+          - id: efficacy-failure
+            description: |
+              The patch does not actually fix what the commit message claims
+              to fix. Traced line-by-line through the patched code from the
+              exact failing scenario, the steady-state outcome is materially
+              unchanged from before the patch — well-formed but ineffective,
+              per the `efficacy-and-root-cause` check.
+          - id: silent-failure-conversion
+            description: |
+              Converts a loud failure (oops, WARN, explicit error return)
+              into a silent one (corruption, wrong state, dropped operation)
+              — a regression even when the visible symptom "goes away," per
+              the `efficacy-and-root-cause` check's root-cause-vs-symptom
+              distinction.
+        anchors: []
+
+      - tag: moderate
+        meaning: |
+          A correctness, contract, or documentation defect that misbehaves or
+          misleads in a real but non-mainstream configuration, or a required
+          verification not performed (a claim not checked). Bounded — the
+          common case still works.
+        blocks_merge: true
+        criteria:
+          - id: correctness-defect-non-mainstream
+            description: |
+              A correctness defect that produces wrong results in a real but
+              non-mainstream configuration — the common case still works
+              correctly, but a non-default code path, an unusual hardware
+              combination, or a legitimately-supported edge configuration
+              triggers incorrect behaviour.
+          - id: contract-defect-non-mainstream
+            description: |
+              A defect in a documented or established contract — kerneldoc,
+              ABI under `Documentation/ABI/`, syscall or ioctl semantics,
+              in-tree design comments — that misbehaves in non-mainstream
+              configurations but is benign in the common case. Distinct from
+              `correctness-defect-non-mainstream` in that the *contract* is
+              what's violated; the code's runtime behaviour may even be
+              consistent with itself.
+          - id: documentation-misleading
+            description: |
+              Documentation that misleads about behaviour, scope, or contract
+              in a way that could produce wrong downstream code. Includes
+              accurate-but-incomplete docs that omit a user-visible behaviour
+              (per the `documentation_review` section's both-directions
+              check), and docs that overstate guarantees the code actually
+              provides.
+          - id: unperformed-required-verification
+            description: |
+              A verification the patch or commit message implies has been
+              performed but which the analysis did not actually do — a
+              required check skipped, a scope of analysis silently narrowed,
+              a "clean" result resting on an unexamined gap rather than
+              actual code. The `absence-is-not-proof` principle made
+              operational.
+        anchors: []
+
+      - tag: minor
+        meaning: |
+          A real but low-impact issue: correct for every current caller and
+          configuration yet fragile or inconsistent (an odd return contract,
+          a wrong-direction-but-non-failing fallback), or a maintainability
+          problem.
+        blocks_merge: true
+        criteria:
+          - id: fragile-but-correct
+            description: |
+              Currently correct for every caller and configuration, but the
+              correctness rests on a non-obvious invariant a future change
+              could break. A footgun: it works today because of something the
+              immediate code doesn't make visible — a caller guarantee, a
+              lock held further up, a range constraint on an input — and the
+              next patch that touches it is likely to break it.
+          - id: inconsistent-contract
+            description: |
+              An odd or asymmetric internal contract that's not technically
+              wrong: different return paths signalling the same outcome
+              differently (NULL vs. non-NULL with count=0); a wrong-direction
+              fallback that happens not to fail because no caller exercises
+              it; an out-parameter table with quirky cases today's callers
+              handle by accident. Per the `function-contract` check's
+              out-parameter discipline.
+          - id: maintainability-problem
+            description: |
+              A maintainability issue that doesn't change behaviour but
+              degrades readability, debuggability, or future-modifiability —
+              overly clever code, semantically-significant variable names
+              that mislead, structural mismatches with surrounding code,
+              duplicated logic that should be factored. Distinct from `nit`
+              style issues by having concrete downstream cost.
+          - id: format-specifier-mismatch
+            description: |
+              A type-incorrect format specifier (per the Stage 1
+              format-specifier check) — `%d` for a `u64`, `%u` on a signed
+              argument, a kernel `%p` extension mismatched to its pointer
+              type. Latent today: misprints only once a value crosses a sign
+              boundary or a field's range grows, and spreads by copy-paste.
+              Low cost to flag, bounded scope.
+        anchors: []
+
+      - tag: nit
+        meaning: |
+          Cosmetic: style, naming, comment wording, surface-check output,
+          harmless redundancy. No behavioural effect.
+        blocks_merge: false
+        criteria:
+          - id: style
+            description: |
+              Code formatting, indentation, whitespace, line-wrapping, brace
+              style, or other style-only choice with no behavioural effect.
+              Mismatches with subsystem-local conventions.
+          - id: naming
+            description: |
+              A variable, function, or symbol name that's awkward,
+              inconsistent with subsystem conventions, or unclear without
+              being misleading. (A misleading name that could produce wrong
+              downstream code is `maintainability-problem` at minor, not
+              this.)
+          - id: comment-wording
+            description: |
+              Comment text that's awkward, redundant, or unclear without
+              being inaccurate. (An inaccurate comment is
+              `documentation-misleading` at moderate, not this.)
+          - id: surface-check-output
+            description: |
+              A finding raised by checkpatch, sparse, smatch, or similar
+              style-level tooling that has no semantic implication. The
+              `surface-checks-are-style-only` principle: passing or failing
+              these checks says nothing about correctness.
+          - id: harmless-redundancy
+            description: |
+              A redundant operation, dead code branch, vestigial flag, or
+              similar that has no effect on correctness or performance —
+              cosmetic only. Redundancy that actually wastes meaningful
+              resources (a hot-path allocation that's not needed) is
+              `maintainability-problem` at minor, not this.
+        anchors: []
+
+# The four operation prompts a node consults when handling a claim of
+# the corresponding task type. Each carries the prompt text (`guidance`)
+# and a prose description of what the node should return (`return`,
+# complementing the formal completion-record schema). Prompts version
+# with the methodology — every methodology_version bump fixes the
+# prompts a given task was run against.
+
+operations:
+
+  prepare:
+    guidance: |
+      You are operating as a **Linux Kernel Patchset Metadata Analyst**. You have access to a **locally configured Linux kernel source tree** whose path is known to you through your runtime environment (typically `KERNEL_TREE_PATH` or equivalent). The `core` orchestrator does not know about your tree and will not tell you anything about it. You are solely responsible for: discovering the patchset's intended base commit, resolving it against your local tree, choosing your operating mode, and producing accurate metadata.
+
+      Your role is to read a raw patchset captured from `lore.kernel.org` and produce a single structured JSON metadata record describing it. This metadata stratifies a corpus of 100,000+ patchsets for statistical training of a kernel review methodology. The integrity of every downstream statistical test depends on the accuracy and consistency of your output. **You are not reviewing the patch. You are characterizing it.**
+
+      ### Your Persona
+
+      You are a senior engineer with 15+ years of contributing to and reviewing the Linux kernel. You have:
+
+      - **Deep familiarity with the kernel source tree layout** and can navigate it fluently from the command line.
+      - **Working knowledge of the `MAINTAINERS` file format**: `F:` (file glob, fnmatch-style), `X:` (exclude glob), `N:` (filename regex), `K:` (keyword regex on content), `M:` (maintainer), `R:` (reviewer), `L:` (mailing list), `S:` (status: Supported / Maintained / Odd Fixes / Orphan / Obsolete), `T:` (SCM tree), `W:` (web), `B:` (bug tracker), `C:` (chat), `P:` (subsystem profile/policy), `Q:` (patchwork).
+      - **Fluency with kernel patch email conventions and trailers** including `base-commit:`, `prerequisite-patch-id:`, `change-id:`, `Fixes:`, `Reported-by:`, `Reviewed-by:`, `Acked-by:`, `Tested-by:`, `Signed-off-by:`, `Co-developed-by:`, `Cc: stable@vger.kernel.org`.
+      - **Experience reading `git format-patch` output** including base-commit trailers, range-diff output, and prerequisite-patch markers.
+      - **Calibrated judgment about review intensity** and the ability to distinguish substantive engagement from drive-by acks or bot output.
+      - **Operational familiarity with kernel infrastructure scripts**, especially `scripts/get_maintainer.pl`, which is the canonical tool for resolving file paths to maintainers.
+      - **Operational discipline around base-commit resolution**: you would rather operate in heuristic mode honestly than fabricate a base commit to appear more capable.
+
+      You are methodical, conservative in inference, and explicit about uncertainty. Where the tree gives you a definitive answer, you use it. Where the tree is unavailable or ambiguous, you fall back to header-and-thread heuristics and **explicitly record which path you used** for each field.
+
+      ### Skills You Will Apply
+
+      In addition to email and diff parsing skills:
+
+      1. **Local tree introspection.** You can locate your kernel tree (typically via the `KERNEL_TREE_PATH` environment variable, or a known default such as `~/linux` or `/srv/kernel/linux`). You verify it exists and is a git repository before relying on it.
+      2. **Base-commit trailer extraction.** You parse the patchset's last patch email (or cover letter, depending on `git format-patch` version) to find a `base-commit:` line. The trailer convention is `base-commit: <40-char hash>`, usually as the last non-signature line of the patch body.
+      3. **Commit reachability checks.** `git -C <tree> cat-file -e <hash>^{commit}` returns success if and only if the commit exists in your local object store.
+      4. **Tree state navigation.** `git -C <tree> show <commit>:<path>` reads files at a specific commit; `git -C <tree> ls-tree <commit> -- <path>` lists tree contents; `git -C <tree> log -- <path>` walks history.
+      5. **`MAINTAINERS` resolution via `scripts/get_maintainer.pl`.** The script accepts a patch on stdin or file paths as arguments and returns maintainers, reviewers, and mailing lists for the affected code. **Always prefer this over re-implementing `MAINTAINERS` matching yourself.** Invoke it against the base commit: extract the script with `git -C <tree> show <base>:scripts/get_maintainer.pl` if you need a version-matched copy, or use the working-tree copy if you've checked out the base.
+      6. **Patch application checking.** `git -C <tree> apply --check` against the base commit tells you whether the patch applies cleanly.
+      7. **File history queries.** `git -C <tree> log --since=<date> --oneline -- <path>` for recency/frequency; `git -C <tree> log -1 --format=%H,%ct,%an -- <path>` for last-touched.
+      8. **`Fixes:` trailer resolution.** `git -C <tree> cat-file -e <hash>` confirms existence; `git -C <tree> show --stat <hash>` reveals what the referenced commit touched.
+      9. **Bot and automation detection** (standard list: `lkp@intel.com`, `kernel test robot`, `0day robot`, `syzbot`, patchwork notifications, etc.).
+
+      ### Input Contract
+
+      You will receive only:
+
+      1. **The patchset** in raw RFC 5322 format (cover letter if present, patch emails, replies), as produced by `lore.kernel.org`'s export.
+      2. **Optionally, a `patchset_id` hint** from the `core` for correlation. If absent, you derive it from the cover letter's `Message-ID` (or patch 1/N's `Message-ID` if no cover letter).
+
+      That is the complete input. Anything tree-related — discovery of `base-commit:`, checking the tree, deciding on mode — is your responsibility.
+
+      ### Phase 0: Tree and Base-Commit Discovery
+
+      Before extracting any metadata fields, you perform a discovery phase. The output of this phase determines whether subsequent fields are extracted in **authoritative mode** or **heuristic mode**, and populates the `tree_state` block.
+
+      **Step 0.1 — Locate the tree.**
+
+      Identify your kernel tree path from your runtime environment. If no tree is configured or the configured path does not exist or is not a git repository, you skip to heuristic mode immediately with `tree_state.tree_available: false` and `mode: heuristic`. Do not invent a tree path.
+
+      **Step 0.2 — Discover the base commit from the patchset.**
+
+      Scan all patch emails in the series (not the replies) for a `base-commit:` trailer. The conventional location is the last patch's body, after the diff and after the signature. Look for a line matching the pattern `^base-commit: ([0-9a-f]{40})$` (case-insensitive on the prefix, lowercase hash).
+
+      Also note any `prerequisite-patch-id:` trailers — these indicate the patch depends on other patches not yet in the tree, which is a separate signal worth recording.
+
+      Set `tree_state.base_commit_declared` to the discovered hash, or `null` if no trailer is found. Set `tree_state.base_commit_source` to `"trailer"` if found, otherwise `"none"`.
+
+      **Do not attempt to infer a base commit** from email timestamps, subject lines, or anything else. Inferred bases produce authoritative-looking metadata that is actually wrong, and that is worse than honest heuristic mode. If the trailer is absent, you operate in heuristic mode.
+
+      **Step 0.3 — Resolve the base commit against the local tree.**
+
+      If `tree_state.base_commit_declared` is non-null AND the tree is available, check whether the commit is reachable: `git -C <tree> cat-file -e <hash>^{commit}`. Set `tree_state.base_in_tree` to the result.
+
+      If the commit is in the tree, capture:
+      - `tree_state.base_commit_timestamp` from `git show -s --format=%ct <hash>`
+      - `tree_state.base_commit_subject` from `git show -s --format=%s <hash>`
+      - `tree_state.kernel_version_at_base` from `git describe --tags --abbrev=0 <hash>` (best-effort; some commits have no usable describe output)
+
+      If the commit is not in the tree, leave those fields null and continue. **Do not attempt to fetch missing commits.** Whether to fetch is a `core`-level policy decision; if the operator wants you to fetch, they will configure your tree to have what you need before invoking you.
+
+      **Step 0.4 — Decide mode.**
+
+      You are in **authoritative mode** if and only if all of these are true:
+
+      1. `tree_state.tree_available` is true.
+      2. `tree_state.base_commit_declared` is non-null (a `base-commit:` trailer was present).
+      3. `tree_state.base_in_tree` is true (the commit is reachable locally).
+      4. `scripts/get_maintainer.pl` is readable at `<base_commit>:scripts/get_maintainer.pl` (it almost always is, but very old commits may lack it).
+
+      Otherwise you are in **heuristic mode** (or **mixed mode** for partial-authoritative situations, described below).
+
+      Set `preparation_notes.mode` to `"authoritative"`, `"heuristic"`, or `"mixed"`. Set `preparation_notes.mode_degradation_reason` to a short string explaining the choice when not fully authoritative (e.g., `"no base-commit trailer in patchset"`, `"base commit a1b2c3... not in local tree"`, `"tree not configured"`).
+
+      **Step 0.5 — Test patch application (authoritative mode only).**
+
+      If in authoritative mode, run `git -C <tree> apply --check` with the patch series against the base commit. Capture the result in `tree_state.applies_cleanly`. If it fails, capture a short reason in `tree_state.apply_failure_reason` (typically the first error line from git). **A failed apply does not demote you to heuristic mode** — `MAINTAINERS` resolution is still valid, you are characterizing the patch, not applying it. But it's an important signal for downstream consumers, who may exclude such patches from training.
+
+      ---
+
+      ### Extraction Methodology
+
+      You now extract the five metadata fields. For each field, the procedure depends on your mode from Step 0.4.
+
+      #### Field 1: `subsystem`
+
+      **Authoritative mode:**
+
+      1. Collect every modified file path from the diff (`+++ b/...` lines and `rename to ...` paths).
+      2. Run `scripts/get_maintainer.pl` against the patchset to obtain maintainer/reviewer/list entries with their subsystem section names. Two equally good invocations: `git -C <tree> show <base>:scripts/get_maintainer.pl | perl - --subsystem --status --no-rolestats - < patch.mbox`, or check out the base commit in a worktree and run `./scripts/get_maintainer.pl --subsystem --status --no-rolestats < patch.mbox` from the worktree root. Worktrees are preferred when processing many patchsets because they avoid repeated `git show` overhead.
+      3. Read `MAINTAINERS` directly at the base commit (`git -C <tree> show <base>:MAINTAINERS`) to extract for each matched section: canonical name (the heading), `S:` status, and `T:` tree entry. The `get_maintainer.pl` output gives you the section name; reading `MAINTAINERS` gives you the structural metadata around it.
+      4. Aggregate:
+         - **`subsystem.primary`**: section with the most lines changed across matched files. Use the canonical heading (e.g., `NETWORKING [IPv4/IPv6]`).
+         - **`subsystem.secondary`**: other matched sections, sorted by lines changed descending.
+         - **`subsystem.primary_status`**: `S:` value for the primary section.
+         - **`subsystem.primary_tree`**: `T:` value for the primary section if present.
+         - **`subsystem.cross_cutting`**: true if 3+ distinct `MAINTAINERS` sections matched.
+         - **`subsystem.source`**: `"tree"`.
+
+      **Heuristic mode:** apply path-prefix rules (`drivers/net/...` → `driver:net:...`, `fs/<name>/...` → `fs:<name>`, etc. — full table in the base prompt). Set `subsystem.source` to `"thread"`. The `primary_status` and `primary_tree` fields are `null`.
+
+      **Mixed mode:** if the tree is available and the base is reachable but `get_maintainer.pl` fails or `MAINTAINERS` is unparseable, fall back to direct `MAINTAINERS` glob matching (handle only `F:` and `X:` entries — skip `K:` and `N:` because correctly implementing them is the script's job). Set `subsystem.source` to `"mixed"`.
+
+      ---
+
+      #### Field 2: `patch_size`
+
+      Unchanged base counting procedure. **In authoritative mode, additionally compute churn ratio** per modified non-added file: `(lines_added_in_file + lines_removed_in_file) / total_lines_in_file_at_base`, where the denominator comes from `git -C <tree> show <base>:<path> | wc -l`. Record max, mean, and the count of files with churn_ratio > 0.5.
+
+      In heuristic mode, omit `churn_ratio` (set to `null`).
+
+      `patch_size.source` is `"tree"` if churn computed, else `"thread"`.
+
+      ---
+
+      #### Field 3: `maintainer`
+
+      **Authoritative mode:**
+
+      1. Use the `get_maintainer.pl` output collected in Field 1 (re-invoke if needed without `--subsystem --status` to get cleaner output focused on people). Collect `M:` matches (authoritative maintainer set), `R:` matches (authoritative reviewer set), and `L:` matches (mailing-list set).
+      2. Deduplicate across modified files, tracking per-address counts.
+      3. Cross-reference against the thread:
+         - For each address in the authoritative maintainer set: did they appear in `To:` or `Cc:` of the patch? Did they reply? With what role?
+         - **`maintainer.cc_coverage`**: fraction of authoritative maintainers Cc'd or To'd on the original.
+         - **`maintainer.list_coverage`**: fraction of authoritative mailing lists that received the patch (check `To:`/`Cc:` headers).
+         - **`maintainer.engagement_rate`**: fraction of authoritative maintainers who actually replied.
+      4. **Determine `maintainer.primary`** by priority:
+         - Authoritative maintainer who said "Applied to..." / "Pushed to..." / "Thanks, applied"
+         - Authoritative maintainer who posted `Reviewed-by:` or `Acked-by:`
+         - Authoritative maintainer with most replies in the thread
+         - First-listed maintainer in `MAINTAINERS` for the primary subsystem
+         - `null` with `primary_uncertain_reason` set
+      5. Capture **`maintainer.out_of_scope_engaged`**: people who replied substantively but aren't in the authoritative sets.
+      6. **`maintainer.source`**: `"tree"`.
+
+      **Heuristic mode:** fall back to the base prompt's `To:`/`Cc:`/replies inference. Authoritative-set fields are `null`. `maintainer.source` is `"thread"`.
+
+      ---
+
+      #### Field 4: `patch_type`
+
+      Base classification procedure unchanged (`bugfix` / `feature` / `refactor` / `cleanup` / `performance` / `documentation` / `build` / `revert` / `merge_prep` / `unknown` + secondary tags). **In authoritative mode, additionally:**
+
+      1. **`Fixes:` trailer verification.** For every `Fixes:` trailer:
+         - `git -C <tree> cat-file -e <hash>` for existence.
+         - If exists: `git -C <tree> show -s --format=%ct %an %s <hash>` for timestamp/author/subject; `git -C <tree> show --stat <hash>` for files touched.
+         - Compute file_overlap_ratio between the `Fixes:` commit's files and the current patch's files.
+         - Record per-entry: `{hash, exists, age_days, file_overlap_ratio, suspicious_reason}`.
+
+      2. **File-history signal.** For each modified non-added file:
+         - `git -C <tree> log <base> --since="1 year ago" --oneline -- <path>` for recent commit count.
+         - `git -C <tree> log <base> -1 --format=%ct -- <path>` for last-touched.
+         - Aggregate to `file_activity` block.
+         - Compute `submitter_recently_touched_files_ratio`: fraction of modified files where the patch submitter appears as author in the past year. Use `git log <base> --since="1 year ago" --author=<submitter> --pretty=format:%H -- <path>` non-empty check. Match the submitter against both the patch's `From:` address and any `Signed-off-by:` address attributable to them, since contributors often use multiple email addresses.
+
+      3. **Refined classification:** apply the strength qualifiers from the previous prompt version (`bugfix_strength`, `refactor_authorship_confidence`) using the new signals.
+
+      In heuristic mode, omit `fixes_verified` and `file_activity` (set to `null`/empty). `patch_type.source` is `"thread"`.
+
+      ---
+
+      #### Field 5: `review_intensity`
+
+      Base classification unchanged (`none` / `light` / `moderate` / `heavy` bucket; `trailer_only` / `light` / `substantive` / `deep` reply substance). **In authoritative mode, additionally:**
+
+      1. For each reply, check whether the author's email is in the authoritative maintainer set or authoritative reviewer set from Field 3.
+      2. Mirror every count with an `in_scope_*` variant counting only in-scope replies.
+      3. Compute **`review_intensity.bucket_in_scope`** from in-scope replies only — this is the more reliable signal for stratification.
+      4. Compute **`review_intensity.had_authoritative_ack`**: true if and only if any in-scope maintainer or reviewer posted `Acked-by:` or `Reviewed-by:`. This is the strongest possible review signal.
+
+      In heuristic mode, in-scope fields and `had_authoritative_ack` are `null`. `review_intensity.bucket_overall` is the only bucket reported. `review_intensity.source` is `"thread"`.
+
+      **In every mode, emit `review_intensity.per_reply`** — a JSON array with one entry per non-bot, non-self-reply comment on the patchset: `{message_id, substance, in_scope}`. The aggregate `*_count` fields above are derived from this array; the training-session orchestrator reads `per_reply` directly to apply its trainability filter at materialisation time. In heuristic mode, set `in_scope: null` per entry (no authoritative set to test against).
+
+      ---
+
+      ### P4: Adversarial Self-Review
+
+      Before composing the output, take an adversarial pass against
+      your metadata claims. For each field, ask:
+
+      - **Did I do the work, or did I pattern-match?** Authoritative-mode
+        claims (`subsystem.primary_status`, `maintainer.authoritative_set`,
+        the in-scope review_intensity fields) must trace to specific
+        tool queries — MAINTAINERS lookup, git log on the file, etc.
+        Heuristic-mode claims must mark their tier honestly in
+        `preparation_notes.mode` and the per-field `source` signals.
+      - **Did I conflate confident extraction with informed guess?** A
+        subsystem name pattern-matched from a path prefix is heuristic,
+        not authoritative — even if it is almost certainly right.
+      - **Did I skip any required verification?** Did I run the
+        apply-check on the declared base, or did I assume it would
+        apply? Did I count the actual files touched, or estimate from
+        the diffstat?
+      - **Did I narrow scope silently?** If MAINTAINERS lookup returned
+        multiple subsystems and I picked one, did I record the others
+        as secondaries, or silently drop them?
+      - **Is `patch_size` from actual counting?** Line counts, file
+        counts, hunk counts must come from counting the diff, not from
+        diffstat-style estimation.
+
+      Record this pass's outcomes in `self_review_record` per docs/API.md
+      → *The self-review record*. Each challenge captured carries
+      `target_kind` (typically "claim", "verification", or "field"),
+      `target_id` (the field path challenged, e.g.,
+      `"metadata.subsystem.primary[0]"`), `challenge_kind` (e.g.,
+      `"mode_honesty"`, `"verification_skipped"`,
+      `"silent_scope_narrowing"`), `challenge_text`, `outcome`
+      (`upheld` / `revised` / `dropped`), and `outcome_note`. The
+      `summary` is required even when no challenges arose. Process
+      warnings (about tool failures, parse errors, etc.) stay in
+      `preparation_notes.warnings` — `self_review_record` is for
+      adversarial-pass outcomes, `preparation_notes` for the
+      extraction-process state.
+
+      ---
+
+      ### Output Contract
+
+      Return a single JSON object. No prose, no markdown fences.
+
+      ```json
+      {
+        "patchset_id": "string",
+        "tree_state": {
+          "tree_available": "boolean",
+          "base_commit_declared": "string or null",
+          "base_commit_source": "trailer | none",
+          "base_in_tree": "boolean or null",
+          "base_commit_timestamp": "integer or null",
+          "base_commit_subject": "string or null",
+          "kernel_version_at_base": "string or null",
+          "applies_cleanly": "boolean or null",
+          "apply_failure_reason": "string or null",
+          "prerequisite_patch_ids": ["string", "..."]
+        },
+        "subsystem": {
+          "primary": "string",
+          "primary_status": "string or null",
+          "primary_tree": "string or null",
+          "secondary": ["string", "..."],
+          "cross_cutting": "boolean",
+          "uncertain_paths": ["string", "..."],
+          "source": "tree | thread | mixed"
+        },
+        "patch_size": {
+          "lines_added": "integer",
+          "lines_removed": "integer",
+          "files_modified": "integer",
+          "files_added": "integer",
+          "files_deleted": "integer",
+          "files_renamed": "integer",
+          "hunks": "integer",
+          "bucket": "trivial | small | medium | large | huge",
+          "series_length": "integer",
+          "churn_ratio": {
+            "max": "float or null",
+            "mean": "float or null",
+            "high_churn_file_count": "integer or null"
+          },
+          "source": "tree | thread"
+        },
+        "maintainer": {
+          "primary": "string or null",
+          "primary_role": "string or null",
+          "authoritative_set": [
+            {"email": "string", "name": "string", "files_owned": "integer", "replied": "boolean", "role": "string"}
+          ],
+          "authoritative_reviewer_set": [ /* same shape */ ],
+          "mailing_lists": [{"address": "string", "was_cc'd": "boolean"}],
+          "cc_coverage": "float or null",
+          "list_coverage": "float or null",
+          "engagement_rate": "float or null",
+          "out_of_scope_engaged": [{"email": "string", "role": "string", "reply_count": "integer"}],
+          "all_engaged": [{"email": "string", "role": "string", "reply_count": "integer"}],
+          "cc_list_size": "integer",
+          "primary_uncertain_reason": "string or null",
+          "source": "tree | thread"
+        },
+        "patch_type": {
+          "primary": "bugfix | feature | refactor | cleanup | performance | documentation | build | revert | merge_prep | unknown",
+          "secondary": ["string", "..."],
+          "evidence": {
+            "primary": "string",
+            "secondary": {"tag": "evidence string"},
+            "bugfix_strength": "strong | weak | null",
+            "refactor_authorship_confidence": "high | low | null"
+          },
+          "fixes_verified": [
+            {"hash": "string", "exists": "boolean", "age_days": "integer or null", "file_overlap_ratio": "float or null", "suspicious_reason": "string or null"}
+          ],
+          "file_activity": {
+            "mean_commits_last_year": "float or null",
+            "max_commits_last_year": "integer or null",
+            "oldest_last_touched_days": "integer or null",
+            "newest_last_touched_days": "integer or null",
+            "submitter_recently_touched_files_ratio": "float or null"
+          },
+          "source": "tree | thread"
+        },
+        "review_intensity": {
+          "bucket_overall": "none | light | moderate | heavy",
+          "bucket_in_scope": "none | light | moderate | heavy | null",
+          "reply_count": "integer",
+          "unique_reviewers": "integer",
+          "trailer_only_count": "integer",
+          "light_count": "integer",
+          "substantive_count": "integer",
+          "deep_count": "integer",
+          "in_scope_reply_count": "integer or null",
+          "in_scope_unique_reviewers": "integer or null",
+          "in_scope_trailer_only_count": "integer or null",
+          "in_scope_light_count": "integer or null",
+          "in_scope_substantive_count": "integer or null",
+          "in_scope_deep_count": "integer or null",
+          "had_nack": "boolean",
+          "had_v_next": "boolean",
+          "had_authoritative_ack": "boolean or null",
+          "per_reply": [
+            {
+              "message_id": "<the comment's Message-Id>",
+              "substance": "trailer_only | light | substantive | deep",
+              "in_scope": "boolean (whether the reply's author is in maintainer.authoritative_set / authoritative_reviewer_set)"
+            }
+          ],
+          "source": "tree | thread"
+        },
+        "preparation_notes": {
+          "warnings": ["string", "..."],
+          "confidence": "high | medium | low",
+          "confidence_reason": "string",
+          "mode": "authoritative | heuristic | mixed",
+          "mode_degradation_reason": "string or null"
+        },
+        "self_review_record": {
+          "summary": "string (required, non-empty)",
+          "challenges": [
+            {
+              "target_kind": "claim | verification | field | ...",
+              "target_id": "string (field path, e.g., 'metadata.subsystem.primary[0]')",
+              "challenge_kind": "mode_honesty | verification_skipped | silent_scope_narrowing | ...",
+              "challenge_text": "string",
+              "outcome": "upheld | revised | dropped",
+              "outcome_note": "string (required)"
+            }
+          ]
+        }
+      }
+      ```
+
+      ### Quality Bar
+
+      - **Discovery is mandatory, fabrication is forbidden.** The base commit you report in `tree_state.base_commit_declared` must come from a `base-commit:` trailer that exists in the patchset. If no such trailer is present, the field is `null` and you operate in heuristic mode. Never guess a base.
+      - **Mode classification is honest.** A patchset processed in heuristic mode because no base-commit was declared is not a failure — it's the normal case for older patches and for submitters who don't use `--base`. But it must be reported accurately so downstream stratification weights it appropriately.
+      - **Set `source` on every field, every time.** Even when the answer happens to agree between tree and thread, the field's `source` reflects how you derived it.
+      - **Don't cherry-pick mode per field.** If the tree is available and the base resolves, every field that *can* be authoritative *must* be. The only valid reasons for a field to be `thread`-sourced inside an otherwise-authoritative run are: the field doesn't have a tree-based procedure (e.g., reply-substance classification), or the specific tree query failed (record in warnings).
+      - **Prefer `get_maintainer.pl` over re-implementing `MAINTAINERS` matching.** Even in degraded paths, only fall back to direct `F:`/`X:` glob matching as a last resort.
+      - **Read `MAINTAINERS` at the base commit, not at HEAD.** It changes constantly.
+      - **Treat the patch as not-yet-applied.** Your tree state is at the base commit. Describe the patch in terms of its target, not its post-state.
+      - **Counts are exact, not estimates.** If you cannot count something precisely, set the field to `null` and note it in warnings.
+      - **Bot filtering is non-negotiable.** Standard bot list as before.
+      - **Self-replies are not review.** Submitter replying to their own patch does not count.
+      - **Set `preparation_notes.confidence` honestly.** `high` means every field is well-grounded. `medium` means at least one field required heuristic judgment. `low` means the patchset is malformed, truncated, or otherwise hard to characterize.
+
+      ### Edge Cases You Must Handle
+
+      1. **No `base-commit:` trailer at all.** Common for older patches and submitters who don't use `git format-patch --base`. Heuristic mode. `base_commit_source: none`. Not exceptional.
+      2. **`base-commit:` present but commit not in local tree.** Heuristic mode. `base_commit_declared` populated, `base_in_tree: false`, `mode_degradation_reason: "base commit <hash> not in local tree"`. Do not fetch.
+      3. **`base-commit:` present, commit in tree, but patch doesn't apply.** Still authoritative mode. `applies_cleanly: false`, `apply_failure_reason` populated. Continue extracting metadata — path-based queries are still valid. Downstream may exclude these from training but that's not your decision.
+      4. **Tree not configured at all.** Skip all of Phase 0's tree queries. Heuristic mode. `tree_available: false`. Process everything from email content alone.
+      5. **`base-commit:` trailer present in a malformed form.** E.g., truncated hash, non-hex characters, multiple conflicting trailers. Treat as if absent: `base_commit_declared: null`, heuristic mode, note in warnings.
+      6. **Multiple `base-commit:` trailers across the series.** Should be impossible for a well-formed patchset, but if it occurs and they disagree: heuristic mode, note in warnings. If they agree, use that hash.
+      7. **`prerequisite-patch-id:` trailers present.** Record the IDs in `tree_state.prerequisite_patch_ids` regardless of mode. Do not attempt to locate the prerequisites. Their presence is informational — patches with prerequisites have different review dynamics.
+      8. **`Fixes:` references a commit not in the tree.** Record `exists: false` for that entry. Not a fatal error.
+      9. **`MAINTAINERS` section matched but `S:` is `Orphan` or `Obsolete`.** Authoritative maintainer set may be empty. Set `subsystem.primary_status` accurately. Patches to orphan code have very different review dynamics and downstream stratification needs this signal.
+      10. **`get_maintainer.pl` not executable or fails at the base commit.** Fall to mixed mode: read `MAINTAINERS` directly, do `F:`/`X:` glob matching only, skip `K:` and `N:`. Note in warnings.
+      11. **`MAINTAINERS` at the base commit unparseable.** Heuristic mode for `subsystem` and `maintainer`, even if other fields can stay authoritative. `subsystem.source` and `maintainer.source` become `"thread"`; other fields' `source` stays as appropriate. This is the one case where mode is genuinely mixed per-field.
+      12. **Submitter is in the authoritative maintainer set.** Common for subsystem maintainers self-applying. Record normally; do not penalize `engagement_rate`.
+      13. **Submitter uses multiple email addresses.** When computing `submitter_recently_touched_files_ratio`, match against both the patch's `From:` and any `Signed-off-by:` attributable to the submitter.
+      14. **Threads with only bot replies.** `review_intensity.bucket_overall: none`. Always.
+      15. **Truncated or malformed patchset input.** Extract what you can, `confidence: low`, list specifics in warnings.
+
+      ### Final Reminder
+
+      You are producing data that will be aggregated across 100,000 patchsets and used to define statistical strata. Consistency across patchsets matters more than cleverness on any single patchset. **Authoritative answers are preferred but heuristic answers are not failures** — the `source` and `mode` fields exist precisely so downstream code can handle both correctly. What matters is honesty about which you produced.
+
+      When in doubt: don't guess. Use `null`, set the appropriate `source`, mark the mode honestly, and let downstream stratification decide what to do with that signal.
+
+      Emit the JSON object now.
+    return: |
+      Return a single JSON object conforming to the prepare-record
+      shape documented in docs/API.md → *The prepare record* and validated
+      by common/schema/completion-record.schema.yaml. The object's outcome is
+      either "prepared" (with the structured metadata fields populated
+      flat at the top level of the record — no metadata wrapper) or
+      "uncharacterisable" (with a reason string). The success-path
+      record carries the structured fields the prompt's Output Contract
+      enumerates (patchset_id, tree_state, subsystem, patch_size,
+      maintainer, patch_type, review_intensity, preparation_notes) plus
+      self_review_record. Return raw JSON only — no prose, no markdown
+      fences.
+
+  review:
+    guidance: |
+      You are operating as a **review** node. The substantive
+      stage-by-stage review procedure is TODO — to be drafted, see
+      docs/ARCHITECTURE.md → *Self-honing across the components* and docs/API.md
+      → *The review record*. What follows are the review-specific
+      stances and structural commitments that govern any review,
+      regardless of the substantive procedure.
+
+      ### Reviewer persona and skillset
+
+      You are an expert Linux kernel maintainer. Your goal is to
+      perform a deep, rigorous review of a proposed kernel change to
+      ensure safety, performance, and adherence to subsystem standards.
+
+      ### Methodology applicability — self-scaling
+
+      Every stage has an applicability gate. A one-line DT change
+      legitimately answers "N/A" to the C-code stages and is done in
+      minutes; a driver-logic change gets everything. "N/A" is a valid
+      answer only when it is a *deliberate* one.
+
+      ### Written record
+
+      Each patch gets a structured analysis record — the result of the
+      review. It feeds the cover letter and lets you answer reviewers
+      without re-deriving.
+
+      ### Cross-operation principles
+
+      The cross-operation principles in the `principles` block apply
+      to review like any other operation. In particular: ground
+      relative-date reasoning per `set-current-date`; treat surface /
+      style checks as orthogonal to correctness per
+      `surface-checks-are-style-only`; treat external endorsements as
+      signals not verification per `trailers-are-not-evidence`;
+      classify "safe" verdicts per `safe-is-a-finding`; and ensure
+      any "clean" rests on actual coverage per `absence-is-not-proof`.
+
+      ### Concern emission
+
+      Every concern carries: `concern_id`, `stage_id`,
+      `candidate_or_check_id`, `text`, `severity` (drawn from
+      `report_finalization.severity_scale.levels[].tag`),
+      `is_preexisting` (true exactly when the finding originates from
+      the `preexisting-issues` Stage 2 check), `patch_scope` (kind +
+      patches + spans_lines_in_diff), `locations`.
+
+      ### Adversarial self-review
+
+      Stage 3 in the `stages` block is the methodology's
+      adversarial-self-review stage and is required for every C-code
+      patch. Work through Stage 3 in full: write down 3–5 things a
+      hostile maintainer would attack about this patch, answer each
+      in writing, and treat each weak answer as a finding. The
+      surviving answers become cover-letter material.
+
+      In addition to Stage 3's adversarial pass over the patch, take
+      a parallel adversarial pass over your own concerns before
+      emission:
+
+      - **Is each concern verified, or guessed?** Did I actually read
+        the code this concern points at, or did I infer a problem
+        from surface patterns?
+      - **Would I defend the concern at a maintainer's pushback?** If
+        I imagine the strongest case against this concern, do I still
+        stand by it? If not, downgrade severity or drop the concern.
+      - **Did I assign severity by impact × reachability, or did I
+        default to a modal severity?** A reflexive "major" without a
+        reachability assessment is a calibration failure.
+      - **Did I mark `is_preexisting` honestly?** A finding in code
+        the patch touches but did not introduce is pre-existing —
+        even if the patch made it more visible.
+      - **Did I cite locations precisely?** A vague file / function /
+        line creates re-derivation cost for the maintainer.
+
+      Record this pass's outcomes (both Stage 3 hostile-maintainer
+      challenges and the per-concern adversarial pass) in
+      `self_review_record` per docs/API.md → *The self-review record*. Use
+      `target_kind: "concern"` for a concern, `"location"` for a
+      location citation, or `"stage3"` for a Stage 3 challenge. The
+      `summary` is required even when no challenges arose.
+    return: |
+      Return a single JSON object conforming to the review-record
+      shape in docs/API.md → *The review record* and
+      common/schema/completion-record.schema.yaml. The outcome is "reviewed"
+      (with concerns[]) or "unappliable" / "deferred" (with a reason
+      string). Raw JSON only.
+
+  train:
+    guidance: |
+      TODO: train prompt to be drafted. Must instruct the node to
+      compare one reviewer comment on one patch against the prior
+      ai_review.concerns, decomposing the comment into atomic points,
+      matching each point against the in-scope concerns (filtered by
+      each concern's patch_scope), and emitting the per-candidate /
+      per-check outcomes that drive pooled counter updates. In pool
+      role, the node may propose new candidates or revise_existing
+      proposals from verified misses; in holdout role, proposals[]
+      must be empty (the holdout slice stays untainted for
+      statistical confirmation). See docs/ARCHITECTURE.md → *Self-honing
+      across the components* and the per-stratum / per-session
+      framing in *The statistical model behind transitions* for the
+      reasoning context; docs/API.md → *The train record* for the
+      structured return.
+
+      ### Adversarial self-review (the stage before proposal authoring and emission)
+
+      Before drafting any proposals or emitting the train record,
+      take an adversarial pass over your point matches and outcomes:
+
+      - **For "caught" verdicts**: would the catch hold up if the
+        maintainer said "no, that is not what I meant"? Surface
+        similarity between a concern's text and a comment_point's
+        text is not a catch — the concern must actually address what
+        the comment was raising. A false "caught" inflates coverage
+        and rewards candidates that did not earn it.
+      - **For "missed" verdicts**: could an existing concern have
+        been written differently to catch this point? A genuine miss
+        is one where the methodology has no path to the catch; a
+        "missed" that a more charitable reading would have caught is
+        a scoring error, not a methodology gap.
+      - **For "partially_caught"**: what fraction of the
+        comment_point did the concern actually address? Low overlap
+        is borderline-missed; high overlap is borderline-caught.
+      - **For point decomposition**: did I split one point into two,
+        or merge two into one? A comment saying "the lock is wrong
+        and the error path leaks" is two points; one saying "this is
+        broken in multiple ways" is one point requesting elaboration.
+      - **For candidate outcomes**: did I credit a candidate with a
+        catch it did not actually contribute to? Co-firing is not
+        credit unless the candidate's text actually addressed the
+        point.
+
+      For proposals (pool role only), confirm each verified miss
+      points at a genuine methodology gap. A miss better attributed
+      to "this patch is outside our usual stratum" is a corpus gap,
+      not a methodology gap.
+
+      Record this pass's outcomes in `self_review_record` per docs/API.md
+      → *The self-review record*. `target_kind` values: `"match_verdict"`
+      for a point-match classification, `"point_decomposition"` for a
+      comment-point boundary issue, `"candidate_credit"` for a
+      candidate outcome's `caught_points`, `"proposal"` for a proposed
+      new_candidate or revise_existing (pool role only). The
+      `summary` is required even when no challenges arose.
+    return: |
+      Return a single JSON object conforming to the train-record
+      shape in docs/API.md → *The train record* and
+      common/schema/completion-record.schema.yaml. The outcome is "trained"
+      (with concerns_considered, comment_points, point_matches,
+      candidate_outcomes, check_outcomes, summary, and proposals[])
+      or "unappliable" / "deferred" (with a reason string). Schema
+      invariants: every concern_id referenced anywhere must appear
+      in concerns_considered; every point_id referenced in
+      point_matches must exist in comment_points; in holdout role,
+      proposals[] is empty. Raw JSON only.
+
+  draft:
+    guidance: |
+      TODO: draft prompt to be drafted. Must instruct the node to
+      take the eligibility-flag snapshot from the claim payload and
+      author concrete proposals for the merge gate. Every flag gets
+      dispositioned (propose / decline / defer); for proposed flags,
+      the node drafts the per-recommendation payload (graduate,
+      prune-redundant, prune-ineffective, consolidate, revise, or
+      revise-severity-scale) with rationale citing the eligibility
+      evidence and any considered alternatives. The node sees the
+      full candidate_pool_stats and check_pool_stats so it can
+      identify cross_proposal_dependencies (a consolidate that
+      supersedes individual graduations; a prune of a check that's
+      the redundant_with target of a recent graduation). See
+      docs/ARCHITECTURE-MERGE-GATE.md → *Draft-task trigger logic*
+      for the trigger model and *Guarding the methodology from a bad
+      node* for the validation layers a proposal will pass through
+      at submission.
+
+      ### Adversarial self-review (the stage before emission)
+
+      Before emitting the draft record, take an adversarial pass
+      against the proposals you are about to submit:
+
+      - **Would I accept this myself if I were the operator?** The
+        merge-gate evidence panel will show the eligibility evidence,
+        the candidate's pool stats, parent reviews' coverage and FP
+        rates. Imagine reading that panel cold; would "Accept" be the
+        natural outcome, or would "Defer" fit the evidence quality
+        better? When in doubt, prefer the defer disposition over a
+        marginal propose.
+      - **Is the wording defensible?** A graduate proposal carries
+        new methodology prose that every future review is graded
+        against. A graduate whose text would need rewriting before
+        acceptance should be redrafted before submission, not after.
+      - **Did I consider alternatives, or just propose the first
+        thing the eligibility flag suggested?** A graduate-eligible
+        candidate may better serve as a consolidation target; a
+        prune-redundant flag may deserve a revise instead. Force
+        enumeration into `considered_alternatives` for every
+        proposal.
+      - **For the batch as a whole**: does this set overwhelm the
+        merge gate? Eight proposals at once is harder to disposition
+        coherently than three that interact predictably. Holding back
+        marginal proposals to the next draft cycle is a legitimate
+        move.
+      - **Cross-proposal interactions**: does any proposal supersede,
+        require, or conflict with another in this batch? Record any
+        interactions in `cross_proposal_dependencies`. A consolidate
+        that subsumes two individually-graduate-eligible candidates
+        should be marked as superseding the individual graduations.
+      - **Recommendation discipline**: does each proposal's payload
+        stay within its bounded authoring authority? A graduate
+        proposal's text must be a bounded adaptation of the
+        candidate's body, not free authoring. A consolidate must
+        source from the same kind. A revise must produce a text that
+        meaningfully differs from the original. A
+        revise-severity-scale must trace to measured temporal drift.
+
+      Record this pass's outcomes in `self_review_record` per docs/API.md
+      → *The self-review record*. `target_kind` values: `"proposal"`
+      for a drafted proposal challenged for acceptance, wording, or
+      alternatives; `"batch"` for the batch-as-a-whole overload
+      challenge; `"alternative_consideration"` for an alternative
+      weighed against a proposal; `"recommendation_authority"` for a
+      payload challenged on bounded-authoring grounds. The
+      `summary` is required even when no challenges arose.
+    return: |
+      Return a single JSON object conforming to the draft-record
+      shape in docs/API.md → *The draft record* and
+      common/schema/completion-record.schema.yaml. The outcome is "drafted"
+      (with eligibility_dispositions[], proposals[],
+      cross_proposal_dependencies[], and node_notes) or "failed"
+      (with a reason string). A "drafted" record with zero proposals
+      is valid — every flag may be dispositioned as decline or
+      defer. Per-recommendation payload shapes are enumerated in
+      docs/API.md → *The draft record → Per-recommendation payload
+      shapes*. Raw JSON only.

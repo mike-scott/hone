@@ -1,0 +1,1596 @@
+# completion-record.schema.yaml — JSON Schema (draft 2020-12) for a hone
+# task completion record.
+#
+# A completion record is the body of `POST /v1/claims/{claim_id}/result`
+# (see docs/API.md → *The completion record*). One of four shapes,
+# discriminated by `task_type`:
+#
+#   prepare  task_type=prepare,  outcome  prepared    | uncharacterisable
+#   review   task_type=review,   outcome  reviewed    | unappliable | deferred
+#   train    task_type=train,    outcome  trained     | unappliable | deferred
+#   draft    task_type=draft,    outcome  drafted     | failed
+#
+# Every record carries the shared header (task_type, worker_id, outcome,
+# model, usage). Success-path outcomes (prepared / reviewed / trained /
+# drafted) additionally carry self_review_record — the adversarial-self-
+# review record, see docs/API.md → *The self-review record*. Failure-path
+# outcomes carry only `reason`.
+#
+# The methodology version is NOT part of the record: hone-core stamps it
+# on the work_items / draft_tasks row at claim time (the same version it
+# put in the claim payload), so the node neither echoes it nor decides it.
+#
+# `additionalProperties: false` is the default everywhere. A stray or
+# misspelled key fails validation rather than being silently ignored.
+#
+# Checks JSON Schema cannot express, left to hone-core on receipt:
+#   - the record's task_type matches the claim's task_type
+#   - concern_id / point_id / proposal_id / flag_id cross-references
+#     resolve to real ids (within the record, against the claim payload,
+#     or against persistent state)
+#   - holdout-role train records have empty proposals[]
+#   - draft record's eligibility_dispositions cover exactly the
+#     eligibility_flags from the claim payload
+
+$schema: "https://json-schema.org/draft/2020-12/schema"
+$id: "urn:hone:completion-record"
+title: hone task completion record
+description: >-
+  The body of POST /v1/claims/{claim_id}/result — a node's terminal
+  report on one claimed task. One of prepare / review / train / draft.
+
+oneOf:
+  - $ref: "#/$defs/prepare_record"
+  - $ref: "#/$defs/review_record"
+  - $ref: "#/$defs/train_record"
+  - $ref: "#/$defs/draft_record"
+
+$defs:
+
+  # =====================================================================
+  # Shared primitives
+  # =====================================================================
+
+  worker_id:
+    type: string
+    minLength: 1
+    description: Id of the node submitting this record.
+
+  severity:
+    type: string
+    enum: [critical, major, moderate, minor, nit]
+    description: >-
+      The five-level methodology severity scale, drawn from
+      `report_finalization.severity_scale.levels[].tag` of the
+      methodology version this task ran against.
+
+  model:
+    type: string
+    minLength: 1
+    description: AI model identifier the task used (e.g. "claude-opus-4-7").
+
+  usage:
+    type: object
+    additionalProperties: false
+    required: [input_tokens, output_tokens, duration_ms]
+    description: Per-task cost accounting, as reported by the node.
+    properties:
+      input_tokens:
+        type: integer
+        minimum: 0
+      output_tokens:
+        type: integer
+        minimum: 0
+      duration_ms:
+        type: integer
+        minimum: 0
+
+  meta:
+    type: object
+    description: >-
+      Free-form node-reported metadata (provider, prompt hashes, cache
+      token counts, etc.). hone-core stores it verbatim alongside the
+      decomposed record.
+
+  # =====================================================================
+  # Self-review record (shared across success-path outcomes)
+  # =====================================================================
+
+  self_review_challenge:
+    type: object
+    additionalProperties: false
+    required: [target_kind, target_id, challenge_kind, challenge_text, outcome, outcome_note]
+    description: >-
+      One challenge surfaced by the adversarial self-review pass.
+    properties:
+      target_kind:
+        type: string
+        minLength: 1
+        description: >-
+          What was challenged. Free-form per operation conventions:
+          review uses "concern" / "location" / "stage3"; train uses
+          "match_verdict" / "point_decomposition" / "candidate_credit"
+          / "proposal"; draft uses "proposal" / "batch" /
+          "alternative_consideration" / "recommendation_authority";
+          prepare uses "claim" / "verification" / "field".
+      target_id:
+        type: string
+        minLength: 1
+        description: >-
+          A stable reference: a concern_id, point_id, proposal_id,
+          flag_id, or a field path (prepare uses paths like
+          "subsystem.primary").
+      challenge_kind:
+        type: string
+        minLength: 1
+        description: >-
+          The adversarial question category. Per-operation conventions
+          in the guidance prose; examples: "evidence_check",
+          "severity_calibration", "scope_check", "wording_check",
+          "alternative_consideration", "mode_honesty".
+      challenge_text:
+        type: string
+        minLength: 1
+        description: The specific question the node asked itself.
+      outcome:
+        type: string
+        enum: [upheld, revised, dropped]
+      outcome_note:
+        type: string
+        minLength: 1
+        description: >-
+          What happened. For "upheld": what verified it. For "revised":
+          what changed and why. For "dropped": why it was removed and
+          the consequent change in the substantive output (e.g.,
+          "concern rev-c-009 removed from concerns[]").
+
+  self_review_record:
+    type: object
+    additionalProperties: false
+    required: [summary, challenges]
+    description: >-
+      Adversarial-self-review record. Present on every success-path
+      completion record. `summary` is required and non-empty even when
+      no challenges arose — the summary forces articulation. See docs/API.md
+      → *The self-review record*.
+    properties:
+      summary:
+        type: string
+        minLength: 1
+        description: >-
+          Brief prose describing what the adversarial pass surfaced.
+          Required even when no challenges arose; says e.g. "reviewed 5
+          concerns against the 5 adversarial questions; none required
+          revision".
+      challenges:
+        type: array
+        items: { $ref: "#/$defs/self_review_challenge" }
+        description: >-
+          Specific challenges raised and their resolution. May be empty
+          when nothing surfaced; `summary` carries the disposition in
+          that case.
+
+  # =====================================================================
+  # Review-specific structures
+  # =====================================================================
+
+  patch_scope:
+    type: object
+    additionalProperties: false
+    required: [kind, patches]
+    description: >-
+      The scope of a concern: which patch(es) of the series it pertains
+      to, and where in the diff.
+    properties:
+      kind:
+        type: string
+        enum: [patch, series, cross_patch]
+        description: >-
+          "patch" — pertains to a single patch in the series.
+          "series" — pertains to the series as a whole (cover letter,
+          ordering, cumulative effect). "cross_patch" — spans two or
+          more patches (a problem visible only across them).
+      patches:
+        type: array
+        minItems: 1
+        items:
+          type: string
+          minLength: 1
+        description: >-
+          Message-Ids of the patches the concern pertains to. Single
+          element for "patch"; full set for "series"; the affected
+          subset for "cross_patch".
+      spans_lines_in_diff:
+        oneOf:
+          - type: "null"
+          - type: array
+            minItems: 2
+            maxItems: 2
+            items:
+              type: integer
+              minimum: 0
+        description: >-
+          [start, end] line range within the relevant patch's diff,
+          or null if the concern is not line-scoped (a series-level
+          observation, e.g.).
+
+  concern_location:
+    type: object
+    additionalProperties: false
+    required: [file]
+    description: A pointer to specific source the concern references.
+    properties:
+      file:
+        type: string
+        minLength: 1
+      function_symbol:
+        type: string
+        minLength: 1
+      code_snippet:
+        type: string
+        description: A short excerpt of the problematic code.
+
+  concern:
+    type: object
+    additionalProperties: false
+    required: [concern_id, stage_id, candidate_or_check_id, text,
+               severity, is_preexisting, patch_scope, locations]
+    description: One structured concern from an AI review.
+    properties:
+      concern_id:
+        type: string
+        minLength: 1
+        description: >-
+          Stable id within this review (e.g. "rev-c-007"). Referenced
+          by train records as concerns_considered[*].concern_id and
+          point_matches[*].addressing_concerns[*].concern_id.
+      stage_id:
+        type: string
+        minLength: 1
+        description: >-
+          Which methodology stage produced this concern. Must match
+          a stage id in the active methodology (e.g. "0", "1", "2",
+          "3", "S").
+      candidate_or_check_id:
+        type: string
+        minLength: 1
+        description: >-
+          Which check or candidate fired to produce this concern. Refs
+          a methodology check id or a methodology candidate id.
+      text:
+        type: string
+        minLength: 1
+        description: The concern's full body — the maintainer-facing prose.
+      severity:
+        $ref: "#/$defs/severity"
+      is_preexisting:
+        type: boolean
+        description: >-
+          True exactly when the finding originates from the
+          `preexisting-issues` Stage 2 check — the finding is in
+          pre-existing code, not patch-introduced code. False
+          otherwise (default).
+      patch_scope:
+        $ref: "#/$defs/patch_scope"
+      locations:
+        type: array
+        minItems: 1
+        items: { $ref: "#/$defs/concern_location" }
+
+  # =====================================================================
+  # Train-specific structures
+  # =====================================================================
+
+  comment_point:
+    type: object
+    additionalProperties: false
+    required: [point_id, text, kind, severity]
+    description: >-
+      One atomic point decomposed from a maintainer's comment on a
+      patch — the unit a train task matches against in-scope concerns.
+    properties:
+      point_id:
+        type: string
+        minLength: 1
+        description: Stable id within this train ("p1", "p2", ...).
+      text:
+        type: string
+        minLength: 1
+        description: The point's content, quoted from the comment.
+      kind:
+        type: string
+        enum: [correctness, style, naming, refactor, question, suggestion, nack]
+      severity:
+        $ref: "#/$defs/severity"
+      spans_files:
+        type: array
+        items:
+          type: string
+          minLength: 1
+      spans_lines_in_diff:
+        type: array
+        minItems: 2
+        maxItems: 2
+        items:
+          type: integer
+          minimum: 0
+
+  point_match_addressing_concern:
+    type: object
+    additionalProperties: false
+    required: [concern_id, overlap_kind, overlap_rationale]
+    properties:
+      concern_id:
+        type: string
+        minLength: 1
+        description: >-
+          A concern (from concerns_considered) that addresses this
+          point.
+      overlap_kind:
+        type: string
+        enum: [exact, overlapping, adjacent, none]
+      overlap_rationale:
+        type: string
+        minLength: 1
+
+  point_match:
+    type: object
+    additionalProperties: false
+    required: [point_id, match_status, match_confidence, addressing_concerns,
+               addressing_candidates, addressing_checks]
+    description: >-
+      Per-comment-point match attribution against the in-scope concerns
+      from the prior review.
+    properties:
+      point_id:
+        type: string
+        minLength: 1
+      match_status:
+        type: string
+        enum: [caught, partially_caught, missed, not_applicable]
+      match_confidence:
+        type: number
+        minimum: 0.0
+        maximum: 1.0
+      addressing_concerns:
+        type: array
+        items: { $ref: "#/$defs/point_match_addressing_concern" }
+      addressing_candidates:
+        type: array
+        items:
+          type: string
+          minLength: 1
+        description: Candidate ids that fired on this point.
+      addressing_checks:
+        type: array
+        items:
+          type: string
+          minLength: 1
+        description: Check ids that fired on this point.
+      miss_rationale:
+        type: string
+        minLength: 1
+        description: Present only when match_status = "missed".
+
+  caught_point_ref:
+    type: object
+    additionalProperties: false
+    required: [point_id, overlap_kind]
+    properties:
+      point_id:
+        type: string
+        minLength: 1
+      overlap_kind:
+        type: string
+        enum: [exact, overlapping, adjacent, none]
+      was_unique:
+        type: boolean
+        description: >-
+          True when this catch was unique to the candidate/check —
+          baseline review would have missed it.
+
+  candidate_or_check_outcome:
+    type: object
+    additionalProperties: false
+    required: [applied, fired, fired_concerns, caught_points,
+               false_positive_concerns, redundancy_with]
+    description: >-
+      Per-candidate or per-check outcome for this train cycle. Shared
+      shape between candidate_outcomes and check_outcomes; the key
+      (candidate_id vs check_id) distinguishes the two arrays.
+    properties:
+      candidate_id:
+        type: string
+        minLength: 1
+      check_id:
+        type: string
+        minLength: 1
+      applied:
+        type: boolean
+        description: >-
+          Did the candidate/check's body get evaluated against the
+          patch. Increments the applied counter when true.
+      fired:
+        type: boolean
+        description: >-
+          Did the candidate/check produce any concern in this train.
+      fired_concerns:
+        type: array
+        items:
+          type: string
+          minLength: 1
+        description: Ids of concerns it produced.
+      caught_points:
+        type: array
+        items: { $ref: "#/$defs/caught_point_ref" }
+      false_positive_concerns:
+        type: array
+        items:
+          type: string
+          minLength: 1
+        description: >-
+          Ids of concerns it produced that no comment_point caught
+          (potential false positives, contribute to FP rate).
+      redundancy_with:
+        type: array
+        items:
+          type: string
+          minLength: 1
+        description: >-
+          List of check (or candidate) ids it co-fired with on this
+          train — feeds redundancy analysis.
+    oneOf:
+      - required: [candidate_id]
+        not: { required: [check_id] }
+      - required: [check_id]
+        not: { required: [candidate_id] }
+
+  train_summary:
+    type: object
+    additionalProperties: false
+    required: [comment_points_total, comment_points_by_kind,
+               match_distribution, severity_weighted_catch_rate,
+               had_missed_critical, had_missed_major,
+               candidates_fired, checks_fired, new_candidate_proposals]
+    description: Aggregated stats for the train.
+    properties:
+      comment_points_total:
+        type: integer
+        minimum: 0
+      comment_points_by_kind:
+        type: object
+        additionalProperties:
+          type: integer
+          minimum: 0
+        description: >-
+          One key per comment_point.kind value, value = count.
+      match_distribution:
+        type: object
+        additionalProperties: false
+        required: [caught, partially_caught, missed, not_applicable]
+        properties:
+          caught:
+            type: integer
+            minimum: 0
+          partially_caught:
+            type: integer
+            minimum: 0
+          missed:
+            type: integer
+            minimum: 0
+          not_applicable:
+            type: integer
+            minimum: 0
+      severity_weighted_catch_rate:
+        type: number
+        minimum: 0.0
+        maximum: 1.0
+      had_missed_critical:
+        type: boolean
+      had_missed_major:
+        type: boolean
+      candidates_fired:
+        type: integer
+        minimum: 0
+      checks_fired:
+        type: integer
+        minimum: 0
+      new_candidate_proposals:
+        type: integer
+        minimum: 0
+
+  train_proposal:
+    type: object
+    additionalProperties: false
+    required: [proposal_id, proposal_kind, target_existing_id, draft_text,
+               derived_from, estimated_applicability]
+    description: >-
+      A proposal derived from a verified miss (pool role only; holdout
+      proposals[] must be empty — enforced by hone-core on receipt).
+    properties:
+      proposal_id:
+        type: string
+        minLength: 1
+      proposal_kind:
+        type: string
+        enum: [new_candidate, revise_existing]
+      target_existing_id:
+        oneOf:
+          - type: "null"
+          - type: string
+            minLength: 1
+        description: >-
+          null for new_candidate; the candidate or check id for
+          revise_existing.
+      draft_text:
+        type: string
+        minLength: 1
+      derived_from:
+        type: object
+        additionalProperties: false
+        required: [comment_point_ids, miss_rationale, patchset_id]
+        properties:
+          comment_point_ids:
+            type: array
+            minItems: 1
+            items:
+              type: string
+              minLength: 1
+          miss_rationale:
+            type: string
+            minLength: 1
+          patchset_id:
+            type: string
+            minLength: 1
+          training_session_id:
+            oneOf:
+              - type: "null"
+              - type: string
+                minLength: 1
+          stratum_label:
+            oneOf:
+              - type: "null"
+              - type: string
+                minLength: 1
+      estimated_applicability:
+        type: object
+        additionalProperties: false
+        required: [expected_strata, expected_co_fire_with]
+        properties:
+          expected_strata:
+            type: array
+            items:
+              type: string
+              minLength: 1
+          expected_co_fire_with:
+            type: array
+            items:
+              type: string
+              minLength: 1
+
+  concerns_considered_entry:
+    type: object
+    additionalProperties: false
+    required: [concern_id, in_scope_reason, is_preexisting]
+    properties:
+      concern_id:
+        type: string
+        minLength: 1
+      in_scope_reason:
+        type: string
+        enum: [patch, series, cross_patch]
+      is_preexisting:
+        type: boolean
+
+  # =====================================================================
+  # Draft-specific structures
+  # =====================================================================
+
+  eligibility_disposition:
+    type: object
+    additionalProperties: false
+    required: [flag_id, disposition]
+    description: One disposition entry per eligibility_flag from the claim payload.
+    properties:
+      flag_id:
+        type: string
+        minLength: 1
+      disposition:
+        type: string
+        enum: [propose, decline, defer]
+      proposal_id:
+        type: string
+        minLength: 1
+        description: Present if and only if disposition = "propose"; refs proposals[].
+      decline_rationale:
+        type: string
+        minLength: 1
+        description: Required if and only if disposition = "decline".
+      defer_rationale:
+        type: string
+        minLength: 1
+        description: Required if and only if disposition = "defer".
+    oneOf:
+      - properties: { disposition: { const: propose } }
+        required: [proposal_id]
+        not: { anyOf: [ { required: [decline_rationale] },
+                        { required: [defer_rationale] } ] }
+      - properties: { disposition: { const: decline } }
+        required: [decline_rationale]
+        not: { anyOf: [ { required: [proposal_id] },
+                        { required: [defer_rationale] } ] }
+      - properties: { disposition: { const: defer } }
+        required: [defer_rationale]
+        not: { anyOf: [ { required: [proposal_id] },
+                        { required: [decline_rationale] } ] }
+
+  considered_alternative:
+    type: object
+    additionalProperties: false
+    required: [alternative, rejected_because]
+    properties:
+      alternative:
+        type: string
+        minLength: 1
+      rejected_because:
+        type: string
+        minLength: 1
+
+  draft_proposal_rationale:
+    type: object
+    additionalProperties: false
+    required: [summary, evidence_cited, considered_alternatives]
+    properties:
+      summary:
+        type: string
+        minLength: 1
+        description: One-line summary.
+      evidence_cited:
+        type: object
+        additionalProperties: false
+        required: [from_eligibility_flag]
+        properties:
+          from_eligibility_flag:
+            type: string
+            minLength: 1
+          from_pool_stats:
+            description: Relevant per-subject counters.
+          from_review_evaluations:
+            description: Relevant review-level stats.
+          from_recent_sessions:
+            type: array
+            items:
+              type: string
+              minLength: 1
+            description: Session ids whose evidence the node cited.
+      considered_alternatives:
+        type: array
+        items: { $ref: "#/$defs/considered_alternative" }
+        description: >-
+          Alternatives the node weighed before choosing this
+          recommendation. May be empty when the eligibility flag's
+          recommendation was the only natural one, but D6's adversarial
+          pass tells the node to enumerate explicitly.
+
+  draft_proposal_predicted_impact:
+    type: object
+    additionalProperties: false
+    required: [expected_fire_rate, expected_unique_catch_rate]
+    properties:
+      expected_fire_rate:
+        type: number
+        minimum: 0.0
+        maximum: 1.0
+      expected_unique_catch_rate:
+        type: number
+        minimum: 0.0
+        maximum: 1.0
+      strata_likely_affected:
+        type: array
+        items:
+          type: string
+          minLength: 1
+      potential_redundancy_with:
+        type: array
+        items:
+          type: string
+          minLength: 1
+
+  # --- Per-recommendation payload shapes ---
+
+  draft_payload_graduate:
+    type: object
+    additionalProperties: false
+    required: [candidate_id, graduated_check_id, graduated_text]
+    description: >-
+      Promote a candidate to a permanent check. graduated_text is a
+      bounded adaptation of the candidate's body (layer-1 validation
+      enforces the bound on hone-core's side).
+    properties:
+      candidate_id:
+        type: string
+        minLength: 1
+      graduated_check_id:
+        type: string
+        minLength: 1
+      graduated_text:
+        type: string
+        minLength: 1
+
+  draft_payload_prune_redundant:
+    type: object
+    additionalProperties: false
+    required: [check_id, redundant_with_id]
+    properties:
+      check_id:
+        type: string
+        minLength: 1
+      redundant_with_id:
+        type: string
+        minLength: 1
+
+  draft_payload_prune_ineffective:
+    type: object
+    additionalProperties: false
+    required: [check_id]
+    properties:
+      check_id:
+        type: string
+        minLength: 1
+
+  draft_payload_consolidate:
+    type: object
+    additionalProperties: false
+    required: [source_subject_kinds, source_subject_ids, consolidated_text]
+    description: >-
+      Merge two or more subjects of the same kind into one. All
+      source_subject_kinds entries must be equal — no mixing candidates
+      and checks in one consolidation.
+    properties:
+      source_subject_kinds:
+        type: array
+        minItems: 2
+        items:
+          type: string
+          enum: [candidate, check]
+      source_subject_ids:
+        type: array
+        minItems: 2
+        items:
+          type: string
+          minLength: 1
+      consolidated_text:
+        type: string
+        minLength: 1
+
+  draft_payload_revise:
+    type: object
+    additionalProperties: false
+    required: [target_kind, target_id, revised_text, diff_summary]
+    properties:
+      target_kind:
+        type: string
+        enum: [candidate, check]
+      target_id:
+        type: string
+        minLength: 1
+      revised_text:
+        type: string
+        minLength: 1
+      diff_summary:
+        type: string
+        minLength: 1
+
+  draft_payload_revise_severity_scale_op:
+    type: object
+    additionalProperties: true
+    required: [op]
+    description: >-
+      One operation in a revise-severity-scale delta. The op enum is
+      fixed; op-specific fields are loosely typed at this layer
+      (layer-1 validation re-applies the resulting rubric against
+      methodology.schema.yaml on hone-core's side).
+    properties:
+      op:
+        type: string
+        enum: [add_anchor, modify_criterion, reweight_level,
+               modify_meaning, modify_uncertainty_rule,
+               modify_cross_kind_default]
+      level_tag:
+        type: string
+        enum: [critical, major, moderate, minor, nit]
+
+  draft_payload_revise_severity_scale:
+    type: object
+    additionalProperties: false
+    required: [delta, drift_evidence]
+    properties:
+      delta:
+        type: object
+        additionalProperties: false
+        required: [operations]
+        properties:
+          operations:
+            type: array
+            minItems: 1
+            items: { $ref: "#/$defs/draft_payload_revise_severity_scale_op" }
+      drift_evidence:
+        type: object
+        description: >-
+          Echoes the eligibility flag's drift_groups so the merge-gate
+          evidence panel shows what justified the proposal.
+
+  # --- One proposal entry, discriminated by recommendation ---
+
+  draft_proposal:
+    type: object
+    additionalProperties: false
+    required: [proposal_id, recommendation, subject_kind, subject_ids,
+               payload, rationale, predicted_impact]
+    description: >-
+      One drafted methodology change proposal. The payload shape is
+      determined by `recommendation`; the per-recommendation oneOf
+      enforces the right shape.
+    properties:
+      proposal_id:
+        type: string
+        minLength: 1
+      recommendation:
+        type: string
+        enum: [graduate, prune-redundant, prune-ineffective,
+               consolidate, revise, revise-severity-scale]
+      subject_kind:
+        type: string
+        enum: [candidate, check, severity_scale]
+      subject_ids:
+        type: array
+        minItems: 1
+        items:
+          type: string
+          minLength: 1
+      payload:
+        description: >-
+          Per-recommendation shape — see the per-recommendation oneOf.
+      rationale:
+        $ref: "#/$defs/draft_proposal_rationale"
+      predicted_impact:
+        $ref: "#/$defs/draft_proposal_predicted_impact"
+    oneOf:
+      - properties:
+          recommendation: { const: graduate }
+          subject_kind: { const: candidate }
+          payload: { $ref: "#/$defs/draft_payload_graduate" }
+      - properties:
+          recommendation: { const: prune-redundant }
+          subject_kind: { const: check }
+          payload: { $ref: "#/$defs/draft_payload_prune_redundant" }
+      - properties:
+          recommendation: { const: prune-ineffective }
+          subject_kind: { const: check }
+          payload: { $ref: "#/$defs/draft_payload_prune_ineffective" }
+      - properties:
+          recommendation: { const: consolidate }
+          subject_kind: { enum: [candidate, check] }
+          payload: { $ref: "#/$defs/draft_payload_consolidate" }
+      - properties:
+          recommendation: { const: revise }
+          subject_kind: { enum: [candidate, check] }
+          payload: { $ref: "#/$defs/draft_payload_revise" }
+      - properties:
+          recommendation: { const: revise-severity-scale }
+          subject_kind: { const: severity_scale }
+          payload: { $ref: "#/$defs/draft_payload_revise_severity_scale" }
+
+  cross_proposal_dependency:
+    type: object
+    additionalProperties: false
+    required: [proposal_id, dependency_kind, other_proposal_id]
+    properties:
+      proposal_id:
+        type: string
+        minLength: 1
+      dependency_kind:
+        type: string
+        enum: [supersedes, requires, conflicts_with]
+      other_proposal_id:
+        type: string
+        minLength: 1
+
+  draft_node_notes:
+    type: object
+    additionalProperties: false
+    required: [warnings, confidence, confidence_reason, overflow_flags_deferred]
+    properties:
+      warnings:
+        type: array
+        items:
+          type: string
+          minLength: 1
+        description: Advisory notes for the merge-gate operator.
+      confidence:
+        type: string
+        enum: [high, medium, low]
+      confidence_reason:
+        type: string
+        minLength: 1
+      overflow_flags_deferred:
+        type: array
+        items:
+          type: string
+          minLength: 1
+        description: >-
+          Flag ids the node did not get to (input was larger than the
+          node's reasoning could responsibly handle; rare given the
+          draft_batch_max cap of 10).
+
+  # =====================================================================
+  # Prepare-specific structures
+  # =====================================================================
+  #
+  # Note: the prepare prompt's Output Contract carries the metadata
+  # fields at the TOP level of the record (alongside outcome,
+  # self_review_record, etc.), not nested under a "metadata" wrapper.
+  # The schema validates the wire envelope (top-level fields, key
+  # enums) but uses `additionalProperties: false` on each metadata
+  # sub-object to catch typos. The full per-field shape is the
+  # responsibility of the prepare prompt's Output Contract and lives
+  # in core/default-methodology.yaml → operations.prepare.guidance.
+
+  prepare_tree_state:
+    type: object
+    additionalProperties: false
+    required: [tree_available, base_commit_source, prerequisite_patch_ids]
+    properties:
+      tree_available:
+        type: boolean
+      base_commit_declared:
+        oneOf:
+          - type: "null"
+          - type: string
+            minLength: 1
+      base_commit_source:
+        type: string
+        enum: [trailer, none]
+      base_in_tree:
+        oneOf:
+          - type: "null"
+          - type: boolean
+      base_commit_timestamp:
+        oneOf:
+          - type: "null"
+          - type: integer
+            minimum: 0
+      base_commit_subject:
+        oneOf:
+          - type: "null"
+          - type: string
+            minLength: 1
+      kernel_version_at_base:
+        oneOf:
+          - type: "null"
+          - type: string
+            minLength: 1
+      applies_cleanly:
+        oneOf:
+          - type: "null"
+          - type: boolean
+      apply_failure_reason:
+        oneOf:
+          - type: "null"
+          - type: string
+            minLength: 1
+      prerequisite_patch_ids:
+        type: array
+        items:
+          type: string
+          minLength: 1
+
+  prepare_subsystem:
+    type: object
+    additionalProperties: false
+    required: [primary, secondary, cross_cutting, uncertain_paths, source]
+    properties:
+      primary:
+        type: string
+        minLength: 1
+      primary_status:
+        oneOf:
+          - type: "null"
+          - type: string
+            minLength: 1
+      primary_tree:
+        oneOf:
+          - type: "null"
+          - type: string
+            minLength: 1
+      secondary:
+        type: array
+        items:
+          type: string
+          minLength: 1
+      cross_cutting:
+        type: boolean
+      uncertain_paths:
+        type: array
+        items:
+          type: string
+          minLength: 1
+      source:
+        type: string
+        enum: [tree, thread, mixed]
+
+  prepare_churn_ratio:
+    type: object
+    additionalProperties: false
+    required: [max, mean, high_churn_file_count]
+    properties:
+      max:
+        oneOf:
+          - type: "null"
+          - type: number
+      mean:
+        oneOf:
+          - type: "null"
+          - type: number
+      high_churn_file_count:
+        oneOf:
+          - type: "null"
+          - type: integer
+            minimum: 0
+
+  prepare_patch_size:
+    type: object
+    additionalProperties: false
+    required: [lines_added, lines_removed, files_modified, files_added,
+               files_deleted, files_renamed, hunks, bucket, series_length,
+               churn_ratio, source]
+    properties:
+      lines_added:
+        type: integer
+        minimum: 0
+      lines_removed:
+        type: integer
+        minimum: 0
+      files_modified:
+        type: integer
+        minimum: 0
+      files_added:
+        type: integer
+        minimum: 0
+      files_deleted:
+        type: integer
+        minimum: 0
+      files_renamed:
+        type: integer
+        minimum: 0
+      hunks:
+        type: integer
+        minimum: 0
+      bucket:
+        type: string
+        enum: [trivial, small, medium, large, huge]
+      series_length:
+        type: integer
+        minimum: 1
+      churn_ratio:
+        $ref: "#/$defs/prepare_churn_ratio"
+      source:
+        type: string
+        enum: [tree, thread]
+
+  prepare_person_entry:
+    type: object
+    additionalProperties: false
+    required: [email, role]
+    properties:
+      email:
+        type: string
+        minLength: 1
+      name:
+        type: string
+        minLength: 1
+      files_owned:
+        type: integer
+        minimum: 0
+      replied:
+        type: boolean
+      role:
+        type: string
+        minLength: 1
+      reply_count:
+        type: integer
+        minimum: 0
+
+  prepare_mailing_list_entry:
+    type: object
+    additionalProperties: false
+    required: [address]
+    properties:
+      address:
+        type: string
+        minLength: 1
+      was_cc_d:
+        type: boolean
+
+  prepare_maintainer:
+    type: object
+    additionalProperties: false
+    required: [authoritative_set, authoritative_reviewer_set, mailing_lists,
+               cc_list_size, source]
+    properties:
+      primary:
+        oneOf:
+          - type: "null"
+          - type: string
+            minLength: 1
+      primary_role:
+        oneOf:
+          - type: "null"
+          - type: string
+            minLength: 1
+      authoritative_set:
+        type: array
+        items: { $ref: "#/$defs/prepare_person_entry" }
+      authoritative_reviewer_set:
+        type: array
+        items: { $ref: "#/$defs/prepare_person_entry" }
+      mailing_lists:
+        type: array
+        items: { $ref: "#/$defs/prepare_mailing_list_entry" }
+      cc_coverage:
+        oneOf:
+          - type: "null"
+          - type: number
+            minimum: 0.0
+            maximum: 1.0
+      list_coverage:
+        oneOf:
+          - type: "null"
+          - type: number
+            minimum: 0.0
+            maximum: 1.0
+      engagement_rate:
+        oneOf:
+          - type: "null"
+          - type: number
+            minimum: 0.0
+            maximum: 1.0
+      out_of_scope_engaged:
+        type: array
+        items: { $ref: "#/$defs/prepare_person_entry" }
+      all_engaged:
+        type: array
+        items: { $ref: "#/$defs/prepare_person_entry" }
+      cc_list_size:
+        type: integer
+        minimum: 0
+      primary_uncertain_reason:
+        oneOf:
+          - type: "null"
+          - type: string
+            minLength: 1
+      source:
+        type: string
+        enum: [tree, thread]
+
+  prepare_fixes_verified_entry:
+    type: object
+    additionalProperties: false
+    required: [hash, exists]
+    properties:
+      hash:
+        type: string
+        minLength: 1
+      exists:
+        type: boolean
+      age_days:
+        oneOf:
+          - type: "null"
+          - type: integer
+            minimum: 0
+      file_overlap_ratio:
+        oneOf:
+          - type: "null"
+          - type: number
+            minimum: 0.0
+            maximum: 1.0
+      suspicious_reason:
+        oneOf:
+          - type: "null"
+          - type: string
+            minLength: 1
+
+  prepare_patch_type:
+    type: object
+    additionalProperties: false
+    required: [primary, secondary, evidence, source]
+    properties:
+      primary:
+        type: string
+        enum: [bugfix, feature, refactor, cleanup, performance,
+               documentation, build, revert, merge_prep, unknown]
+      secondary:
+        type: array
+        items:
+          type: string
+          minLength: 1
+      evidence:
+        type: object
+        additionalProperties: false
+        required: [primary]
+        properties:
+          primary:
+            type: string
+            minLength: 1
+          secondary:
+            type: object
+            additionalProperties:
+              type: string
+          bugfix_strength:
+            oneOf:
+              - type: "null"
+              - type: string
+                enum: [strong, weak]
+          refactor_authorship_confidence:
+            oneOf:
+              - type: "null"
+              - type: string
+                enum: [high, low]
+      fixes_verified:
+        type: array
+        items: { $ref: "#/$defs/prepare_fixes_verified_entry" }
+      file_activity:
+        type: object
+        additionalProperties: false
+        properties:
+          mean_commits_last_year:
+            oneOf: [ { type: "null" }, { type: number, minimum: 0.0 } ]
+          max_commits_last_year:
+            oneOf: [ { type: "null" }, { type: integer, minimum: 0 } ]
+          oldest_last_touched_days:
+            oneOf: [ { type: "null" }, { type: integer, minimum: 0 } ]
+          newest_last_touched_days:
+            oneOf: [ { type: "null" }, { type: integer, minimum: 0 } ]
+          submitter_recently_touched_files_ratio:
+            oneOf:
+              - type: "null"
+              - type: number
+                minimum: 0.0
+                maximum: 1.0
+      source:
+        type: string
+        enum: [tree, thread]
+
+  prepare_review_intensity_per_reply:
+    type: object
+    additionalProperties: false
+    required: [message_id, substance]
+    description: >-
+      Per-reply classification, used by the training-session
+      orchestrator as the trainability filter at materialisation
+      time (skip trailer_only by default; restrict to in_scope when
+      the session opts in).
+    properties:
+      message_id:
+        type: string
+        minLength: 1
+      substance:
+        type: string
+        enum: [trailer_only, light, substantive, deep]
+      in_scope:
+        oneOf:
+          - type: "null"
+          - type: boolean
+        description: >-
+          True when the reply's author is in the patchset's
+          authoritative_set or authoritative_reviewer_set (per
+          patchset_metadata.maintainer). Null in heuristic mode when
+          no authoritative set is available.
+
+  prepare_review_intensity:
+    type: object
+    additionalProperties: false
+    required: [bucket_overall, reply_count, unique_reviewers,
+               trailer_only_count, light_count, substantive_count,
+               deep_count, had_nack, had_v_next, per_reply, source]
+    properties:
+      bucket_overall:
+        type: string
+        enum: [none, light, moderate, heavy]
+      per_reply:
+        type: array
+        items: { $ref: "#/$defs/prepare_review_intensity_per_reply" }
+        description: >-
+          Per-reply classifications — one entry per non-bot,
+          non-self-reply comment on the patchset. The aggregate
+          *_count fields are derived from this array.
+      bucket_in_scope:
+        oneOf:
+          - type: "null"
+          - type: string
+            enum: [none, light, moderate, heavy]
+      reply_count:
+        type: integer
+        minimum: 0
+      unique_reviewers:
+        type: integer
+        minimum: 0
+      trailer_only_count:
+        type: integer
+        minimum: 0
+      light_count:
+        type: integer
+        minimum: 0
+      substantive_count:
+        type: integer
+        minimum: 0
+      deep_count:
+        type: integer
+        minimum: 0
+      in_scope_reply_count:
+        oneOf: [ { type: "null" }, { type: integer, minimum: 0 } ]
+      in_scope_unique_reviewers:
+        oneOf: [ { type: "null" }, { type: integer, minimum: 0 } ]
+      in_scope_trailer_only_count:
+        oneOf: [ { type: "null" }, { type: integer, minimum: 0 } ]
+      in_scope_light_count:
+        oneOf: [ { type: "null" }, { type: integer, minimum: 0 } ]
+      in_scope_substantive_count:
+        oneOf: [ { type: "null" }, { type: integer, minimum: 0 } ]
+      in_scope_deep_count:
+        oneOf: [ { type: "null" }, { type: integer, minimum: 0 } ]
+      had_nack:
+        type: boolean
+      had_v_next:
+        type: boolean
+      had_authoritative_ack:
+        oneOf:
+          - type: "null"
+          - type: boolean
+      source:
+        type: string
+        enum: [tree, thread]
+
+  prepare_preparation_notes:
+    type: object
+    additionalProperties: false
+    required: [warnings, confidence, mode]
+    properties:
+      warnings:
+        type: array
+        items:
+          type: string
+          minLength: 1
+      confidence:
+        type: string
+        enum: [high, medium, low]
+      confidence_reason:
+        type: string
+        minLength: 1
+      mode:
+        type: string
+        enum: [authoritative, heuristic, mixed]
+      mode_degradation_reason:
+        oneOf:
+          - type: "null"
+          - type: string
+            minLength: 1
+
+  # =====================================================================
+  # The four record types
+  # =====================================================================
+
+  prepare_record:
+    type: object
+    additionalProperties: false
+    required: [task_type, worker_id, outcome, model, usage]
+    description: >-
+      A node's report on a prepare task. Carries structured metadata
+      for stratification when outcome = "prepared"; carries only a
+      reason when outcome = "uncharacterisable".
+    properties:
+      task_type:
+        const: prepare
+      worker_id:           { $ref: "#/$defs/worker_id" }
+      outcome:
+        type: string
+        enum: [prepared, uncharacterisable]
+      model:               { $ref: "#/$defs/model" }
+      usage:               { $ref: "#/$defs/usage" }
+      meta:                { $ref: "#/$defs/meta" }
+      reason:
+        type: string
+        minLength: 1
+      patchset_id:
+        type: string
+        minLength: 1
+      tree_state:          { $ref: "#/$defs/prepare_tree_state" }
+      subsystem:           { $ref: "#/$defs/prepare_subsystem" }
+      patch_size:          { $ref: "#/$defs/prepare_patch_size" }
+      maintainer:          { $ref: "#/$defs/prepare_maintainer" }
+      patch_type:          { $ref: "#/$defs/prepare_patch_type" }
+      review_intensity:    { $ref: "#/$defs/prepare_review_intensity" }
+      preparation_notes:   { $ref: "#/$defs/prepare_preparation_notes" }
+      self_review_record:  { $ref: "#/$defs/self_review_record" }
+    oneOf:
+      - properties: { outcome: { const: prepared } }
+        required: [patchset_id, tree_state, subsystem, patch_size,
+                   maintainer, patch_type, review_intensity,
+                   preparation_notes, self_review_record]
+        not: { required: [reason] }
+      - properties: { outcome: { const: uncharacterisable } }
+        required: [reason]
+        not: { anyOf: [ { required: [patchset_id] },
+                        { required: [tree_state] },
+                        { required: [self_review_record] } ] }
+
+  review_record:
+    type: object
+    additionalProperties: false
+    required: [task_type, worker_id, outcome, model, usage]
+    description: >-
+      A node's report on a review task. Carries concerns[] +
+      self_review_record when outcome = "reviewed"; carries only
+      reason when outcome = "unappliable" or "deferred".
+    properties:
+      task_type:
+        const: review
+      worker_id:           { $ref: "#/$defs/worker_id" }
+      outcome:
+        type: string
+        enum: [reviewed, unappliable, deferred]
+      model:               { $ref: "#/$defs/model" }
+      usage:               { $ref: "#/$defs/usage" }
+      meta:                { $ref: "#/$defs/meta" }
+      reason:
+        type: string
+        minLength: 1
+      concerns:
+        type: array
+        items: { $ref: "#/$defs/concern" }
+        description: >-
+          The review's structured findings (an empty array means a
+          clean review — Stage 3 ran but produced no concerns).
+      self_review_record:  { $ref: "#/$defs/self_review_record" }
+    oneOf:
+      - properties: { outcome: { const: reviewed } }
+        required: [concerns, self_review_record]
+        not: { required: [reason] }
+      - properties: { outcome: { enum: [unappliable, deferred] } }
+        required: [reason]
+        not: { anyOf: [ { required: [concerns] },
+                        { required: [self_review_record] } ] }
+
+  train_record:
+    type: object
+    additionalProperties: false
+    required: [task_type, worker_id, outcome, model, usage]
+    description: >-
+      A node's report on a train task — a per-(patch, comment) deep-dive
+      comparison of the prior ai_review against the maintainer's comment.
+    properties:
+      task_type:
+        const: train
+      worker_id:           { $ref: "#/$defs/worker_id" }
+      outcome:
+        type: string
+        enum: [trained, unappliable, deferred]
+      model:               { $ref: "#/$defs/model" }
+      usage:               { $ref: "#/$defs/usage" }
+      meta:                { $ref: "#/$defs/meta" }
+      reason:
+        type: string
+        minLength: 1
+      training_session_id:
+        type: string
+        minLength: 1
+        description: >-
+          The session this train belongs to. Always present — every
+          train work-item is created by the session orchestrator;
+          there is no NULL-session train.
+      session_role:
+        type: string
+        enum: [pool, holdout]
+        description: >-
+          `pool` trains generate proposals and bump pooled counters;
+          `holdout` trains produce only measurement (no proposals, no
+          counter updates).
+      stratum_label:
+        type: string
+        minLength: 1
+        description: >-
+          The stratum this train falls under, per the session's
+          stratification spec.
+      concerns_considered:
+        type: array
+        items: { $ref: "#/$defs/concerns_considered_entry" }
+        description: >-
+          Every prior-review concern whose patch_scope placed it in
+          scope for this train. The complete denominator for review-
+          level coverage and FP-rate computation.
+      comment_points:
+        type: array
+        items: { $ref: "#/$defs/comment_point" }
+        description: >-
+          Decomposition of the maintainer's comment into atomic points.
+          May be empty if the comment is purely a trailer or trivially
+          unparseable; train will then have point_matches empty too.
+      point_matches:
+        type: array
+        items: { $ref: "#/$defs/point_match" }
+      candidate_outcomes:
+        type: array
+        items: { $ref: "#/$defs/candidate_or_check_outcome" }
+      check_outcomes:
+        type: array
+        items: { $ref: "#/$defs/candidate_or_check_outcome" }
+      summary:              { $ref: "#/$defs/train_summary" }
+      proposals:
+        type: array
+        items: { $ref: "#/$defs/train_proposal" }
+        description: >-
+          Proposals derived from verified misses. Must be empty when
+          session_role = "holdout" (enforced by hone-core on receipt).
+      self_review_record:  { $ref: "#/$defs/self_review_record" }
+    oneOf:
+      - properties: { outcome: { const: trained } }
+        required: [training_session_id, session_role, stratum_label,
+                   concerns_considered, comment_points, point_matches,
+                   candidate_outcomes, check_outcomes, summary,
+                   proposals, self_review_record]
+        not: { required: [reason] }
+      - properties: { outcome: { enum: [unappliable, deferred] } }
+        required: [reason]
+        not: { anyOf: [ { required: [concerns_considered] },
+                        { required: [comment_points] },
+                        { required: [self_review_record] } ] }
+
+  draft_record:
+    type: object
+    additionalProperties: false
+    required: [task_type, worker_id, outcome, model, usage]
+    description: >-
+      A node's report on a draft task. Dispositions every eligibility
+      flag from the claim payload and carries each proposal's structured
+      payload when outcome = "drafted"; carries only reason when
+      outcome = "failed".
+    properties:
+      task_type:
+        const: draft
+      worker_id:           { $ref: "#/$defs/worker_id" }
+      outcome:
+        type: string
+        enum: [drafted, failed]
+      model:               { $ref: "#/$defs/model" }
+      usage:               { $ref: "#/$defs/usage" }
+      meta:                { $ref: "#/$defs/meta" }
+      reason:
+        type: string
+        minLength: 1
+      eligibility_dispositions:
+        type: array
+        items: { $ref: "#/$defs/eligibility_disposition" }
+      proposals:
+        type: array
+        items: { $ref: "#/$defs/draft_proposal" }
+        description: >-
+          Zero or more concrete proposals — one per eligibility
+          disposition with disposition = "propose". A drafted record
+          with zero proposals is valid (every flag may be dispositioned
+          decline or defer).
+      cross_proposal_dependencies:
+        type: array
+        items: { $ref: "#/$defs/cross_proposal_dependency" }
+      node_notes:           { $ref: "#/$defs/draft_node_notes" }
+      self_review_record:  { $ref: "#/$defs/self_review_record" }
+    oneOf:
+      - properties: { outcome: { const: drafted } }
+        required: [eligibility_dispositions, proposals,
+                   cross_proposal_dependencies, node_notes,
+                   self_review_record]
+        not: { required: [reason] }
+      - properties: { outcome: { const: failed } }
+        required: [reason]
+        not: { anyOf: [ { required: [eligibility_dispositions] },
+                        { required: [proposals] },
+                        { required: [self_review_record] } ] }

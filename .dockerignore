@@ -1,0 +1,8 @@
+# docker build context is the project root — keep it lean. The ~1.1 GB
+# archive/ clone, the database, and git history must never be shipped to the
+# Docker daemon or baked into an image.
+.git
+archive
+staged
+**/__pycache__
+**/*.pyc
