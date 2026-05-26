@@ -17,30 +17,28 @@
     })();
   </script>
 </head>
-<body class="layout-fixed sidebar-expand-lg bg-body-tertiary">
-<script>
-  // Restore the sidebar collapse state from the prior page BEFORE first
-  // paint, so the layout doesn't flash from expanded to collapsed on
-  // every navigation. AdminLTE's own persistence is the source of
-  // truth (opt-in via `data-enable-persistence="true"` on .app-sidebar
-  // below); we read the same localStorage key here just so the body
-  // class is right from the first paint, before adminlte.min.js loads
-  // at the bottom of the page and applies the same state itself.
-  (function () {
-    try {
-      if (localStorage.getItem("lte.sidebar.state") === "sidebar-collapse")
-        document.body.classList.add("sidebar-collapse");
-    } catch (e) {}
-  })();
-</script>
+<body class="bg-body-tertiary">
 <div class="app-wrapper">
 
-  <nav class="app-header navbar navbar-expand bg-body">
+  {# Top-bar nav: brand + primary sections + the theme toggle on the
+     far right. No sidebar — pages have horizontal nav only.
+     `{% set active = request.url.path %}` lets each link decide
+     whether to render with the .active style. #}
+  {% set active = request.url.path %}
+  <nav class="app-header navbar navbar-expand bg-body shadow-sm">
     <div class="container-fluid">
-      <ul class="navbar-nav">
+      <a href="/" class="navbar-brand fw-light">hone-core</a>
+      <ul class="navbar-nav me-auto">
         <li class="nav-item">
-          <a class="nav-link" data-lte-toggle="sidebar" href="#" role="button"
-             aria-label="Toggle sidebar"><i class="bi bi-list"></i></a>
+          <a href="/" class="nav-link
+             {%- if active == '/' %} active{% endif %}">
+            <i class="bi bi-list-task me-1"></i>Queue</a>
+        </li>
+        <li class="nav-item">
+          <a href="/nodes" class="nav-link
+             {%- if active.startswith('/nodes')
+                  or active.startswith('/enroll') %} active{% endif %}">
+            <i class="bi bi-hdd-network me-1"></i>Nodes</a>
         </li>
       </ul>
       <ul class="navbar-nav ms-auto">
@@ -48,34 +46,15 @@
           <a class="nav-link" href="#" id="theme-toggle" role="button"
              aria-label="Toggle light/dark theme"><i class="bi"></i></a>
         </li>
+        <li class="nav-item">
+          <a href="/settings" class="nav-link
+             {%- if active.startswith('/settings') %} active{% endif %}"
+             aria-label="Settings" title="Settings">
+            <i class="bi bi-gear"></i></a>
+        </li>
       </ul>
     </div>
   </nav>
-
-  <aside class="app-sidebar bg-body-secondary shadow"
-         data-enable-persistence="true">
-    <div class="sidebar-brand">
-      <a href="/" class="brand-link"><span class="brand-text fw-light">hone-core</span></a>
-    </div>
-    <div class="sidebar-wrapper">
-      <nav class="mt-2">
-        <ul class="nav sidebar-menu flex-column" role="menu">
-          <li class="nav-item">
-            <a href="/" class="nav-link">
-              <i class="nav-icon bi bi-list-task"></i><p>Queue</p></a>
-          </li>
-          <li class="nav-item">
-            <a href="/nodes" class="nav-link">
-              <i class="nav-icon bi bi-hdd-network"></i><p>Nodes</p></a>
-          </li>
-          <li class="nav-item">
-            <a href="/settings" class="nav-link">
-              <i class="nav-icon bi bi-gear"></i><p>Settings</p></a>
-          </li>
-        </ul>
-      </nav>
-    </div>
-  </aside>
 
   <main class="app-main">
     <div class="app-content">
