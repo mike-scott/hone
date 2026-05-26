@@ -255,6 +255,17 @@ class HoneCoreClient:
         self._request("POST", f"/v1/claims/{claim_id}/release",
                       json={"reason": reason}).raise_for_status()
 
+    def report_health(self, snapshot: dict) -> None:
+        """POST /v1/nodes/me/health — periodic node-initiated health
+           report. The snapshot is a free-form dict (today:
+           free_disk_mb, refrepo_size_mb, last_anthropic_error);
+           hone-core stores the latest one per node and surfaces it
+           on the /nodes page. Failures here are non-fatal — the
+           runner wraps the call in a best-effort try/except so a
+           transient blip doesn't disrupt the claim loop."""
+        self._request("POST", "/v1/nodes/me/health",
+                      json=snapshot).raise_for_status()
+
     # The claim payload now carries everything a task needs — the patchset,
     # the patch messages, any training comments, and the compiled methodology
     # — so the previous side-fetch endpoints (get_blob / get_source_review /

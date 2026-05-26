@@ -153,6 +153,45 @@ def test_approve_enrollment_rejects_a_now_conflicting_name(db):
         core_db.approve_enrollment(db, "C-2")
 
 
+def test_update_node_health_round_trips_a_snapshot(db):
+    """update_node_health writes the JSON snapshot + a timestamp; the
+       getters return it as a decoded dict so the UI never touches
+       json.loads."""
+    enr = core_db.create_enrollment(db, node_name="builder-7")
+    node_id = core_db.approve_enrollment(db, enr["user_code"])
+    # Fresh node has no health yet.
+    fresh = core_db.get_node(db, node_id)
+    assert fresh["health"] is None and fresh["health_at"] is None
+    # First report lands as a dict on the row.
+    snapshot = {"free_disk_mb": 1000, "refrepo_size_mb": 4500,
+                 "last_anthropic_error": None}
+    assert core_db.update_node_health(db, node_id, snapshot) is True
+    row = core_db.get_node(db, node_id)
+    assert row["health"] == snapshot
+    assert isinstance(row["health_at"], int) and row["health_at"] > 0
+    # list_nodes also decodes.
+    listed = core_db.list_nodes(db)
+    assert listed[0]["health"] == snapshot
+
+
+def test_update_node_health_overwrites_the_previous_snapshot(db):
+    """Latest-snapshot semantics: a second report replaces the first
+       (no history kept in the row)."""
+    enr = core_db.create_enrollment(db, node_name="builder-7")
+    node_id = core_db.approve_enrollment(db, enr["user_code"])
+    core_db.update_node_health(db, node_id, {"free_disk_mb": 1000})
+    core_db.update_node_health(db, node_id, {"free_disk_mb": 500,
+                                              "last_anthropic_error": "auth"})
+    assert core_db.get_node(db, node_id)["health"] == {
+        "free_disk_mb": 500, "last_anthropic_error": "auth"}
+
+
+def test_update_node_health_returns_false_for_unknown_id(db):
+    """A snapshot POST race-loses to a delete_node: the helper
+       returns False and the endpoint silently no-ops."""
+    assert core_db.update_node_health(db, 99999, {"x": 1}) is False
+
+
 def test_active_node_with_name_helper(db):
     enr = core_db.create_enrollment(db, node_name="builder-7")
     node_id = core_db.approve_enrollment(db, enr["user_code"])

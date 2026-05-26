@@ -363,6 +363,44 @@ async def patchset_detail(request: Request, root_message_id: str,
     return templates.TemplateResponse(request, "patchset.html", ctx)
 
 
+# --- node health ----------------------------------------------------------
+
+def _mb_display(n):
+    """Render an MiB integer as a compact `123 MB` or `4.5 GB` string,
+       or `—` when the value is missing (None — the node hasn't
+       reported yet, or the volume isn't mounted)."""
+    if n is None:
+        return "—"
+    if n >= 1024:
+        return f"{n / 1024:.1f} GB"
+    return f"{n} MB"
+
+
+_ANTHROPIC_ERROR_LABELS = {
+    "auth":        "auth key rejected",
+    "rate_limit":  "rate-limited",
+    "connection":  "API unreachable",
+    "other":       "other API error",
+}
+
+
+def _health_display(health):
+    """Turn a stored node-health JSON snapshot into the small dict the
+       template renders. Returns None when the node hasn't reported
+       yet, so the template shows a single em-dash rather than
+       three. Defensive against an old / partial snapshot (a node
+       version that reported fewer fields than this hone-core
+       version expects)."""
+    if not isinstance(health, dict) or not health:
+        return None
+    err = health.get("last_anthropic_error")
+    return {
+        "free_disk":  _mb_display(health.get("free_disk_mb")),
+        "repo_size":  _mb_display(health.get("refrepo_size_mb")),
+        "error":      _ANTHROPIC_ERROR_LABELS.get(err, err) if err else None,
+    }
+
+
 # --- node management -------------------------------------------------------
 
 @router.get("/nodes", response_class=HTMLResponse)
@@ -383,6 +421,8 @@ async def nodes(request: Request):
         n["state_display"]      = core_db.NODE_STATE_NAMES.get(
                                       n["state"], "?")
         n["last_seen_display"]  = _when(n.get("last_seen"))
+        n["health_display"]     = _health_display(n.get("health"))
+        n["health_at_display"]  = _when(n.get("health_at"))
         fleet.append(n)
 
     return templates.TemplateResponse(request, "nodes.html", {

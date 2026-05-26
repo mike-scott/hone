@@ -335,6 +335,44 @@ def test_release_endpoint_requires_bearer_token(client):
     assert r.status_code == 401
 
 
+# --- health endpoint ------------------------------------------------------
+
+def test_health_endpoint_writes_the_snapshot(client, monkeypatch):
+    """POST /v1/nodes/me/health calls update_node_health with the
+       authenticated node's id and the request body verbatim."""
+    seen = []
+    monkeypatch.setattr(
+        core_db, "update_node_health",
+        lambda db, nid, snap: seen.append((nid, snap)) or True)
+    snapshot = {"free_disk_mb": 1024,
+                 "refrepo_size_mb": 4500,
+                 "last_anthropic_error": "auth"}
+    r = client.http.post("/v1/nodes/me/health",
+                          json=snapshot, headers=HEADERS)
+    assert r.status_code == 200 and r.json() == {"status": "ok"}
+    assert seen == [(1, snapshot)]              # fixture node id is 1
+
+
+def test_health_endpoint_accepts_extra_fields(client, monkeypatch):
+    """The wire is a loose JSON dict — a future node that adds new
+       fields shouldn't 422 against an older hone-core."""
+    seen = []
+    monkeypatch.setattr(
+        core_db, "update_node_health",
+        lambda db, nid, snap: seen.append(snap) or True)
+    r = client.http.post(
+        "/v1/nodes/me/health",
+        json={"free_disk_mb": 1, "new_future_field": "future-value"},
+        headers=HEADERS)
+    assert r.status_code == 200
+    assert seen[0]["new_future_field"] == "future-value"
+
+
+def test_health_endpoint_requires_bearer_token(client):
+    r = client.http.post("/v1/nodes/me/health", json={"free_disk_mb": 1})
+    assert r.status_code == 401
+
+
 # --- discriminator + auth --------------------------------------------------
 
 def test_missing_task_type_rejected(client):

@@ -15,7 +15,7 @@ import anthropic
 import httpx
 
 from common.version import __version__ as VERSION
-from node import tasks
+from node import health, tasks
 from node.ai import CallClaudeAuthError
 from node.client import EnrollmentError, HoneCoreClient
 from node.config import Config
@@ -185,6 +185,11 @@ def run_once(cfg: Config, client: HoneCoreClient) -> bool:
         except Exception:
             log.exception("release claim failed — the claim will "
                           "lapse on its lease instead")
+        # Surface the failure category to hone-core before re-raising,
+        # so the operator's /nodes page reflects the latest snapshot
+        # (e.g. last_anthropic_error="auth") even though this node is
+        # about to exit.
+        _report_health_safely(cfg, client)
         raise
     _with_backoff(cfg, "submit result",
                   lambda: client.submit_result(claim["claim_id"], record))
@@ -198,6 +203,26 @@ def _print_banner() -> None:
     label = f"hone-node-{VERSION}"
     bar = "=" * (len(label) + 4)
     print(f"{bar}\n  {label}\n{bar}", flush=True)
+
+
+def _report_health_safely(cfg: Config, client: HoneCoreClient) -> None:
+    """Send a health snapshot to hone-core, swallowing any failure —
+       a flaky health-report endpoint must never disrupt the claim
+       loop. Called once per loop tick (idle and work-done) plus
+       inside the task-abort path so the latest signal reaches the
+       operator UI even on the exit path.
+
+       Failures log at WARNING so the operator notices when a health
+       report can't get through (the operator UI's /nodes page would
+       otherwise sit stale and the cause would be invisible). The
+       failure itself is not fatal — the next tick retries."""
+    try:
+        snap = health.collect(cfg)
+        client.report_health(snap)
+        log.debug("health report sent: %s", snap)
+    except Exception:
+        log.warning("health report failed (will retry next tick)",
+                    exc_info=True)
 
 
 def _fatal_config_error(message: str) -> None:
@@ -240,6 +265,13 @@ def main() -> None:
         # review survives a node restart instead of being re-claimed.
         while True:
             did_work = run_once(cfg, client)
+            # Per-tick health report: fires after a successful task
+            # submit (did_work=True) and after an empty-queue 204
+            # (did_work=False). The abort path inside run_once posts
+            # its own snapshot before re-raising, so the operator UI
+            # always reflects the most recent signal regardless of
+            # exit path.
+            _report_health_safely(cfg, client)
             if not did_work:
                 time.sleep(cfg.poll_interval)
     except EnrollmentError as exc:

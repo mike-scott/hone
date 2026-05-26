@@ -657,7 +657,17 @@ CREATE TABLE gather_state (
 ) WITHOUT ROWID;
 """
 
-_MIGRATIONS = [_SCHEMA_V1]
+# Migration v2 — node health snapshot. ALTERs the nodes table to add a
+# JSON snapshot column + its timestamp; the node posts to
+# /v1/nodes/me/health and the operator UI renders the latest snapshot
+# next to the State badge. One row per node, latest-only — see
+# update_node_health.
+_SCHEMA_V2 = """
+ALTER TABLE nodes ADD COLUMN health TEXT;
+ALTER TABLE nodes ADD COLUMN health_at INTEGER;
+"""
+
+_MIGRATIONS = [_SCHEMA_V1, _SCHEMA_V2]
 
 
 def connect(path=None):
@@ -2328,15 +2338,49 @@ def delete_node(db, node_id):
     return True
 
 
+def _decode_node(row):
+    """Turn a `nodes` row into a dict and JSON-decode the `health`
+       column on the way out. Centralised so the UI doesn't have to
+       json.loads each row — and the dict it gets back is exactly
+       what the node POSTed, no escaping surprises."""
+    if row is None:
+        return None
+    out = dict(row)
+    if out.get("health"):
+        try:
+            out["health"] = json.loads(out["health"])
+        except (ValueError, TypeError):
+            out["health"] = None
+    return out
+
+
 def get_node(db, node_id):
-    """The node row as a dict, or None."""
+    """The node row as a dict, or None. `health` (if set) is decoded
+       from the stored JSON snapshot into a dict."""
     row = db.execute("SELECT * FROM nodes WHERE id=?", (node_id,)).fetchone()
-    return dict(row) if row else None
+    return _decode_node(row)
 
 
 def list_nodes(db):
-    """Every enrolled node, as a list of dicts."""
-    return [dict(r) for r in db.execute("SELECT * FROM nodes ORDER BY id")]
+    """Every enrolled node, as a list of dicts (health decoded)."""
+    return [_decode_node(r)
+            for r in db.execute("SELECT * FROM nodes ORDER BY id")]
+
+
+def update_node_health(db, node_id, snapshot):
+    """Stamp the latest health snapshot on a node row. `snapshot` is a
+       JSON-serializable dict — the node's choice of fields; today
+       the first cut is {free_disk_mb, refrepo_size_mb,
+       last_anthropic_error}, but the wire is loose so adding
+       fields later doesn't need a migration. Returns True when a
+       row was updated, False when the node_id was unknown
+       (revoked / deleted between request and write — best treated
+       as a silent no-op)."""
+    cur = db.execute(
+        "UPDATE nodes SET health=?, health_at=? WHERE id=?",
+        (json.dumps(snapshot), int(time.time()), node_id))
+    db.commit()
+    return cur.rowcount > 0
 
 
 # ===========================================================================

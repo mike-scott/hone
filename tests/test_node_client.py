@@ -227,6 +227,29 @@ def test_heartbeat_posts_to_the_heartbeat_path(cfg):
         c.close()
 
 
+def test_report_health_posts_the_snapshot(cfg):
+    """report_health POSTs the snapshot dict verbatim to
+       /v1/nodes/me/health — the operator UI surfaces whatever the
+       node puts in the body."""
+    seen = []
+
+    def handler(request):
+        seen.append((request.method, request.url.path, request.read()))
+        return httpx.Response(200, json={"status": "ok"})
+
+    c = _client_with_transport(cfg, httpx.MockTransport(handler))
+    snapshot = {"free_disk_mb": 1024, "refrepo_size_mb": 4500,
+                 "last_anthropic_error": None}
+    try:
+        c.report_health(snapshot)
+        method, path, body = seen[0]
+        import json as _json
+        assert method == "POST" and path == "/v1/nodes/me/health"
+        assert _json.loads(body) == snapshot
+    finally:
+        c.close()
+
+
 def test_release_claim_posts_the_reason(cfg):
     """The runner calls release_claim with a short prose reason when
        it aborts a task — this surfaces server-side in the release_claim

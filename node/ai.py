@@ -24,6 +24,33 @@ import time
 log = logging.getLogger("hone.node.ai")
 
 
+# node/health.py reads this — the last non-success category from a
+# call_claude attempt, or None when the most recent call completed
+# cleanly. Cleared on success so the operator's health snapshot
+# reflects "current state" rather than "ever seen". Categories:
+#   - "auth"        — AuthenticationError / PermissionDeniedError
+#   - "rate_limit"  — anthropic 429
+#   - "connection"  — APIConnectionError / APITimeoutError
+#   - "other"       — anything else the SDK raises
+_LAST_ERROR = None
+
+
+def get_last_error():
+    """The latest non-success Anthropic error category, or None when
+       the most recent call_claude returned cleanly. Used by
+       node/health.collect to populate the health snapshot's
+       `last_anthropic_error` field."""
+    return _LAST_ERROR
+
+
+def _record_outcome(category):
+    """Update the per-process last-error slot. category=None means a
+       successful call landed (clear). Any string is recorded as the
+       latest failure category."""
+    global _LAST_ERROR
+    _LAST_ERROR = category
+
+
 class CallClaudeAuthError(Exception):
     """The Claude API rejected the configured key (HTTP 401 / 403).
 
@@ -102,11 +129,23 @@ def call_claude(cfg, system, user_text, *, model=None,
         # clean one-line operator message. The traceback is not useful
         # here — the cause is "ANTHROPIC_API_KEY is wrong" — so we
         # raise WITHOUT `from exc` to keep the operator log readable.
+        _record_outcome("auth")
         status = getattr(exc, "status_code", "401/403")
         raise CallClaudeAuthError(
             f"Claude rejected the API key (HTTP {status}). "
             "Check ANTHROPIC_API_KEY in your .env / "
             "docker-compose env.") from None
+    except anthropic.RateLimitError:
+        _record_outcome("rate_limit")
+        raise
+    except (anthropic.APIConnectionError,
+             anthropic.APITimeoutError):
+        _record_outcome("connection")
+        raise
+    except anthropic.APIError:
+        _record_outcome("other")
+        raise
+    _record_outcome(None)                  # successful call → clear
     duration_ms = int((time.monotonic() - started) * 1000)
     # The Messages API returns a list of content blocks; for a single
     # text turn there's exactly one block of type "text".

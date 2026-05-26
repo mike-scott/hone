@@ -104,6 +104,57 @@ def test_enrolled_node_renders_state_active(ctx):
     assert "builder-9" in r.text and "active" in r.text
 
 
+# --- health snapshot rendering -------------------------------------------
+
+def test_nodes_page_renders_a_clean_health_snapshot(ctx):
+    """A node that has reported a healthy snapshot renders disk + repo
+       sizes in operator-friendly units (GB > 1024 MB), and no error
+       row — the `<i class="bi-exclamation-triangle-fill">` warning
+       icon stays absent."""
+    enr = core_db.create_enrollment(ctx.db, node_name="builder-7")
+    node_id = core_db.approve_enrollment(ctx.db, enr["user_code"])
+    core_db.update_node_health(ctx.db, node_id, {
+        "free_disk_mb": 2048,                # 2.0 GB
+        "refrepo_size_mb": 800,              # 800 MB
+        "last_anthropic_error": None})
+    body = ctx.client.get("/nodes").text
+    assert "2.0 GB" in body and "800 MB" in body
+    assert "exclamation-triangle-fill" not in body
+
+
+def test_nodes_page_renders_a_health_warning_for_anthropic_errors(ctx):
+    """A snapshot reporting last_anthropic_error="auth" surfaces a
+       red warning row with the friendly label `auth key rejected`.
+       Other categories (rate_limit, connection, other) get the
+       same warning treatment with their own labels."""
+    enr = core_db.create_enrollment(ctx.db, node_name="builder-7")
+    node_id = core_db.approve_enrollment(ctx.db, enr["user_code"])
+    core_db.update_node_health(ctx.db, node_id, {
+        "free_disk_mb": 1024,
+        "refrepo_size_mb": 4500,
+        "last_anthropic_error": "auth"})
+    body = ctx.client.get("/nodes").text
+    assert "auth key rejected" in body
+    assert "exclamation-triangle-fill" in body
+    assert "text-danger" in body
+
+
+def test_nodes_page_shows_em_dash_for_nodes_that_havent_reported(ctx):
+    """A freshly-enrolled node hasn't posted its first health snapshot
+       yet — the Health column shows a single em-dash rather than
+       three (one per field) so the operator can spot "this is a new
+       node, give it a moment"."""
+    enr = core_db.create_enrollment(ctx.db, node_name="builder-7")
+    core_db.approve_enrollment(ctx.db, enr["user_code"])
+    body = ctx.client.get("/nodes").text
+    # The Health column for this row has exactly one — and no disk:
+    # / repo: tags, no warning icon. We pin to "builder-7" then check
+    # the slice up to the next row's </tr>.
+    row = body.split("builder-7", 1)[1].split("</tr>", 1)[0]
+    assert "disk:" not in row and "repo:" not in row
+    assert "exclamation-triangle-fill" not in row
+
+
 # --- delete an enrolled node ---------------------------------------------
 
 def test_nodes_page_renders_a_delete_form_per_enrolled_row(ctx):

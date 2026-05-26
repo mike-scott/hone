@@ -44,7 +44,8 @@
 <table class="table table-sm align-middle">
   <thead>
     <tr><th>ID</th><th>Name</th><th>Capabilities</th>
-        <th>State</th><th>Last seen</th><th></th></tr>
+        <th>State</th><th>Health</th>
+        <th>Last seen</th><th></th></tr>
   </thead>
   <tbody>
   {% for n in nodes %}
@@ -57,6 +58,27 @@
         <span class="badge text-bg-success">{{ n.state_display }}</span>
         {% else %}
         <span class="badge text-bg-secondary">{{ n.state_display }}</span>
+        {% endif %}
+      </td>
+      <td class="small">
+        {% if n.health_display %}
+        <div>
+          <span class="text-muted">disk:</span>
+          <code>{{ n.health_display.free_disk }}</code>
+          <span class="text-muted ms-2">repo:</span>
+          <code>{{ n.health_display.repo_size }}</code>
+        </div>
+        {% if n.health_display.error %}
+        <div class="text-danger">
+          <i class="bi bi-exclamation-triangle-fill"></i>
+          API: {{ n.health_display.error }}
+        </div>
+        {% endif %}
+        <div class="text-muted" style="font-size: 0.75em;">
+          as of {{ n.health_at_display }}
+        </div>
+        {% else %}
+        <span class="text-muted">—</span>
         {% endif %}
       </td>
       <td class="text-nowrap">{{ n.last_seen_display }}</td>

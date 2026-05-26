@@ -569,6 +569,22 @@ class ReleaseRequest(BaseModel):
     reason: str | None = None
 
 
+@router.post("/nodes/me/health")
+def report_health(request: Request, body: dict,
+                   node: dict = Depends(require_node)):
+    """Node-initiated health report — the authenticated node POSTs its
+       latest snapshot (free_disk_mb, refrepo_size_mb,
+       last_anthropic_error, …) and the operator UI surfaces it next
+       to the State badge on /nodes. The wire is a loose JSON dict so
+       fields can be added without breaking older nodes.
+
+       Returns 200 even when the node row is missing (revoked between
+       request and write) — there's nothing for the node to do
+       differently; the operator already has the State signal."""
+    core_db.update_node_health(request.app.state.db, node["id"], body or {})
+    return {"status": "ok"}
+
+
 @router.post("/claims/{claim_id}/release",
              dependencies=[Depends(require_node)])
 def release_claim(claim_id: str, request: Request,
