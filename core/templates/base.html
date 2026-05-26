@@ -91,6 +91,32 @@
   </footer>
 
 </div>
+
+{# Reusable confirm-modal. Any form carrying `data-confirm="<message>"`
+   (plus optional `data-confirm-title` and `data-confirm-button`) is
+   intercepted on submit and shown via this modal instead of the OS-
+   native confirm(). One markup block, reusable for any destructive
+   action. The delegated submit handler at the bottom of <body> does
+   the wiring. #}
+<div class="modal fade" id="confirm-modal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Confirm</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"
+                aria-label="Cancel"></button>
+      </div>
+      <div class="modal-body"></div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary"
+                data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-danger"
+                data-role="confirm">Confirm</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script src="/static/bootstrap.bundle.min.js"></script>
 <script src="/static/adminlte.min.js"></script>
 <script src="/static/htmx.min.js"></script>
@@ -114,6 +140,45 @@
     });
   })();
 
+  // Confirm-modal — any form with `data-confirm="<message>"` is
+  // intercepted on submit and shown via the shared #confirm-modal
+  // instead of the OS-native confirm(). Themed, dark-mode aware, and
+  // reusable across any destructive action. Optional attributes:
+  //   data-confirm-title   — modal title (default: "Confirm")
+  //   data-confirm-button  — confirm button label (default: "Confirm")
+  (function () {
+    var el = document.getElementById("confirm-modal");
+    if (!el) return;
+    var modal = new bootstrap.Modal(el);
+    var titleEl = el.querySelector(".modal-title");
+    var bodyEl  = el.querySelector(".modal-body");
+    var okBtn   = el.querySelector("[data-role='confirm']");
+    var pending = null;            // the form awaiting confirmation, if any
+
+    document.addEventListener("submit", function (e) {
+      var form = e.target;
+      if (!form.dataset || !form.dataset.confirm) return;
+      if (form === pending) { pending = null; return; }   // already OK'd
+      e.preventDefault();
+      titleEl.textContent = form.dataset.confirmTitle  || "Confirm";
+      bodyEl.textContent  = form.dataset.confirm;
+      okBtn.textContent   = form.dataset.confirmButton || "Confirm";
+      pending = form;
+      modal.show();
+    });
+
+    okBtn.addEventListener("click", function () {
+      modal.hide();
+      if (pending) pending.submit();      // re-submit; the dataset check
+                                           // above lets it through this time
+    });
+
+    // If the operator dismisses the modal (Cancel / Escape / backdrop),
+    // forget the pending form so the next confirm starts fresh.
+    el.addEventListener("hidden.bs.modal", function () {
+      if (pending && pending !== document.activeElement) pending = null;
+    });
+  })();
 </script>
 </body>
 </html>

@@ -61,15 +61,15 @@
       </td>
       <td class="text-nowrap">{{ n.last_seen_display }}</td>
       <td class="text-nowrap">
-        {# Hard-delete the node from the fleet. The browser-native
-           confirm() is enough friction for an operator console
-           with no role separation; if/when an audit log lands,
-           it would record the decided_by here too. #}
+        {# Hard-delete the node from the fleet. The data-confirm
+           attribute hooks the shared confirm-modal in base.html —
+           themed, dark-mode aware, and reusable for any other
+           destructive action that lands here later. #}
         <form method="post" class="d-inline"
               action="/nodes/{{ n.id }}/delete"
-              onsubmit="return confirm('Delete node {{ n.name or n.id }}?
-This removes the row from the fleet, kills its tokens, and the node
-must re-enroll to return.');">
+              data-confirm-title="Delete node?"
+              data-confirm-button="Delete"
+              data-confirm="Delete node {{ n.name or n.id }}? This removes the row from the fleet, kills its tokens, and the node must re-enroll to return.">
           <button class="btn btn-sm btn-outline-danger"
                   title="Hard-delete this node">Delete</button>
         </form>

@@ -81,15 +81,21 @@ def test_enrolled_node_renders_state_active(ctx):
 
 def test_nodes_page_renders_a_delete_form_per_enrolled_row(ctx):
     """Each enrolled-node row carries a POST form that targets the
-       delete endpoint. The browser-side confirm() means a fat-finger
-       click won't immediately fire it; the test asserts on the form
-       wiring (action + button), not on the confirm dialog."""
+       delete endpoint and hooks the shared confirm-modal via the
+       `data-confirm` attribute. A fat-finger click on Delete is
+       intercepted by the modal in base.html, themed to match the
+       rest of the UI."""
     enr = core_db.create_enrollment(ctx.db, node_name="builder-7")
     node_id = core_db.approve_enrollment(ctx.db, enr["user_code"])
     body = ctx.client.get("/nodes").text
     assert f'action="/nodes/{node_id}/delete"' in body
     assert "Delete</button>" in body
-    assert "confirm(" in body                         # the JS confirm hook
+    # The data-confirm attribute carries the message the modal shows;
+    # data-confirm-title + data-confirm-button parameterise the modal
+    # chrome. base.html ships the shared modal markup + handler.
+    assert "data-confirm=" in body and "builder-7" in body
+    assert 'data-confirm-button="Delete"' in body
+    assert 'id="confirm-modal"' in body
 
 
 def test_delete_node_via_ui_removes_the_node_and_redirects(ctx):
