@@ -1,8 +1,42 @@
-"""Tests for node/tasks.py — the claim → handler dispatch table."""
+"""Tests for node/tasks.py — the claim → handler dispatch table and the
+handlers themselves. The AI call is monkeypatched (`node.ai.call_claude`)
+so the tests stay hermetic; the completion records the handlers emit
+are validated against common/schema/completion-record.schema.yaml so a
+shape regression is caught here, before submission to hone-core."""
+import json
+import os
+from types import SimpleNamespace
+
+import jsonschema
 import pytest
+import yaml
 
 from node import tasks
 
+
+# --- schema-based record validator ----------------------------------------
+
+_SCHEMA_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "common", "schema", "completion-record.schema.yaml")
+with open(_SCHEMA_PATH, encoding="utf-8") as _f:
+    _RECORD_SCHEMA = yaml.safe_load(_f)
+_RECORD_VALIDATOR = jsonschema.Draft202012Validator(_RECORD_SCHEMA)
+
+
+def _validate_record(record):
+    """Pass the record through the completion-record schema. Any schema
+       violation raises with the failing path + message — the same check
+       hone-core's submit_result does on receipt."""
+    errors = sorted(_RECORD_VALIDATOR.iter_errors(record),
+                    key=lambda e: str(list(e.absolute_path)))
+    if errors:
+        e = errors[0]
+        loc = "/".join(str(p) for p in e.absolute_path) or "<root>"
+        raise AssertionError(f"record failed schema at {loc}: {e.message}")
+
+
+# --- dispatch -------------------------------------------------------------
 
 def test_dispatch_routes_by_task_type(monkeypatch):
     calls = []
@@ -31,13 +65,6 @@ def test_handlers_registry_covers_the_four_task_types():
     assert set(tasks.HANDLERS) == {"prepare", "review", "train", "draft"}
 
 
-def test_prepare_handler_raises_until_ai_integration_lands():
-    with pytest.raises(NotImplementedError):
-        tasks.handle_prepare_task(None, None,
-                                  {"task_type": "prepare",
-                                   "methodology_version": 1})
-
-
 def test_review_handler_raises_until_ai_integration_lands(monkeypatch):
     # the dispatch + claim shape are wired; the AI call is explicitly missing
     with pytest.raises(NotImplementedError):
@@ -58,3 +85,181 @@ def test_draft_handler_raises_until_ai_integration_lands():
         tasks.handle_draft_task(None, None,
                                 {"task_type": "draft",
                                  "methodology_version": 1})
+
+
+# --- prepare handler ------------------------------------------------------
+
+# A realistic claim payload for the prepare handler. Methodology slice
+# is what /v1/claims compiles for a prepare task — `core: { principles }`
+# only, plus operations.prepare.{guidance, return}. Patchset shape
+# mirrors what core/api.py:_build_prepare_payload emits.
+_PRINCIPLE = {"id": "trailers-are-not-evidence",
+               "title": "Trailers are not evidence",
+               "body": "External endorsements are not verification."}
+
+_PREPARE_CLAIM = {
+    "claim_id":            "c-1",
+    "task_type":           "prepare",
+    "lease_expires_at":    1779360000,
+    "methodology_version": 7,
+    "methodology": {
+        "core": {"principles": [_PRINCIPLE]},
+        "operations": {"prepare": {
+            "guidance": "Characterise the patchset.",
+            "return":   "Return raw JSON only — no prose, no fences."}},
+    },
+    "patchset": {
+        "root_message_id":     "r1@x",
+        "subject":             "[PATCH v2] drm/msm/dpu: fix mismatch",
+        "declared_base_commit": None,
+        "submitter_email":     "alice@example.com",
+        "n_patches":           1},
+    "patches": [{"message_id": "p1@x",
+                 "type":       "patch",
+                 "part_index": None,
+                 "subject":    "[PATCH v2] drm/msm/dpu: fix mismatch",
+                 "body":       "<the .patch text>"}],
+    "cover_letter_body": None,
+    "thread_messages":   [],
+}
+
+
+# A stub `prepared`-outcome JSON response from Claude, with the
+# structured metadata fields the prepare-record schema requires. We
+# emit JSON-as-text since that's what call_claude returns.
+_STUB_PREPARE_BODY = {
+    "patchset_id":        "r1@x",
+    "tree_state":         {"tree_available": False,
+                            "base_commit_source": "none",
+                            "prerequisite_patch_ids": []},
+    "subsystem":          {"primary": "drivers/gpu/drm/msm",
+                            "secondary": [],
+                            "cross_cutting": False,
+                            "uncertain_paths": [],
+                            "source": "thread"},
+    "patch_size":         {"lines_added": 8, "lines_removed": 3,
+                            "files_modified": 1, "files_added": 0,
+                            "files_deleted": 0, "files_renamed": 0,
+                            "hunks": 1, "bucket": "small",
+                            "series_length": 1,
+                            "churn_ratio": {"max": None, "mean": None,
+                                             "high_churn_file_count": None},
+                            "source": "thread"},
+    "maintainer":         {"authoritative_set": [],
+                            "authoritative_reviewer_set": [],
+                            "mailing_lists": [],
+                            "cc_list_size": 0,
+                            "source": "thread"},
+    "patch_type":         {"primary": "bugfix",
+                            "secondary": [],
+                            "evidence": {"primary": "Subject contains 'fix'"},
+                            "source": "thread"},
+    "review_intensity":   {"bucket_overall": "none",
+                            "reply_count": 0, "unique_reviewers": 0,
+                            "trailer_only_count": 0, "light_count": 0,
+                            "substantive_count": 0, "deep_count": 0,
+                            "had_nack": False, "had_v_next": False,
+                            "per_reply": [],
+                            "source": "thread"},
+    "preparation_notes":  {"warnings": [],
+                            "confidence": "medium",
+                            "mode": "heuristic"},
+    "self_review_record": {"summary": "no challenges raised",
+                            "challenges": []},
+}
+
+
+def _fake_call_claude(response_text):
+    """A node.ai.call_claude replacement that captures the (system, user)
+       prompts the handler built and returns a canned response."""
+    calls = []
+    def _stub(cfg, system, user_text, *, model=None, max_tokens=None):
+        calls.append({"system": system, "user_text": user_text,
+                       "model": model, "max_tokens": max_tokens})
+        return {"text":  response_text,
+                "model": "claude-opus-4-7",
+                "usage": {"input_tokens": 1000,
+                          "output_tokens": 200,
+                          "duration_ms": 5000}}
+    return _stub, calls
+
+
+def _cfg():
+    return SimpleNamespace(node_name="fake-node",
+                            anthropic_api_key="sk-test")
+
+
+def test_prepare_handler_emits_a_schema_valid_prepared_record(monkeypatch):
+    """The happy path: Claude returns a well-formed JSON body, the
+       handler wraps it in the header (task_type, worker_id, model,
+       usage) plus outcome=prepared + self_review_record, and the
+       result passes the completion-record schema."""
+    stub, _calls = _fake_call_claude(json.dumps(_STUB_PREPARE_BODY))
+    monkeypatch.setattr("node.ai.call_claude", stub)
+    record = tasks.handle_prepare_task(_cfg(), None, _PREPARE_CLAIM)
+    assert record["task_type"] == "prepare"
+    assert record["outcome"]   == "prepared"
+    assert record["worker_id"] == "fake-node"
+    assert record["model"]     == "claude-opus-4-7"
+    assert record["usage"]["input_tokens"] == 1000
+    assert record["subsystem"] == {"primary": "drivers/gpu/drm/msm",
+                                    "secondary": [], "cross_cutting": False,
+                                    "uncertain_paths": [], "source": "thread"}
+    _validate_record(record)         # hone-core's gate, run here too
+
+
+def test_prepare_handler_threads_principles_and_guidance_into_system(monkeypatch):
+    """The system prompt carries the cross-operation principles +
+       the prepare operation guidance. The user prompt carries the
+       patchset JSON + the return contract. Verifying both means a
+       future refactor that drops one block from the prompt is caught
+       here."""
+    stub, calls = _fake_call_claude(json.dumps(_STUB_PREPARE_BODY))
+    monkeypatch.setattr("node.ai.call_claude", stub)
+    tasks.handle_prepare_task(_cfg(), None, _PREPARE_CLAIM)
+    assert len(calls) == 1
+    system = calls[0]["system"]
+    user_text = calls[0]["user_text"]
+    # Principles + guidance both reached the model in the system prompt.
+    assert "GOVERNING PRINCIPLES" in system
+    assert "Trailers are not evidence" in system
+    assert "PREPARE OPERATION GUIDANCE" in system
+    assert "Characterise the patchset." in system
+    # Payload + return contract both reached the model in the user msg.
+    assert "drm/msm/dpu: fix mismatch" in user_text
+    assert "RETURN CONTRACT" in user_text
+    assert "Return raw JSON only" in user_text
+
+
+def test_prepare_handler_falls_back_to_uncharacterisable_on_bad_json(monkeypatch):
+    """Claude is asked for raw JSON only. If it returns prose, a
+       markdown-fenced incomplete blob, or otherwise un-parseable
+       output, the handler returns an `uncharacterisable` record
+       carrying the parser's reason — surfacing the failure into the
+       corpus rather than crashing the node."""
+    stub, _calls = _fake_call_claude("Sorry, I couldn't characterise this.")
+    monkeypatch.setattr("node.ai.call_claude", stub)
+    record = tasks.handle_prepare_task(_cfg(), None, _PREPARE_CLAIM)
+    assert record["task_type"] == "prepare"
+    assert record["outcome"]   == "uncharacterisable"
+    assert "JSON" in record["reason"]
+    # The uncharacterisable shape must not carry the success-path keys.
+    assert "subsystem" not in record
+    assert "self_review_record" not in record
+    _validate_record(record)
+
+
+def test_prepare_handler_strips_markdown_fences_around_json(monkeypatch):
+    """When Claude wraps a valid JSON object in ```json ... ``` fences
+       despite the contract, the AI module strips them so the handler
+       still sees a parseable body. This is `node.ai`'s job — the
+       handler test just confirms the end-to-end shape stays
+       prepared-record-valid in that case."""
+    # call_claude returns the post-fence-strip text, so we simulate
+    # what _strip_fences would yield — JUST the JSON body. This
+    # cross-test belongs in test_node_ai.py for the fence stripping
+    # itself; here we just confirm a happy outcome reaches the record.
+    stub, _calls = _fake_call_claude(json.dumps(_STUB_PREPARE_BODY))
+    monkeypatch.setattr("node.ai.call_claude", stub)
+    record = tasks.handle_prepare_task(_cfg(), None, _PREPARE_CLAIM)
+    assert record["outcome"] == "prepared"

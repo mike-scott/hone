@@ -6,44 +6,117 @@ work, and returns the completion record the runner submits via
 POST /v1/claims/{id}/result. The records are validated against
 ../common/schema/completion-record.schema.yaml.
 
-Skeletons: the dispatch + shape are complete; the actual AI calls
-(Claude API) raise NotImplementedError pending the AI integration.
+Today: `prepare` is wired end-to-end through Claude; `review`, `train`, and
+`draft` still raise NotImplementedError pending their AI integration.
 """
+import json
 import logging
 
+from node import ai
 from node.client import HoneCoreClient
 from node.config import Config
 
 log = logging.getLogger("hone.node.tasks")
 
 
+# The structured-metadata fields the prepare schema requires on a
+# `prepared` record (per common/schema/completion-record.schema.yaml).
+# The handler lifts these from Claude's response into the top-level
+# completion record alongside `self_review_record`.
+_PREPARE_FIELDS = ("patchset_id", "tree_state", "subsystem", "patch_size",
+                   "maintainer", "patch_type", "review_intensity",
+                   "preparation_notes")
+
+
+def _worker_id(cfg: Config) -> str:
+    """The worker_id every completion record carries. The node-name from
+       Config doubles as the worker label — set by the operator at deploy,
+       defaults to socket.gethostname()."""
+    return cfg.node_name
+
+
+def _build_prepare_user_text(claim: dict) -> str:
+    """The user-message payload for a prepare claim. Hands Claude the
+       patchset (with patches + cover + thread) as JSON plus the
+       methodology's prepare return-contract — so the model has the
+       exact output shape spelled out alongside the payload."""
+    payload = {
+        "patchset":         claim.get("patchset"),
+        "patches":          claim.get("patches"),
+        "cover_letter_body": claim.get("cover_letter_body"),
+        "thread_messages":  claim.get("thread_messages"),
+    }
+    return_contract = (claim.get("methodology", {})
+                       .get("operations", {})
+                       .get("prepare", {})
+                       .get("return", ""))
+    return (
+        "Below is the patchset to characterise, followed by the return "
+        "contract you must satisfy. Produce only the JSON object the "
+        "contract describes.\n\n"
+        "=== PATCHSET (JSON) ===\n"
+        f"{json.dumps(payload, indent=2)}\n\n"
+        "=== RETURN CONTRACT ===\n"
+        f"{return_contract}")
+
+
+def _build_prepare_system(claim: dict) -> str:
+    """The system prompt for a prepare claim: the cross-operation
+       principles followed by the prepare operation's guidance. Both
+       come from the compiled methodology slice the claim payload
+       carries (the `core` block is narrowed to `principles` for
+       prepare — see core/api.py:_compile_methodology)."""
+    methodology = claim.get("methodology", {}) or {}
+    principles = (methodology.get("core") or {}).get("principles") or []
+    guidance = ((methodology.get("operations") or {})
+                 .get("prepare") or {}).get("guidance", "")
+    blocks = []
+    if principles:
+        blocks.append("=== GOVERNING PRINCIPLES ===")
+        for p in principles:
+            blocks.append(f"\n## {p.get('title', p.get('id', ''))}\n"
+                           f"{p.get('body', '')}")
+    blocks.append("\n\n=== PREPARE OPERATION GUIDANCE ===\n")
+    blocks.append(guidance)
+    return "".join(blocks)
+
+
 def handle_prepare_task(cfg: Config, client: HoneCoreClient,
                         claim: dict) -> dict:
     """`prepare` task: characterise one patchset for the corpus.
 
-    Claim payload carries:
-      - methodology_version, methodology (compiled doc with core.principles
-        + operations.prepare.{guidance, return})
-      - patchset (root_message_id, subject, declared_base_commit,
-        submitter_email, n_patches)
-      - patches: [{message_id, part_index, body}, …]
-      - cover_letter_body (the [PATCH 0/N] body, or null)
-      - thread_messages: [{message_id, author_*, in_reply_to, body}, …]
-        — the comment/reply messages prepare reads for review-intensity
-        classification (bot/self-filter, in_scope check)
+    Composes the system prompt (principles + the prepare operation
+    guidance) and the user payload (the patchset JSON + the
+    operation's return contract), calls Claude, and shapes the
+    response into a prepare completion record. On a JSON parse
+    failure returns an `uncharacterisable` record carrying the
+    reason — surfacing the failure to hone-core's corpus rather than
+    crashing the node.
 
-    The handler:
-      1. Discovers the base commit, decides mode (authoritative /
-         heuristic / mixed) — owns all tree access.
-      2. Calls the Claude API with the prepare prompt + the payload,
-         requesting the structured per-field metadata return (subsystem,
-         patch_size, maintainer, patch_type, review_intensity (incl.
-         per_reply), tree_state, preparation_notes).
-      3. Validates the response.
-      4. Returns the prepare completion record.
-
-    TODO: AI integration. The dispatch + shape are wired."""
-    raise NotImplementedError("prepare: AI integration not yet wired")
+    Tree access (resolving the declared base-commit against a local
+    kernel tree, deciding authoritative vs. heuristic mode) is
+    deferred: today the node operates in heuristic mode regardless,
+    and Claude infers the per-field metadata from the patches +
+    thread alone. See node/refrepo.py for the tree manager; wiring
+    it up here is a follow-up."""
+    system = _build_prepare_system(claim)
+    user_text = _build_prepare_user_text(claim)
+    response = ai.call_claude(cfg, system, user_text)
+    header = {"task_type": "prepare",
+              "worker_id": _worker_id(cfg),
+              "model":     response["model"],
+              "usage":     response["usage"]}
+    try:
+        body = ai.parse_json_response(response["text"])
+    except ValueError as exc:
+        log.warning("prepare: Claude returned malformed JSON — %s", exc)
+        return {**header,
+                "outcome": "uncharacterisable",
+                "reason":  str(exc)}
+    return {**header,
+             "outcome": "prepared",
+             **{f: body.get(f) for f in _PREPARE_FIELDS},
+             "self_review_record": body.get("self_review_record")}
 
 
 def handle_review_task(cfg: Config, client: HoneCoreClient,
