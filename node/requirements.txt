@@ -1,0 +1,5 @@
+# hone-node — Python dependencies.  Install:  pip install -r node/requirements.txt
+# Floors only; a deployment should pin (pip freeze) or lock these.
+anthropic>=0.40     # the Claude API client — the node's AI reviews
+httpx>=0.27         # HTTP client for the hone-core v1 REST API
+zstandard>=0.23     # decompress the .tar.zst patchset blobs
