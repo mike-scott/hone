@@ -19,6 +19,7 @@ Why a thin wrapper instead of calling the SDK from each handler:
 import json
 import logging
 import re
+import subprocess
 import time
 
 log = logging.getLogger("hone.node.ai")
@@ -94,23 +95,34 @@ def _strip_fences(text):
 
 def call_claude(cfg, system, user_text, *, model=None,
                 max_tokens=DEFAULT_MAX_TOKENS):
-    """Call Claude's Messages API and return the response.
+    """Call Claude and return the response, dispatching on
+       cfg.claude_backend:
 
-       Returns a dict:
+         - "sdk": the Anthropic Python SDK + ANTHROPIC_API_KEY
+         - "cli": subprocess the `claude` CLI binary (uses the OAuth
+                  session under $HOME/.claude — for Claude Code
+                  subscribers without API billing)
+
+       Both backends return the same shape:
          {
-           "text":         the assistant message text (fences stripped),
-           "model":        the model identifier actually used,
-           "usage":        {"input_tokens", "output_tokens", "duration_ms"}
-                          — the three fields a hone completion record's
-                          `usage` block needs,
+           "text":  the assistant text (markdown fences stripped),
+           "model": the model identifier actually used,
+           "usage": {"input_tokens", "output_tokens", "duration_ms"},
          }
 
-       Raises whatever the SDK raises; the runner's transient-failure
-       backoff (see node/runner.py) wraps the surrounding submit/claim
-       path but NOT this call — an AI failure should currently surface
-       as a task failure rather than retrying a multi-second-cost
-       completion silently. (A future refinement may add per-task
-       retry for ratelimit-classified Anthropic errors specifically.)"""
+       Auth failures are translated to `CallClaudeAuthError` regardless
+       of backend — the runner's main() prints the clean error and
+       exits. Non-success outcomes update node.ai._LAST_ERROR so the
+       health snapshot picks up the category."""
+    if cfg.claude_backend == "cli":
+        return _call_claude_cli(cfg, system, user_text, model=model)
+    return _call_claude_sdk(cfg, system, user_text, model=model,
+                             max_tokens=max_tokens)
+
+
+def _call_claude_sdk(cfg, system, user_text, *, model, max_tokens):
+    """Anthropic SDK path — original behaviour. ANTHROPIC_API_KEY in
+       cfg, normal HTTPS auth, structured usage in the response."""
     import anthropic                  # lazy: keeps node.tasks importable
                                        # without the SDK installed (tests).
     chosen = model or DEFAULT_MODEL
@@ -155,6 +167,108 @@ def call_claude(cfg, system, user_text, *, model=None,
              "model": chosen,
              "usage": {"input_tokens":  resp.usage.input_tokens,
                        "output_tokens": resp.usage.output_tokens,
+                       "duration_ms":   duration_ms}}
+
+
+# Markers in `claude` CLI stderr that classify the failure for the
+# health snapshot. Conservative regex-free substring matching: the CLI's
+# message phrasing isn't a stable contract, so we match short
+# common tokens. A miss just lands as "other", which is still better
+# than the SDK-only behaviour of crashing the loop opaquely.
+_CLI_STDERR_CATEGORY = (
+    ("auth",        ("credentials", "not logged in", "unauthor",
+                      "auth required", "please run `claude` to log in")),
+    ("rate_limit",  ("rate limit", "too many requests", "429")),
+    ("connection",  ("network", "connect", "timeout", "unreachable")),
+)
+
+
+def _classify_cli_stderr(stderr):
+    """Pick a node.ai._LAST_ERROR category from a `claude` CLI stderr
+       message. Returns one of "auth" / "rate_limit" / "connection"
+       / "other"."""
+    lower = (stderr or "").lower()
+    for category, markers in _CLI_STDERR_CATEGORY:
+        if any(m in lower for m in markers):
+            return category
+    return "other"
+
+
+# claude CLI invocation timeout in seconds. Long enough to swallow a
+# full Claude turn (large prompt + large response), short enough that a
+# truly-wedged subprocess won't pin the node forever.
+_CLI_TIMEOUT_SECONDS = 600
+
+
+def _call_claude_cli(cfg, system, user_text, *, model):
+    """`claude` CLI subprocess path — uses the OAuth session in
+       $HOME/.claude rather than ANTHROPIC_API_KEY. Pipes user_text
+       through stdin (avoids the ARG_MAX cap on multi-thousand-line
+       prompts); system prompt goes through `--system-prompt`;
+       `--output-format json` gives us a structured envelope to parse.
+
+       The CLI's stderr is the only auth-state signal we have — the
+       process exits non-zero with a message like "Please run `claude`
+       to log in." We classify that into the same category vocabulary
+       the SDK path uses so the health snapshot stays uniform across
+       backends."""
+    chosen = model or DEFAULT_MODEL
+    cmd = ["claude", "-p", "--output-format", "json",
+           "--system-prompt", system]
+    if chosen:
+        cmd += ["--model", chosen]
+    started = time.monotonic()
+    try:
+        r = subprocess.run(cmd, input=user_text,
+                           capture_output=True, text=True,
+                           timeout=_CLI_TIMEOUT_SECONDS)
+    except FileNotFoundError:
+        # `claude` binary isn't in PATH. This is configuration-fatal —
+        # same operator-feedback shape as a wrong API key.
+        _record_outcome("auth")
+        raise CallClaudeAuthError(
+            "`claude` CLI not found in PATH. "
+            "Either install @anthropic-ai/claude-code in the container "
+            "image, or switch HONE_CLAUDE_BACKEND back to sdk."
+        ) from None
+    except subprocess.TimeoutExpired:
+        _record_outcome("connection")
+        raise RuntimeError(
+            f"`claude` CLI timed out after {_CLI_TIMEOUT_SECONDS}s "
+            "— the subprocess was wedged.") from None
+    duration_ms = int((time.monotonic() - started) * 1000)
+
+    if r.returncode != 0:
+        category = _classify_cli_stderr(r.stderr)
+        _record_outcome(category)
+        if category == "auth":
+            raise CallClaudeAuthError(
+                "`claude` CLI auth state is stale or absent — "
+                "run `claude` on the host to re-login, then ensure "
+                "the container's $HOME/.claude mount is read-write."
+            ) from None
+        raise RuntimeError(
+            f"`claude` CLI failed ({r.returncode}): "
+            f"{(r.stderr or '').strip()[:500]}")
+
+    try:
+        env = json.loads(r.stdout)
+    except (ValueError, TypeError):
+        _record_outcome("other")
+        raise RuntimeError(
+            f"`claude` CLI returned unparseable JSON envelope: "
+            f"{r.stdout[:500]!r}") from None
+    if env.get("is_error") or env.get("type") != "result":
+        _record_outcome("other")
+        raise RuntimeError(
+            f"`claude` CLI returned an error envelope: {env!r}")
+
+    _record_outcome(None)
+    usage = env.get("usage") or {}
+    return {"text":  _strip_fences(env.get("result", "")),
+             "model": env.get("model") or chosen,
+             "usage": {"input_tokens":  usage.get("input_tokens"),
+                       "output_tokens": usage.get("output_tokens"),
                        "duration_ms":   duration_ms}}
 
 

@@ -3,6 +3,7 @@ call_claude() roundtrip through the Anthropic SDK is exercised in
 integration / end-to-end paths only; here we cover the resilience
 helpers (fence stripping, JSON parsing) that the handlers depend on."""
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -128,5 +129,157 @@ def test_call_claude_translates_permission_denied_error(monkeypatch):
 
 
 class SimpleNamespaceCfg:
-    """Minimum config shape call_claude reads — just the API key."""
+    """Minimum config shape call_claude reads — backend (sdk default) +
+       the SDK-path API key. Tests for the CLI backend instantiate with
+       claude_backend='cli' to flip the dispatcher."""
     anthropic_api_key = "sk-test-placeholder"
+    claude_backend = "sdk"
+
+
+class _CliCfg:
+    """A config with HONE_CLAUDE_BACKEND=cli set, for the CLI-path tests.
+       anthropic_api_key isn't read but kept for shape parity."""
+    anthropic_api_key = ""
+    claude_backend = "cli"
+
+
+# --- CLI backend ---------------------------------------------------------
+
+def _envelope(text="ok", model="claude-opus-4-7",
+              input_tokens=100, output_tokens=50, is_error=False):
+    """A `claude --output-format json` envelope shaped how the CLI
+       emits it on a successful turn."""
+    return {
+        "type":             "result",
+        "subtype":          "success",
+        "result":           text,
+        "model":             model,
+        "is_error":          is_error,
+        "duration_ms":       1234,
+        "duration_api_ms":   567,
+        "num_turns":         1,
+        "total_cost_usd":    0.0001,
+        "usage": {"input_tokens":  input_tokens,
+                  "output_tokens": output_tokens,
+                  "cache_creation_input_tokens": 0,
+                  "cache_read_input_tokens":     0},
+    }
+
+
+def _patch_run(monkeypatch, *, returncode=0, stdout="", stderr="",
+                file_not_found=False, timeout=False):
+    """Replace subprocess.run with a stub that records its call args
+       so the assertions can pin the cmdline shape."""
+    import subprocess as sp
+    calls = []
+
+    def stub(cmd, input=None, capture_output=False, text=False, timeout=None):
+        calls.append({"cmd": cmd, "input": input, "timeout": timeout})
+        if file_not_found:
+            raise FileNotFoundError("claude")
+        if timeout is not None and stub._raise_timeout:
+            raise sp.TimeoutExpired("claude", timeout)
+        return SimpleNamespace(returncode=returncode,
+                                stdout=stdout, stderr=stderr)
+    stub._raise_timeout = timeout
+    monkeypatch.setattr("node.ai.subprocess.run", stub)
+    return calls
+
+
+def test_cli_backend_runs_claude_with_the_right_cmdline(monkeypatch):
+    """The CLI invocation is `claude -p --output-format json
+       --system-prompt <sys> --model <model>`, with user_text piped
+       through stdin (not -p) so multi-thousand-line prompts avoid
+       the ARG_MAX cap."""
+    calls = _patch_run(monkeypatch, stdout=json.dumps(_envelope()),
+                        returncode=0)
+    ai._record_outcome("auth")            # pre-existing failure category
+    out = ai.call_claude(_CliCfg(), "SYS-PROMPT", "USER-MESSAGE",
+                         model="claude-opus-4-7")
+    assert out["text"] == "ok"
+    assert out["model"] == "claude-opus-4-7"
+    assert out["usage"]["input_tokens"] == 100
+    assert out["usage"]["output_tokens"] == 50
+    # The success cleared the prior failure category.
+    assert ai.get_last_error() is None
+    # Cmdline shape.
+    cmd = calls[0]["cmd"]
+    assert cmd[0] == "claude"
+    assert "-p" in cmd
+    assert "--output-format" in cmd and "json" in cmd
+    assert "--system-prompt" in cmd
+    assert cmd[cmd.index("--system-prompt") + 1] == "SYS-PROMPT"
+    assert "--model" in cmd
+    # User text on stdin (not in argv).
+    assert calls[0]["input"] == "USER-MESSAGE"
+    assert "USER-MESSAGE" not in cmd
+
+
+def test_cli_backend_strips_fences_in_the_envelope_result(monkeypatch):
+    """Even though Claude is asked for raw JSON only, the CLI
+       sometimes wraps the assistant text in markdown fences. The
+       same _strip_fences helper that protects the SDK path also
+       protects the CLI path."""
+    body = json.dumps({"a": 1})
+    wrapped = f"```json\n{body}\n```"
+    _patch_run(monkeypatch,
+                stdout=json.dumps(_envelope(text=wrapped)), returncode=0)
+    out = ai.call_claude(_CliCfg(), "s", "u")
+    assert out["text"] == body            # fence removed
+
+
+def test_cli_backend_translates_auth_stderr_to_auth_error(monkeypatch):
+    """A `claude` CLI non-zero exit whose stderr mentions credentials /
+       login surfaces as CallClaudeAuthError so the runner's existing
+       config-fatal exit path triggers cleanly."""
+    _patch_run(monkeypatch, returncode=1,
+                stderr="Error: Please run `claude` to log in.")
+    with pytest.raises(ai.CallClaudeAuthError) as ei:
+        ai.call_claude(_CliCfg(), "s", "u")
+    assert "claude" in str(ei.value).lower()
+    assert ai.get_last_error() == "auth"
+    assert ei.value.__cause__ is None
+
+
+def test_cli_backend_classifies_rate_limit_for_health(monkeypatch):
+    """A `rate limit` stderr → _LAST_ERROR='rate_limit' (and a generic
+       RuntimeError raised, since rate-limit is recoverable via
+       backoff but isn't auth-fatal)."""
+    _patch_run(monkeypatch, returncode=1,
+                stderr="Error: rate limit exceeded; retry later")
+    with pytest.raises(RuntimeError):
+        ai.call_claude(_CliCfg(), "s", "u")
+    assert ai.get_last_error() == "rate_limit"
+
+
+def test_cli_backend_handles_missing_binary(monkeypatch):
+    """If the `claude` binary isn't in PATH (Dockerfile built without
+       the CLI layer), surface the operator-facing message — same
+       shape as a wrong API key."""
+    _patch_run(monkeypatch, file_not_found=True)
+    with pytest.raises(ai.CallClaudeAuthError) as ei:
+        ai.call_claude(_CliCfg(), "s", "u")
+    assert "claude" in str(ei.value)
+    assert "PATH" in str(ei.value)
+    assert ai.get_last_error() == "auth"
+
+
+def test_cli_backend_handles_unparseable_envelope(monkeypatch):
+    """If the CLI's stdout isn't a JSON object (e.g. it crashed
+       mid-emit), bail with a clear RuntimeError rather than an
+       opaque ValueError from the JSON decode."""
+    _patch_run(monkeypatch, returncode=0, stdout="not json at all")
+    with pytest.raises(RuntimeError, match="unparseable JSON"):
+        ai.call_claude(_CliCfg(), "s", "u")
+    assert ai.get_last_error() == "other"
+
+
+def test_cli_backend_handles_error_envelope(monkeypatch):
+    """A returncode=0 with an is_error=true envelope (which the CLI
+       can emit on internal failures) raises rather than returning
+       the assistant text."""
+    env = _envelope(is_error=True)
+    _patch_run(monkeypatch, returncode=0, stdout=json.dumps(env))
+    with pytest.raises(RuntimeError, match="error envelope"):
+        ai.call_claude(_CliCfg(), "s", "u")
+    assert ai.get_last_error() == "other"

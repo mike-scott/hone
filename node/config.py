@@ -6,14 +6,20 @@ import os
 import socket
 from dataclasses import dataclass
 
-_REQUIRED = ("HONE_CORE_URL", "HONE_FLEET_SECRET", "ANTHROPIC_API_KEY")
+# The supported Claude backends. `sdk` calls the Anthropic Python SDK and
+# requires ANTHROPIC_API_KEY (standard API-billing path). `cli`
+# subprocesses the `claude` CLI binary and uses whatever OAuth session
+# is in $HOME/.claude — intended for Claude Code subscribers who don't
+# have API billing set up. See docs/DEPLOYMENT.md → Backends.
+CLAUDE_BACKENDS = ("sdk", "cli")
 
 
 @dataclass(frozen=True)
 class Config:
     core_url:           str    # HONE_CORE_URL — the hone-core base URL
     fleet_secret:       str    # HONE_FLEET_SECRET — gates the enrollment API
-    anthropic_api_key:  str    # ANTHROPIC_API_KEY — the Claude API token
+    anthropic_api_key:  str    # ANTHROPIC_API_KEY — Claude API token (sdk only)
+    claude_backend:     str    # HONE_CLAUDE_BACKEND — 'sdk' | 'cli'
     node_name:          str    # HONE_NODE_NAME — label shown to the operator
     data_dir:           str    # HONE_DATA — the mapped persistent volume
     repo_dir:           str    # HONE_REPO_DIR — the reference kernel repo
@@ -27,7 +33,17 @@ class Config:
 
     @classmethod
     def from_env(cls) -> "Config":
-        missing = [k for k in _REQUIRED if not os.environ.get(k)]
+        backend = os.environ.get("HONE_CLAUDE_BACKEND", "sdk").lower()
+        if backend not in CLAUDE_BACKENDS:
+            raise RuntimeError(
+                f"HONE_CLAUDE_BACKEND={backend!r} unsupported; "
+                f"expected one of {CLAUDE_BACKENDS}")
+        # ANTHROPIC_API_KEY is required only for the SDK backend; the
+        # CLI backend reads OAuth credentials out of $HOME/.claude.
+        required = ["HONE_CORE_URL", "HONE_FLEET_SECRET"]
+        if backend == "sdk":
+            required.append("ANTHROPIC_API_KEY")
+        missing = [k for k in required if not os.environ.get(k)]
         if missing:
             raise RuntimeError(
                 "missing required environment: " + ", ".join(missing))
@@ -35,7 +51,8 @@ class Config:
         return cls(
             core_url           = os.environ["HONE_CORE_URL"].rstrip("/"),
             fleet_secret       = os.environ["HONE_FLEET_SECRET"],
-            anthropic_api_key  = os.environ["ANTHROPIC_API_KEY"],
+            anthropic_api_key  = os.environ.get("ANTHROPIC_API_KEY", ""),
+            claude_backend     = backend,
             node_name          = os.environ.get("HONE_NODE_NAME",
                                                 socket.gethostname()),
             data_dir           = data,

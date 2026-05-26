@@ -17,19 +17,36 @@ services:
     build:
       context: ..                        # project root — the build needs common/
       dockerfile: node/Dockerfile
+      args:
+        # Container user's UID/GID — match these to the host user
+        # (`id -u` / `id -g`) when bind-mounting host directories
+        # like ~/.claude. Default 1000/1000 covers the first
+        # interactive user on most Linux distros; override in .env
+        # if your host UID differs.
+        HONE_CLAUDE_CLI_USER:  "${HONE_CLAUDE_CLI_USER:-1000}"
+        HONE_CLAUDE_CLI_GROUP: "${HONE_CLAUDE_CLI_GROUP:-1000}"
     image: hone-node
     restart: unless-stopped
     env_file:
       - .env                             # every setting in .env reaches the node
     environment:
-      # The three required settings, re-asserted so `compose up` fails fast if
-      # one is missing. Optional settings (HONE_NODE_NAME, the poll / backoff
-      # knobs, ...) are picked up from .env above — see .env.example.
-      HONE_CORE_URL:     "${HONE_CORE_URL:?set it in .env}"
-      HONE_FLEET_SECRET: "${HONE_FLEET_SECRET:?set it in .env}"
-      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:?set it in .env}"
+      # The two-or-three required settings, re-asserted so `compose up` fails
+      # fast if one is missing. The CI/CD-friendly defaults assume backend=sdk
+      # (the standard API-billing path); for HONE_CLAUDE_BACKEND=cli the
+      # ANTHROPIC_API_KEY is unused (the `claude` CLI auths via OAuth under
+      # $HOME/.claude) — see the commented mount below.
+      HONE_CORE_URL:        "${HONE_CORE_URL:?set it in .env}"
+      HONE_FLEET_SECRET:    "${HONE_FLEET_SECRET:?set it in .env}"
+      HONE_CLAUDE_BACKEND:  "${HONE_CLAUDE_BACKEND:-sdk}"
+      ANTHROPIC_API_KEY:    "${ANTHROPIC_API_KEY:-}"
     volumes:
       - hone-node-data:/data             # linux clones + scratch (self-populated)
+      # OPT-IN: Claude Code subscribers without API billing can use the CLI
+      # backend by setting HONE_CLAUDE_BACKEND=cli in .env AND uncommenting
+      # the line below. The mount lets the `claude` CLI inside the container
+      # read+refresh the OAuth session on the host. Run `claude` once on
+      # the host first to populate ~/.claude. See docs/DEPLOYMENT.md.
+      # - ${HOME}/.claude:/home/hone/.claude:rw
 
 volumes:
   hone-node-data:
