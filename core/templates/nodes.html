@@ -41,7 +41,14 @@
 
 <h2 class="h5 mt-4">Enrolled nodes</h2>
 {% if nodes %}
-<table class="table table-sm align-middle">
+{# Rows are clickable to the per-node detail page — same pattern the
+   queue uses (a real <a> on the Name cell for keyboard / screen-
+   reader nav, plus a delegated JS row-click handler that turns the
+   rest of the row into a click target via data-href). The
+   confirm-modal-gated Delete form inside the row short-circuits the
+   row click because the JS handler skips clicks that hit a/button/
+   input/select/textarea/label. #}
+<table class="table table-sm table-hover align-middle" id="nodes-list">
   <thead>
     <tr><th>ID</th><th>Name</th><th>Capabilities</th>
         <th>State</th><th>Health</th>
@@ -49,9 +56,14 @@
   </thead>
   <tbody>
   {% for n in nodes %}
-    <tr>
+    <tr data-href="{{ n.detail_url }}" style="cursor: pointer;">
       <td>{{ n.id }}</td>
-      <td>{{ n.name or "—" }}</td>
+      <td>
+        <a href="{{ n.detail_url }}"
+           class="link-body-emphasis text-decoration-none">
+          {{ n.name or "—" }}
+        </a>
+      </td>
       <td>{{ n.task_types_display }}</td>
       <td>
         {% if n.state == node_state_active %}
@@ -100,6 +112,23 @@
   {% endfor %}
   </tbody>
 </table>
+<script>
+  // Delegated row-click → node detail. Skips when the click hit a
+  // link or interactive element so the Name anchor and the Delete
+  // form's button aren't double-handled. Same pattern as the queue
+  // body's row click handler.
+  (function () {
+    var body = document.getElementById("nodes-list");
+    if (!body) return;
+    body.addEventListener("click", function (e) {
+      var row = e.target.closest("tr[data-href]");
+      if (!row) return;
+      if (e.target.closest("a, button, input, select, textarea, label"))
+        return;
+      window.location = row.dataset.href;
+    });
+  })();
+</script>
 {% else %}
 <p class="text-muted">No nodes enrolled yet.</p>
 {% endif %}

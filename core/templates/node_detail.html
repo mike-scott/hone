@@ -1,0 +1,142 @@
+{% extends "base.html" %}
+{% block title %}{{ node.name or "node " ~ node.id }} · hone-core{% endblock %}
+{% block content %}
+
+{# Back link — the opener can pass `?back=<their-url>` so the operator
+   returns exactly where they left off (e.g. a filtered nodes list).
+   Same shared pattern as the patchset detail page. #}
+<a href="{{ back_url }}" class="btn btn-link p-0 mb-3">
+  <i class="bi bi-arrow-left"></i> Back
+</a>
+
+<h1 class="h4 mb-1">{{ node.name or "node " ~ node.id }}</h1>
+<div class="text-muted small mb-3">
+  node id <code>{{ node.id }}</code>
+</div>
+
+<div class="row g-3 mb-4">
+  <div class="col-md-6">
+    <div class="card h-100">
+      <div class="card-header py-2"><strong>Node</strong></div>
+      <div class="card-body py-2">
+        <dl class="row mb-0 small">
+          <dt class="col-sm-4">Name</dt>
+          <dd class="col-sm-8">{{ node.name or "—" }}</dd>
+          <dt class="col-sm-4">Capabilities</dt>
+          <dd class="col-sm-8">{{ node.task_types_display }}</dd>
+          <dt class="col-sm-4">State</dt>
+          <dd class="col-sm-8">
+            {% if node.state == node_state_active %}
+            <span class="badge text-bg-success">{{ node.state_display }}</span>
+            {% else %}
+            <span class="badge text-bg-secondary">{{ node.state_display }}</span>
+            {% endif %}
+          </dd>
+          <dt class="col-sm-4">Enrolled</dt>
+          <dd class="col-sm-8">{{ node.enrolled_display }}</dd>
+          <dt class="col-sm-4">Last seen</dt>
+          <dd class="col-sm-8">{{ node.last_seen_display }}</dd>
+        </dl>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-md-6">
+    <div class="card h-100">
+      <div class="card-header py-2">
+        <strong>Health</strong>
+        {% if node.health_at_display != "—" %}
+        <span class="text-muted small ms-2">
+          as of {{ node.health_at_display }}
+        </span>
+        {% endif %}
+      </div>
+      <div class="card-body py-2">
+        {% if node.health_display %}
+        <dl class="row mb-0 small">
+          <dt class="col-sm-5">Data volume free</dt>
+          <dd class="col-sm-7"><code>{{ node.health_display.free_disk }}</code></dd>
+          <dt class="col-sm-5">Reference repo</dt>
+          <dd class="col-sm-7"><code>{{ node.health_display.repo_size }}</code></dd>
+          <dt class="col-sm-5">Last Anthropic call</dt>
+          <dd class="col-sm-7">
+            {% if node.health_display.error %}
+            <span class="text-danger">
+              <i class="bi bi-exclamation-triangle-fill"></i>
+              {{ node.health_display.error }}
+            </span>
+            {% else %}
+            <span class="text-success">clean</span>
+            {% endif %}
+          </dd>
+        </dl>
+        {% else %}
+        <p class="text-muted mb-0 small">
+          This node hasn't reported its health yet — the snapshot
+          lands on the next claim-loop tick.
+        </p>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+
+<h2 class="h5 mt-4">Recent claims ({{ claims|length }})</h2>
+{% if claims %}
+<table class="table table-sm align-middle">
+  <thead>
+    <tr><th>Type</th><th>Work state</th><th>Patchset</th>
+        <th>Claimed</th><th>Completed</th></tr>
+  </thead>
+  <tbody>
+  {% for c in claims %}
+    <tr>
+      <td><span class="badge {{ c.type_badge }}">{{ c.type }}</span></td>
+      <td><span class="badge {{ c.state_badge }}">{{ c.state }}</span></td>
+      <td>
+        <a href="{{ c.patchset_url }}"
+           class="link-body-emphasis text-decoration-none">
+          {{ c.subject }}
+        </a>
+        <div class="text-muted small"><code>{{ c.root_message_id }}</code></div>
+      </td>
+      <td class="text-nowrap small">{{ c.claimed_display }}</td>
+      <td class="text-nowrap small">{{ c.completed_display }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="text-muted small">This node hasn't claimed any work yet.</p>
+{% endif %}
+
+<h2 class="h5 mt-4">Reviews produced ({{ reviews|length }})</h2>
+{% if reviews %}
+<table class="table table-sm align-middle">
+  <thead>
+    <tr><th>Patchset</th><th>Concerns</th><th>Model</th>
+        <th>Recorded</th><th>Methodology v</th></tr>
+  </thead>
+  <tbody>
+  {% for r in reviews %}
+    <tr>
+      <td>
+        <a href="{{ r.patchset_url }}"
+           class="link-body-emphasis text-decoration-none">
+          {{ r.subject }}
+        </a>
+        <div class="text-muted small"><code>{{ r.root_message_id }}</code></div>
+      </td>
+      <td>{{ r.concerns_count }}</td>
+      <td><code class="small">{{ r.model or "—" }}</code></td>
+      <td class="text-nowrap small">{{ r.recorded_display }}</td>
+      <td class="small">{{ r.methodology_version or "—" }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="text-muted small">This node hasn't produced any reviews yet.</p>
+{% endif %}
+
+{% endblock %}

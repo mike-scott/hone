@@ -414,6 +414,10 @@ async def nodes(request: Request):
         e["requested_display"]  = _when(e.get("created_at"))
         pending.append(e)
 
+    # The current page's URL is the destination the detail page's
+    # ← Back link returns to. Threaded onto every row's detail_url.
+    back_qs = "?back=" + quote("/nodes", safe="")
+
     fleet = []
     for n in core_db.list_nodes(db):
         n = dict(n)
@@ -423,11 +427,95 @@ async def nodes(request: Request):
         n["last_seen_display"]  = _when(n.get("last_seen"))
         n["health_display"]     = _health_display(n.get("health"))
         n["health_at_display"]  = _when(n.get("health_at"))
+        n["detail_url"]         = f"/nodes/{n['id']}{back_qs}"
         fleet.append(n)
 
     return templates.TemplateResponse(request, "nodes.html", {
         "pending": pending, "nodes": fleet,
         "node_state_active": core_db.NODE_STATE_ACTIVE})
+
+
+# --- per-node detail ------------------------------------------------------
+
+_WORK_TYPE_DISPLAY = core_db.WORK_ITEM_TYPE_NAMES
+_WORK_STATE_DISPLAY = core_db.WORK_ITEM_STATE_NAMES
+
+
+def _node_claimed_by_label(node):
+    """The string the api layer writes into work_items.claimed_by for a
+       node — the node's name when set, str(node.id) otherwise (see
+       api.claim_task). Centralised so the detail page's per-node
+       query matches what the claim path wrote."""
+    return node.get("name") or str(node["id"])
+
+
+def _node_detail_view(db, node_id):
+    """Build the per-node detail render context — node row + health
+       snapshot + recent claims + recent reviews. Raises 404 when
+       the node is unknown (revoked tombstones are still resolvable;
+       only a hard-deleted node 404s)."""
+    node = core_db.get_node(db, node_id)
+    if node is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND,
+                            f"no node with id {node_id}")
+    node["task_types_display"] = _types(node.get("task_types"))
+    node["state_display"]      = core_db.NODE_STATE_NAMES.get(
+                                     node["state"], "?")
+    node["enrolled_display"]   = _when(node.get("enrolled_at"))
+    node["last_seen_display"]  = _when(node.get("last_seen"))
+    node["health_display"]     = _health_display(node.get("health"))
+    node["health_at_display"]  = _when(node.get("health_at"))
+
+    claims = []
+    for w in core_db.work_items_for_node(db, _node_claimed_by_label(node)):
+        type_name  = _WORK_TYPE_DISPLAY.get(w["type"], "?")
+        state_name = _WORK_STATE_DISPLAY.get(w["state"], "?")
+        claims.append({
+            "id":               w["id"],
+            "type":             type_name,
+            "type_badge":       _TYPE_BADGE.get(type_name, "text-bg-light"),
+            "state":            state_name,
+            "state_badge":      _STATE_BADGE.get(state_name,
+                                                  "text-bg-light"),
+            "subject":          w["subject"] or w["root_message_id"],
+            "root_message_id":  w["root_message_id"],
+            "claimed_display":   _when(w["claimed_at"]),
+            "completed_display": _when(w["completed_at"]),
+            "patchset_url":     f"/patchsets/{quote(w['root_message_id'])}"
+                                + f"?back={quote(f'/nodes/{node_id}', safe='')}",
+        })
+
+    reviews = []
+    for r in core_db.ai_reviews_for_node(db, node_id):
+        reviews.append({
+            "id":               r["id"],
+            "root_message_id":  r["root_message_id"],
+            "subject":          r["subject"] or r["root_message_id"],
+            "model":            r["model"],
+            "concerns_count":   len(r["concerns"]),
+            "recorded_display": _when(r["recorded_at"]),
+            "patchset_url":     f"/patchsets/{quote(r['root_message_id'])}"
+                                + f"?back={quote(f'/nodes/{node_id}', safe='')}",
+        })
+
+    return {
+        "node":    node,
+        "claims":  claims,
+        "reviews": reviews,
+        "node_state_active": core_db.NODE_STATE_ACTIVE,
+    }
+
+
+@router.get("/nodes/{node_id:int}", response_class=HTMLResponse)
+async def node_detail(request: Request, node_id: int,
+                       back: str | None = None):
+    """The per-node detail page — drill down into a row from /nodes
+       (or any other index that links here). `?back=` carries the URL
+       the opener wants the ← Back button to return to; same-origin
+       paths only via _safe_back, default `/nodes`."""
+    ctx = _node_detail_view(request.app.state.db, node_id)
+    ctx["back_url"] = _safe_back(back) if back else "/nodes"
+    return templates.TemplateResponse(request, "node_detail.html", ctx)
 
 
 @router.get("/enroll", response_class=HTMLResponse)

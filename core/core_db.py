@@ -1556,6 +1556,48 @@ def queue_version(db, *, type=None, state=None):
     return f"{r['t']}-{r['n']}-{r['s']}"
 
 
+def work_items_for_node(db, claimed_by, *, limit=50):
+    """Recent work-items claimed by a node, most-recent-claim first.
+       `claimed_by` is whatever the api layer wrote into the column
+       — the node's name when set, str(node.id) otherwise (see
+       api.claim_task). Used by the node detail page to show
+       per-node activity history."""
+    rows = db.execute(
+        "SELECT w.id, w.type, w.state, w.root_message_id, w.message_id, "
+        "w.claimed_at, w.completed_at, w.enqueued_at, "
+        "w.methodology_version, p.subject "
+        "FROM work_items w "
+        "LEFT JOIN patchsets p ON p.root_message_id=w.root_message_id "
+        "WHERE w.claimed_by=? "
+        "ORDER BY COALESCE(w.completed_at, w.claimed_at, w.enqueued_at) "
+        "DESC, w.id DESC LIMIT ?",
+        (claimed_by, limit))
+    return [dict(r) for r in rows]
+
+
+def ai_reviews_for_node(db, node_id, *, limit=50):
+    """Recent ai_reviews authored by a specific node (audit link via
+       ai_reviews.node_id). Most-recently-recorded first."""
+    rows = db.execute(
+        "SELECT a.id, a.root_message_id, a.model, a.recorded_at, "
+        "a.methodology_version, a.concerns, p.subject "
+        "FROM ai_reviews a "
+        "LEFT JOIN patchsets p ON p.root_message_id=a.root_message_id "
+        "WHERE a.node_id=? "
+        "ORDER BY a.recorded_at DESC LIMIT ?",
+        (node_id, limit))
+    out = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["concerns"] = json.loads(d["concerns"]) if d["concerns"] \
+                            else []
+        except (ValueError, TypeError):
+            d["concerns"] = []
+        out.append(d)
+    return out
+
+
 def work_items_for_patchset(db, root_message_id):
     """Every work-item attached to a patchset, oldest-enqueued first — the
        queue history a per-patchset detail page renders."""

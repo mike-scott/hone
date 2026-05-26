@@ -153,6 +153,56 @@ def test_approve_enrollment_rejects_a_now_conflicting_name(db):
         core_db.approve_enrollment(db, "C-2")
 
 
+def test_work_items_for_node_returns_recent_claims(db):
+    """work_items_for_node returns rows the node has claimed, ordered
+       by most-recent activity. The detail page renders this as the
+       Recent claims table."""
+    core_db.add_methodology_version(db, {"name": "test", "version": 1})
+    # Plant a patchset and enqueue a prepare; claim it as "builder-7"
+    # (the api layer writes the node name into claimed_by for a named
+    # node — see api.claim_task).
+    core_db.upsert_patchset(db, "<r1@x>", subject="s1", n_patches=1)
+    core_db.upsert_patchset_metadata(
+        db, "<r1@x>", mode="heuristic",
+        tree_state={}, subsystem={"primary": "n"},
+        patch_size={"bucket": "small"}, maintainer={},
+        patch_type={"primary": "bugfix"},
+        review_intensity={"bucket_overall": "light"},
+        preparation_notes={})
+    core_db.enqueue_review(db, "<r1@x>")
+    claim = core_db.claim_work_item(
+        db, "builder-7", methodology_version=1,
+        types=(core_db.WORK_ITEM_TYPE_REVIEW,))
+    assert claim is not None
+
+    rows = core_db.work_items_for_node(db, "builder-7")
+    assert len(rows) == 1
+    assert rows[0]["root_message_id"] == "r1@x"
+    assert rows[0]["subject"] == "s1"
+    # Returns empty for an unknown claimed_by label.
+    assert core_db.work_items_for_node(db, "no-such-node") == []
+
+
+def test_ai_reviews_for_node_returns_audited_reviews(db):
+    """ai_reviews_for_node returns rows whose node_id matches, with
+       concerns decoded from JSON to a list."""
+    enr = core_db.create_enrollment(db, node_name="builder-7")
+    node_id = core_db.approve_enrollment(db, enr["user_code"])
+    core_db.upsert_patchset(db, "<r1@x>", subject="s1", n_patches=1)
+    core_db.upsert_ai_review(
+        db, "<r1@x>", concerns=[{"concern_id": "c-1", "severity": "minor"}],
+        model="claude-opus-4-7", node_id=node_id)
+
+    rows = core_db.ai_reviews_for_node(db, node_id)
+    assert len(rows) == 1
+    assert rows[0]["root_message_id"] == "r1@x"
+    assert rows[0]["concerns"] == [{"concern_id": "c-1", "severity": "minor"}]
+    # Unrelated node → no rows.
+    other = core_db.approve_enrollment(
+        db, core_db.create_enrollment(db, node_name="builder-8")["user_code"])
+    assert core_db.ai_reviews_for_node(db, other) == []
+
+
 def test_update_node_health_round_trips_a_snapshot(db):
     """update_node_health writes the JSON snapshot + a timestamp; the
        getters return it as a decoded dict so the UI never touches

@@ -139,6 +139,95 @@ def test_nodes_page_renders_a_health_warning_for_anthropic_errors(ctx):
     assert "text-danger" in body
 
 
+# --- node detail page ----------------------------------------------------
+
+def test_node_detail_renders_header_health_claims_and_reviews(ctx):
+    """The per-node detail page mirrors the patchset detail layout —
+       header card + health card + recent claims + recent reviews."""
+    enr = core_db.create_enrollment(ctx.db, node_name="builder-7")
+    node_id = core_db.approve_enrollment(ctx.db, enr["user_code"])
+    core_db.update_node_health(ctx.db, node_id, {
+        "free_disk_mb": 2048, "refrepo_size_mb": 800,
+        "last_anthropic_error": None})
+    # Plant a claim and a review attributed to this node.
+    core_db.add_methodology_version(ctx.db, {"name": "t", "version": 1})
+    core_db.upsert_patchset(ctx.db, "<r1@x>", subject="a patch", n_patches=1)
+    core_db.upsert_patchset_metadata(
+        ctx.db, "<r1@x>", mode="heuristic",
+        tree_state={}, subsystem={"primary": "n"},
+        patch_size={"bucket": "small"}, maintainer={},
+        patch_type={"primary": "bugfix"},
+        review_intensity={"bucket_overall": "light"},
+        preparation_notes={})
+    core_db.enqueue_review(ctx.db, "<r1@x>")
+    core_db.claim_work_item(
+        ctx.db, "builder-7", methodology_version=1,
+        types=(core_db.WORK_ITEM_TYPE_REVIEW,))
+    core_db.upsert_ai_review(
+        ctx.db, "<r1@x>", concerns=[], model="claude-opus-4-7",
+        node_id=node_id)
+
+    r = ctx.client.get(f"/nodes/{node_id}")
+    assert r.status_code == 200
+    body = r.text
+    # Header + identity
+    assert "builder-7" in body
+    assert f"node id <code>{node_id}</code>" in body
+    # Health card
+    assert "2.0 GB" in body and "800 MB" in body
+    assert "clean" in body                          # no error category
+    # Recent claims table
+    assert "Recent claims" in body
+    assert "a patch" in body
+    # Reviews produced
+    assert "Reviews produced" in body
+    # ← Back default → /nodes
+    assert 'href="/nodes"' in body
+
+
+def test_node_detail_404_for_unknown_id(ctx):
+    r = ctx.client.get("/nodes/99999")
+    assert r.status_code == 404
+
+
+def test_node_detail_back_link_honours_query_param(ctx):
+    """Same shared `?back=` pattern as the patchset detail page — an
+       opener passes its current URL so ← Back returns there."""
+    enr = core_db.create_enrollment(ctx.db, node_name="builder-7")
+    node_id = core_db.approve_enrollment(ctx.db, enr["user_code"])
+    from urllib.parse import quote
+    r = ctx.client.get(f"/nodes/{node_id}?back={quote('/nodes?x=1', safe='')}")
+    assert r.status_code == 200
+    # Jinja escapes `&` so the path "?x=1" (no &) renders verbatim.
+    assert 'href="/nodes?x=1"' in r.text
+
+
+def test_node_detail_rejects_offsite_back_url(ctx):
+    """Same-origin paths only — open-redirect guard is the shared
+       _safe_back helper used by both detail pages."""
+    enr = core_db.create_enrollment(ctx.db, node_name="builder-7")
+    node_id = core_db.approve_enrollment(ctx.db, enr["user_code"])
+    from urllib.parse import quote
+    r = ctx.client.get(
+        f"/nodes/{node_id}?back={quote('https://attacker.example/', safe='')}")
+    assert r.status_code == 200
+    assert "attacker.example" not in r.text
+
+
+def test_nodes_list_rows_link_to_the_detail_page(ctx):
+    """Each enrolled-node row carries a data-href to its detail page,
+       and the Name cell is a real anchor for keyboard / screen-reader
+       navigation. The ?back= round-trips the current /nodes URL so
+       ← Back from the detail page returns the operator here."""
+    enr = core_db.create_enrollment(ctx.db, node_name="builder-7")
+    node_id = core_db.approve_enrollment(ctx.db, enr["user_code"])
+    body = ctx.client.get("/nodes").text
+    from urllib.parse import quote
+    expected = f'/nodes/{node_id}?back={quote("/nodes", safe="")}'
+    assert f'data-href="{expected}"' in body
+    assert f'href="{expected}"' in body              # the Name anchor
+
+
 def test_nodes_page_shows_em_dash_for_nodes_that_havent_reported(ctx):
     """A freshly-enrolled node hasn't posted its first health snapshot
        yet — the Health column shows a single em-dash rather than
