@@ -345,3 +345,50 @@ def test_reclaim_expired_returns_separate_counts_for_each_queue(db):
     assert db.execute(
         "SELECT state FROM work_items WHERE root_message_id=?",
         ("r1@x",)).fetchone()["state"] == core_db.WORK_ITEM_STATE_CLAIMABLE
+
+
+# --- release_claim (node-initiated abort) ---------------------------------
+
+def test_release_claim_returns_a_claimed_row_to_the_pool(db):
+    """release_claim flips state CLAIMED → CLAIMABLE and clears every
+       claim-time field — the row looks like a fresh enqueue, ready
+       for the next claimer with no lease wait."""
+    core_db.add_methodology_version(db, {"name": "test", "version": 1})
+    _planted_patchset(db, "<r1@x>", n_patches=1)
+    core_db.maybe_enqueue_prepare(db, "<r1@x>")
+    claim = core_db.claim_work_item(
+        db, "worker-1", methodology_version=1,
+        types=(core_db.WORK_ITEM_TYPE_PREPARE,))
+    assert core_db.release_claim(
+        db, claim["claim_id"], reason="api key rejected") == "ok"
+    row = db.execute(
+        "SELECT state, claim_id, claimed_by, claimed_at, lease_expires, "
+        "heartbeat_at, methodology_version "
+        "FROM work_items WHERE id=?", (claim["id"],)).fetchone()
+    assert row["state"] == core_db.WORK_ITEM_STATE_CLAIMABLE
+    for col in ("claim_id", "claimed_by", "claimed_at", "lease_expires",
+                 "heartbeat_at", "methodology_version"):
+        assert row[col] is None, f"{col} should be NULL on release"
+
+
+def test_release_claim_is_safe_to_retry(db):
+    """The first release nulls the claim_id, so a second call against
+       the same id can't find the row and returns 'lapsed' — the
+       work-item is already back in the pool. The node treats
+       'lapsed' the same as a successful retry, so a network blip
+       between the release request and its 200 doesn't strand the
+       node in a bad state."""
+    core_db.add_methodology_version(db, {"name": "test", "version": 1})
+    _planted_patchset(db, "<r1@x>", n_patches=1)
+    core_db.maybe_enqueue_prepare(db, "<r1@x>")
+    claim = core_db.claim_work_item(
+        db, "w-1", methodology_version=1,
+        types=(core_db.WORK_ITEM_TYPE_PREPARE,))
+    assert core_db.release_claim(db, claim["claim_id"]) == "ok"
+    assert core_db.release_claim(db, claim["claim_id"]) == "lapsed"
+
+
+def test_release_claim_returns_lapsed_for_unknown_id(db):
+    """An unknown claim_id (already reclaimed by lease expiry, or
+       never issued) returns 'lapsed' — symmetric with submit_result."""
+    assert core_db.release_claim(db, "no-such-claim") == "lapsed"

@@ -163,9 +163,29 @@ def run_once(cfg: Config, client: HoneCoreClient) -> bool:
         return False
     log.info("claimed %s (%s)", claim.get("claim_id"),
              claim.get("task_type"))
-    record = _with_backoff(
-        cfg, f"{claim.get('task_type')} task",
-        lambda: tasks.dispatch(cfg, client, claim))
+    try:
+        record = _with_backoff(
+            cfg, f"{claim.get('task_type')} task",
+            lambda: tasks.dispatch(cfg, client, claim))
+    except Exception as exc:
+        # Non-transient task failure — _with_backoff has already
+        # exhausted retries for the transient classes. Release the
+        # claim before the exception propagates so a correctly-
+        # configured peer can pick the work-item up immediately
+        # instead of waiting (default 30 min) for the lease to lapse.
+        # Best-effort: a failed release falls back to lease expiry,
+        # the original exception still propagates to main().
+        # KeyboardInterrupt is BaseException, not Exception — the
+        # SIGTERM/SIGINT shutdown path is unaffected.
+        try:
+            _with_backoff(cfg, "release claim",
+                          lambda: client.release_claim(
+                              claim["claim_id"],
+                              reason=f"{type(exc).__name__}: {exc}"))
+        except Exception:
+            log.exception("release claim failed — the claim will "
+                          "lapse on its lease instead")
+        raise
     _with_backoff(cfg, "submit result",
                   lambda: client.submit_result(claim["claim_id"], record))
     log.info("submitted result for %s", claim.get("claim_id"))

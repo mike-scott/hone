@@ -291,6 +291,50 @@ def test_draft_failed_queues_no_proposals(client):
     assert client.state.proposals_added == []
 
 
+# --- release endpoint -----------------------------------------------------
+
+def test_release_endpoint_forwards_to_core_db(client, monkeypatch):
+    """POST /v1/claims/{id}/release calls core_db.release_claim with
+       the supplied reason and echoes its status back."""
+    seen = []
+    monkeypatch.setattr(
+        core_db, "release_claim",
+        lambda db, cid, *, reason=None: seen.append((cid, reason)) or "ok")
+    r = client.http.post(
+        "/v1/claims/c1/release",
+        json={"reason": "Claude API key rejected"},
+        headers=HEADERS)
+    assert r.status_code == 200 and r.json() == {"status": "ok"}
+    assert seen == [("c1", "Claude API key rejected")]
+
+
+def test_release_endpoint_accepts_an_empty_body(client, monkeypatch):
+    """The reason is optional — a body-less release POST still works."""
+    monkeypatch.setattr(
+        core_db, "release_claim",
+        lambda db, cid, *, reason=None: "ok")
+    r = client.http.post("/v1/claims/c1/release", headers=HEADERS)
+    assert r.status_code == 200 and r.json() == {"status": "ok"}
+
+
+def test_release_endpoint_propagates_lapsed(client, monkeypatch):
+    """A claim that's already been reclaimed by lease expiry returns
+       'lapsed' — the node can log and move on."""
+    monkeypatch.setattr(
+        core_db, "release_claim",
+        lambda db, cid, *, reason=None: "lapsed")
+    r = client.http.post("/v1/claims/c1/release", headers=HEADERS,
+                          json={"reason": "x"})
+    assert r.status_code == 200 and r.json() == {"status": "lapsed"}
+
+
+def test_release_endpoint_requires_bearer_token(client):
+    """Same auth surface as result / heartbeat — no bearer → 401."""
+    r = client.http.post("/v1/claims/c1/release",
+                          json={"reason": "x"})
+    assert r.status_code == 401
+
+
 # --- discriminator + auth --------------------------------------------------
 
 def test_missing_task_type_rejected(client):

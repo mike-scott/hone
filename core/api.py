@@ -565,6 +565,29 @@ def heartbeat(claim_id: str, request: Request):
     return {"valid": core_db.heartbeat(request.app.state.db, claim_id)}
 
 
+class ReleaseRequest(BaseModel):
+    reason: str | None = None
+
+
+@router.post("/claims/{claim_id}/release",
+             dependencies=[Depends(require_node)])
+def release_claim(claim_id: str, request: Request,
+                   body: ReleaseRequest | None = None):
+    """Release a claim back to the CLAIMABLE pool BEFORE its lease lapses —
+       the node calls this when it hit a configuration-fatal error
+       mid-task (Claude API key rejected, model not found, …) and is about
+       to exit. A correctly-configured peer can then pick the work-item up
+       immediately instead of waiting out the (default 30 min) lease.
+
+       Optional `reason` in the body is logged server-side. Returns
+       `{status: "ok"}` on a successful release or a no-op re-call,
+       `{status: "lapsed"}` when the claim was already reclaimed."""
+    reason = body.reason if body else None
+    result = core_db.release_claim(
+        request.app.state.db, claim_id, reason=reason)
+    return {"status": result}
+
+
 _PREPARE_METADATA_FIELDS = ("tree_state", "subsystem", "patch_size",
                             "maintainer", "patch_type", "review_intensity",
                             "preparation_notes")

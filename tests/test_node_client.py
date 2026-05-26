@@ -225,3 +225,25 @@ def test_heartbeat_posts_to_the_heartbeat_path(cfg):
         assert seen == [("POST", "/v1/claims/c1/heartbeat")]
     finally:
         c.close()
+
+
+def test_release_claim_posts_the_reason(cfg):
+    """The runner calls release_claim with a short prose reason when
+       it aborts a task — this surfaces server-side in the release_claim
+       log line so an operator inspecting hone-core's log can see why a
+       node bailed without grepping both halves of the fleet."""
+    seen = []
+
+    def handler(request):
+        seen.append((request.method, request.url.path, request.read()))
+        return httpx.Response(200, json={"status": "ok"})
+
+    c = _client_with_transport(cfg, httpx.MockTransport(handler))
+    try:
+        c.release_claim("c1", reason="Claude API key rejected")
+        method, path, body = seen[0]
+        import json as _json
+        assert method == "POST" and path == "/v1/claims/c1/release"
+        assert _json.loads(body) == {"reason": "Claude API key rejected"}
+    finally:
+        c.close()

@@ -245,6 +245,16 @@ class HoneCoreClient:
         self._request("POST", f"/v1/claims/{claim_id}/result",
                       json=record).raise_for_status()
 
+    def release_claim(self, claim_id: str, reason: str = "") -> None:
+        """POST /v1/claims/{id}/release — return the claim to the
+           CLAIMABLE pool immediately. Called by the runner when a
+           non-transient error aborted the task, so a correctly-
+           configured peer can pick it up without waiting for the
+           lease to lapse (default 30 min). `reason` is logged server-
+           side; idempotent on a re-call."""
+        self._request("POST", f"/v1/claims/{claim_id}/release",
+                      json={"reason": reason}).raise_for_status()
+
     # The claim payload now carries everything a task needs — the patchset,
     # the patch messages, any training comments, and the compiled methodology
     # — so the previous side-fetch endpoints (get_blob / get_source_review /

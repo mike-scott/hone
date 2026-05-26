@@ -193,6 +193,108 @@ def test_retry_after_is_honoured_over_the_jittered_backoff(monkeypatch):
     assert slept == [5.0]                           # the exact Retry-After
 
 
+# --- run_once: release-claim on a non-transient task abort ---------------
+
+def test_run_once_releases_the_claim_on_a_non_transient_failure(monkeypatch):
+    """When tasks.dispatch raises a non-transient exception (a config-
+       fatal CallClaudeAuthError, for instance), run_once calls
+       client.release_claim with the failure summary BEFORE letting
+       the exception propagate. This is the whole user-visible point:
+       a correctly-configured peer can claim the work immediately
+       instead of waiting (default 30 min) for the lease to lapse."""
+    from node.ai import CallClaudeAuthError
+
+    class _StubClient:
+        def __init__(self):
+            self.released = []
+
+        def claim(self):
+            return {"claim_id": "c1", "task_type": "prepare"}
+
+        def release_claim(self, claim_id, reason):
+            self.released.append((claim_id, reason))
+
+        def submit_result(self, *args, **kw):
+            raise AssertionError("submit_result must not be called on abort")
+
+    def boom(cfg, client, claim):
+        raise CallClaudeAuthError("Claude rejected the API key (HTTP 401).")
+
+    monkeypatch.setattr(runner.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(runner.tasks, "dispatch", boom)
+
+    cli = _StubClient()
+    with pytest.raises(CallClaudeAuthError):
+        runner.run_once(_Cfg, cli)
+    assert len(cli.released) == 1
+    claim_id, reason = cli.released[0]
+    assert claim_id == "c1"
+    assert "CallClaudeAuthError" in reason       # type prefix
+    assert "Claude rejected the API key" in reason
+
+
+def test_run_once_propagates_original_exception_even_if_release_fails(
+        monkeypatch):
+    """A failed release falls back to lease expiry — the original
+       task exception still propagates so main() does its clean exit.
+       Operator UX: a release-call network blip can't mask the actual
+       root cause."""
+    from node.ai import CallClaudeAuthError
+
+    class _StubClient:
+        def claim(self):
+            return {"claim_id": "c1", "task_type": "prepare"}
+
+        def release_claim(self, claim_id, reason):
+            # The release-call wrapped backoff classifies this as
+            # non-transient too, so it propagates and is swallowed
+            # by run_once's inner try/except.
+            raise RuntimeError("release-call exploded")
+
+        def submit_result(self, *args, **kw):
+            raise AssertionError("submit_result must not be called on abort")
+
+    def boom(cfg, client, claim):
+        raise CallClaudeAuthError("Claude rejected the API key (HTTP 401).")
+
+    monkeypatch.setattr(runner.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(runner.tasks, "dispatch", boom)
+    cli = _StubClient()
+    # The ORIGINAL exception still surfaces, not the release one.
+    with pytest.raises(CallClaudeAuthError):
+        runner.run_once(_Cfg, cli)
+
+
+def test_run_once_does_not_release_on_a_successful_task(monkeypatch):
+    """The happy path: dispatch succeeds, submit_result lands the
+       record, release_claim is NOT called. (Releasing a completed
+       claim would be a contract violation — the claim is terminal
+       at submission, not back in the pool.)"""
+
+    class _StubClient:
+        def __init__(self):
+            self.released_calls = 0
+            self.submitted = []
+
+        def claim(self):
+            return {"claim_id": "c1", "task_type": "prepare"}
+
+        def release_claim(self, claim_id, reason):
+            self.released_calls += 1
+
+        def submit_result(self, claim_id, record):
+            self.submitted.append((claim_id, record))
+
+    monkeypatch.setattr(runner.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(runner.tasks, "dispatch",
+                         lambda cfg, c, claim: {"outcome": "prepared"})
+
+    cli = _StubClient()
+    assert runner.run_once(_Cfg, cli) is True
+    assert cli.released_calls == 0
+    assert cli.submitted == [("c1", {"outcome": "prepared"})]
+
+
 # --- fatal config error surface ------------------------------------------
 
 def test_fatal_config_error_logs_one_line_and_exits(caplog):

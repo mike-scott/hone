@@ -30,12 +30,15 @@ CLI:
 """
 import hashlib
 import json
+import logging
 import os
 import secrets
 import sqlite3
 import sys
 import time
 import uuid
+
+log = logging.getLogger("hone.core_db")
 
 # The database file: $HONE_DB when set (containerized hone-core), else the
 # repo-root hone.db. core/ is one level below the repo root.
@@ -1397,6 +1400,41 @@ def submit_work_result(db, claim_id, *, state, record):
         "UPDATE work_items SET state=?, record=?, completed_at=? "
         "WHERE claim_id=?",
         (state, json.dumps(record), int(time.time()), claim_id))
+    db.commit()
+    return "ok"
+
+
+def release_claim(db, claim_id, *, reason=None):
+    """Release a claim back to the CLAIMABLE pool — same effect as
+       waiting for the lease to lapse, but immediate. The row's state
+       flips CLAIMED → CLAIMABLE and every claim-time field is
+       cleared (claim_id, claimed_by, claimed_at, lease_expires,
+       heartbeat_at, methodology_version) so the next claimer sees
+       a fresh row.
+
+       Used by a hone-node that hit a configuration-fatal error
+       mid-task (Claude API key rejected, model not found, …) and is
+       about to exit — releasing fast lets a correctly-configured
+       peer pick up the work without burning the lease window.
+
+       Returns 'ok' on a successful release, 'ok' on a no-op re-call
+       against an already-terminal or already-released claim
+       (idempotent), or 'lapsed' when the claim_id was unknown
+       (reclaimed by lease expiry, or never issued)."""
+    row = db.execute("SELECT state FROM work_items WHERE claim_id=?",
+                     (claim_id,)).fetchone()
+    if row is None:
+        return "lapsed"
+    if row["state"] != WORK_ITEM_STATE_CLAIMED:
+        return "ok"                              # already terminal / released
+    log.info("release_claim: %s%s", claim_id,
+             f" — {reason}" if reason else "")
+    db.execute(
+        "UPDATE work_items SET state=?, claim_id=NULL, claimed_by=NULL, "
+        "claimed_at=NULL, lease_expires=NULL, heartbeat_at=NULL, "
+        "methodology_version=NULL "
+        "WHERE claim_id=?",
+        (WORK_ITEM_STATE_CLAIMABLE, claim_id))
     db.commit()
     return "ok"
 
