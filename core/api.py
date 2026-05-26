@@ -507,7 +507,14 @@ def claim_task(request: Request, node: dict = Depends(require_node)):
        per-task evidence travel in the response, so the node makes one HTTP
        call per task."""
     db = request.app.state.db
-    worker_id = str(node["id"])
+    # The worker label written into work_items.claimed_by. We use the
+    # node's name (the human handle the operator gave it via
+    # HONE_NODE_NAME); falling back to the numeric id only for
+    # nameless nodes. The hone-node side already self-identifies by
+    # name in the completion record's `worker_id` field — this keeps
+    # both sides of the wire in agreement and gives the operator a
+    # readable Worker column on the queue page instead of bare ids.
+    worker_id = node.get("name") or str(node["id"])
     active = core_db.active_methodology(db)
     if active is None:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,

@@ -154,6 +154,48 @@ def test_claim_stamps_methodology_version_on_the_work_items_row(ctx):
     assert row["methodology_version"] == 1            # the only active version
 
 
+def test_claim_writes_the_node_name_into_claimed_by(ctx):
+    """work_items.claimed_by stores the node's human-readable name
+       (the operator-facing label shown in the Worker column on the
+       queue page) — not the numeric nodes.id. A node without a
+       self-identified name falls back to str(node.id)."""
+    core_db.upsert_patchset(ctx.db, "<r1@x>", subject="[PATCH 1/1] x",
+                             n_patches=1)
+    core_db.upsert_message(ctx.db, "<p1@x>", root_message_id="<r1@x>",
+                           type=core_db.MSG_TYPE_PATCH, body="diff",
+                           part_index=1)
+    core_db.maybe_enqueue_prepare(ctx.db, "<r1@x>")
+    # Give the fixture's authenticated node a name and re-issue a claim.
+    ctx.node["name"] = "builder-7"
+    r = ctx.http.post("/v1/claims", headers=HEADERS)
+    assert r.status_code == 200
+    row = ctx.db.execute(
+        "SELECT claimed_by FROM work_items WHERE claim_id=?",
+        (r.json()["claim_id"],)).fetchone()
+    assert row["claimed_by"] == "builder-7"
+
+
+def test_claim_falls_back_to_node_id_when_unnamed(ctx):
+    """If a node hasn't self-identified (no HONE_NODE_NAME), the
+       numeric id is the only stable handle — claimed_by gets
+       str(node.id) so the row still has SOMETHING in the Worker
+       column."""
+    core_db.upsert_patchset(ctx.db, "<r2@x>", subject="[PATCH 1/1] y",
+                             n_patches=1)
+    core_db.upsert_message(ctx.db, "<p2@x>", root_message_id="<r2@x>",
+                           type=core_db.MSG_TYPE_PATCH, body="diff",
+                           part_index=1)
+    core_db.maybe_enqueue_prepare(ctx.db, "<r2@x>")
+    # Fixture node has no "name" key — exercises the fallback.
+    ctx.node.pop("name", None)
+    r = ctx.http.post("/v1/claims", headers=HEADERS)
+    assert r.status_code == 200
+    row = ctx.db.execute(
+        "SELECT claimed_by FROM work_items WHERE claim_id=?",
+        (r.json()["claim_id"],)).fetchone()
+    assert row["claimed_by"] == "1"           # the fixture's node id
+
+
 def test_claim_serves_a_review_task_with_full_core_and_patchset_metadata(ctx):
     """A review claim payload carries the patchset_metadata produced by
        prepare and gets the full `core` block (not narrowed)."""
