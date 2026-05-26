@@ -570,14 +570,9 @@ _PREPARE_METADATA_FIELDS = ("tree_state", "subsystem", "patch_size",
                             "preparation_notes")
 
 
-def _worker_node_id(record):
-    """The numeric node id from a record's `worker_id`, or None."""
-    wid = record.get("worker_id")
-    return int(wid) if wid and str(wid).isdigit() else None
-
-
-@router.post("/claims/{claim_id}/result", dependencies=[Depends(require_node)])
-def submit_result(claim_id: str, request: Request, body: dict):
+@router.post("/claims/{claim_id}/result")
+def submit_result(claim_id: str, request: Request, body: dict,
+                  node: dict = Depends(require_node)):
     """Submit a completion record. The body IS the completion record (see
        common/schema/completion-record.schema.yaml); the record's `task_type`
        selects the branch (prepare / review / train / draft). Idempotent on
@@ -626,6 +621,9 @@ def submit_result(claim_id: str, request: Request, body: dict):
             # only when the operator launches a session that includes this
             # patchset.
             elif task_type == "review" and outcome == "reviewed":
+                # node_id is the authenticated node from the bearer
+                # token — NOT parsed from record["worker_id"] (which is
+                # the node's human-readable name, not a numeric id).
                 core_db.upsert_ai_review(
                     db, root,
                     concerns=record.get("concerns", []),
@@ -633,7 +631,7 @@ def submit_result(claim_id: str, request: Request, body: dict):
                     input_tokens=usage.get("input_tokens"),
                     output_tokens=usage.get("output_tokens"),
                     methodology_version=mv,
-                    node_id=_worker_node_id(record),
+                    node_id=node["id"],
                     meta=record.get("meta"))
             # On a successful train, advance the candidate's pooled
             # counters and severity_witness histograms from the record's

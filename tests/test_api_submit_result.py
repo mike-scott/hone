@@ -113,10 +113,12 @@ def test_valid_review_result_writes_ai_review(client):
     """A reviewed outcome captures the concerns into ai_reviews. There is
        NO train enqueue (trains are session-driven now). The
        methodology_version stamped on the work_items row flows through to
-       the ai_reviews write — not from the record."""
+       the ai_reviews write — not from the record. The audit-link
+       node_id is the authenticated node from the bearer token, not
+       a parse of the record's worker_id (which is the node name)."""
     r = client.http.post(
         "/v1/claims/c1/result",
-        json={"task_type": "review", "worker_id": "1",
+        json={"task_type": "review", "worker_id": "builder-7",
               "outcome": "reviewed", "concerns": [CONCERN],
               "self_review_record": {"summary": "no challenges arose",
                                      "challenges": []},
@@ -129,6 +131,10 @@ def test_valid_review_result_writes_ai_review(client):
     assert concerns == [CONCERN]
     # Version is read off the work_items row (FAKE_MV), not the record.
     assert kw["methodology_version"] == FAKE_MV
+    # The audit link is the authenticated node's id (the fixture's
+    # fake node is id=1), NOT an int() of the record's worker_id
+    # which is the name "builder-7" and could never parse cleanly.
+    assert kw["node_id"] == 1
 
 
 def test_review_unappliable_does_not_write_ai_review(client):
