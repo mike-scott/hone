@@ -91,7 +91,12 @@
   <tbody>
   {% for c in claims %}
     <tr>
-      <td><span class="badge {{ c.type_badge }}">{{ c.type }}</span></td>
+      <td>
+        <a href="{{ c.work_item_url }}"
+           class="link-body-emphasis text-decoration-none">
+          <span class="badge {{ c.type_badge }}">{{ c.type }}</span>
+        </a>
+      </td>
       <td><span class="badge {{ c.state_badge }}">{{ c.state }}</span></td>
       <td>
         <a href="{{ c.patchset_url }}"

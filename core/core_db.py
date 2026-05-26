@@ -1598,6 +1598,23 @@ def ai_reviews_for_node(db, node_id, *, limit=50):
     return out
 
 
+def get_work_item(db, work_item_id):
+    """A single work_items row by id, with the JSON `record` column
+       decoded. Returns None on unknown id. Used by the per-work-item
+       detail page in the operator UI."""
+    row = db.execute(
+        "SELECT * FROM work_items WHERE id=?", (work_item_id,)).fetchone()
+    if row is None:
+        return None
+    d = dict(row)
+    if d.get("record"):
+        try:
+            d["record"] = json.loads(d["record"])
+        except (ValueError, TypeError):
+            d["record"] = None
+    return d
+
+
 def work_items_for_patchset(db, root_message_id):
     """Every work-item attached to a patchset, oldest-enqueued first — the
        queue history a per-patchset detail page renders."""

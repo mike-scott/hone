@@ -1,0 +1,155 @@
+{% extends "base.html" %}
+{% block title %}work-item {{ id }} · hone-core{% endblock %}
+{% block content %}
+
+{# Back link — opener passes `?back=<their-url>` so the operator
+   returns exactly where they came from. Same shared pattern as the
+   patchset and node detail pages. #}
+<a href="{{ back_url }}" class="btn btn-link p-0 mb-3">
+  <i class="bi bi-arrow-left"></i> Back
+</a>
+
+<h1 class="h4 mb-1">
+  <span class="badge {{ type_badge }} me-1">{{ type }}</span>
+  <span class="badge {{ state_badge }} me-2">{{ state }}</span>
+  work-item <code>{{ id }}</code>
+</h1>
+<div class="text-muted small mb-3">
+  for patchset
+  <a href="{{ patchset_url }}"
+     class="link-body-emphasis text-decoration-none">
+    {{ patchset_subject }}
+  </a>
+  <span class="text-muted">— <code>{{ root_message_id }}</code></span>
+</div>
+
+<div class="row g-3 mb-4">
+  <div class="col-md-6">
+    <div class="card h-100">
+      <div class="card-header py-2"><strong>Lifecycle</strong></div>
+      <div class="card-body py-2">
+        <dl class="row mb-0 small">
+          <dt class="col-sm-5">Enqueued</dt>
+          <dd class="col-sm-7">{{ enqueued_at_display }}</dd>
+          <dt class="col-sm-5">Claim id</dt>
+          <dd class="col-sm-7">
+            {% if work_item.claim_id %}<code>{{ work_item.claim_id }}</code>
+            {% else %}—{% endif %}
+          </dd>
+          <dt class="col-sm-5">Worker</dt>
+          <dd class="col-sm-7">
+            {% if claiming_node %}
+              <a href="{{ node_url }}" class="link-body-emphasis">
+                {{ claiming_node.name or "id " ~ claiming_node.id }}
+              </a>
+            {% elif work_item.claimed_by %}
+              <code>{{ work_item.claimed_by }}</code>
+              <span class="text-muted">(node row not resolvable)</span>
+            {% else %}—{% endif %}
+          </dd>
+          <dt class="col-sm-5">Claimed</dt>
+          <dd class="col-sm-7">{{ claimed_at_display }}</dd>
+          <dt class="col-sm-5">Lease expires</dt>
+          <dd class="col-sm-7">{{ lease_expires_display }}</dd>
+          <dt class="col-sm-5">Last heartbeat</dt>
+          <dd class="col-sm-7">{{ heartbeat_at_display }}</dd>
+          <dt class="col-sm-5">Completed</dt>
+          <dd class="col-sm-7">{{ completed_at_display }}</dd>
+          <dt class="col-sm-5">Methodology v</dt>
+          <dd class="col-sm-7">
+            {{ work_item.methodology_version or "—" }}
+          </dd>
+        </dl>
+      </div>
+    </div>
+  </div>
+
+  {% if work_item.training_session_id %}
+  <div class="col-md-6">
+    <div class="card h-100">
+      <div class="card-header py-2"><strong>Training session</strong></div>
+      <div class="card-body py-2">
+        <dl class="row mb-0 small">
+          <dt class="col-sm-5">Session id</dt>
+          <dd class="col-sm-7"><code>{{ work_item.training_session_id }}</code></dd>
+          <dt class="col-sm-5">Role</dt>
+          <dd class="col-sm-7">{{ work_item.session_role or "—" }}</dd>
+          <dt class="col-sm-5">Stratum</dt>
+          <dd class="col-sm-7">{{ work_item.stratum_label or "—" }}</dd>
+          <dt class="col-sm-5">Patch</dt>
+          <dd class="col-sm-7">
+            {% if work_item.message_id %}<code>{{ work_item.message_id }}</code>
+            {% else %}—{% endif %}
+          </dd>
+          <dt class="col-sm-5">Comment</dt>
+          <dd class="col-sm-7">
+            {% if work_item.comment_message_id %}
+              <code>{{ work_item.comment_message_id }}</code>
+            {% else %}—{% endif %}
+          </dd>
+        </dl>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+</div>
+
+<h2 class="h5 mt-4">Completion record</h2>
+{% if record %}
+<dl class="row small mb-3">
+  <dt class="col-sm-2">Outcome</dt>
+  <dd class="col-sm-10">
+    <code>{{ record.outcome or "—" }}</code>
+  </dd>
+  {% if record.reason %}
+  <dt class="col-sm-2">Reason</dt>
+  <dd class="col-sm-10 text-warning">{{ record.reason }}</dd>
+  {% endif %}
+  {% if record.model %}
+  <dt class="col-sm-2">Model</dt>
+  <dd class="col-sm-10"><code>{{ record.model }}</code></dd>
+  {% endif %}
+  {% if record.usage %}
+  <dt class="col-sm-2">Usage</dt>
+  <dd class="col-sm-10 small">
+    in=<code>{{ record.usage.input_tokens }}</code>
+    out=<code>{{ record.usage.output_tokens }}</code>
+    duration=<code>{{ record.usage.duration_ms }} ms</code>
+  </dd>
+  {% endif %}
+</dl>
+
+{% if meta_schema_error %}
+<div class="alert alert-warning small">
+  <strong>hone-core schema rejection:</strong>
+  <pre class="mb-0 mt-1" style="white-space: pre-wrap;">{{ meta_schema_error }}</pre>
+</div>
+{% endif %}
+
+{% if meta_raw_response %}
+<details class="mb-3">
+  <summary>
+    Raw response from Claude
+    {% if meta_raw_truncated %}
+    <span class="text-muted">(truncated)</span>
+    {% endif %}
+  </summary>
+  <pre class="small bg-body-tertiary p-2 rounded mt-2"
+       style="max-height: 30rem; overflow: auto;">{{ meta_raw_response }}</pre>
+</details>
+{% endif %}
+
+<details>
+  <summary>Full JSON record</summary>
+  <pre class="small bg-body-tertiary p-2 rounded mt-2"
+       style="max-height: 40rem; overflow: auto;">{{ record_json }}</pre>
+</details>
+{% else %}
+<p class="text-muted small">
+  No completion record yet — this work-item hasn't been submitted by a
+  node. Either it's still claimable / claimed and the worker is still
+  running, or the lease expired before a result came back.
+</p>
+{% endif %}
+
+{% endblock %}

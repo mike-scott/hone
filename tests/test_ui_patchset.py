@@ -185,20 +185,17 @@ def test_ai_review_skips_attribution_when_node_id_is_null(ctx):
 
 # --- queue row → detail wiring --------------------------------------------
 
-def test_queue_row_links_to_detail_with_back_to_current_view(ctx):
-    """Each queue row's subject is a real `<a>` linking to /patchsets/{root}
-       with the queue's current filter / page state encoded in `?back=`,
-       so the detail page's ← Back returns the operator to this exact view."""
+def test_queue_row_links_to_the_work_item_detail_page(ctx):
+    """Each queue row links to /work-items/{id} (the queue is a list
+       of work-items — clicking a row should drill into the work-item,
+       not the patchset). The current queue URL is carried in ?back=
+       so the work-item detail's ← Back returns to this exact view."""
     _plant_patchset(ctx.db)
-    core_db.enqueue_review(ctx.db, "<r1@x>")
+    work_item_id = core_db.enqueue_review(ctx.db, "<r1@x>")
     r = ctx.client.get("/?type=review&state=claimable")
     assert r.status_code == 200
     body = r.text
-    # The row's <a> points to the detail page for this root,
-    # carrying the queue's current filter URL as ?back=
-    expected_detail = (f'/patchsets/{quote("r1@x")}'
+    expected_detail = (f'/work-items/{work_item_id}'
                        f'?back={quote("/?type=review&state=claimable", safe="")}')
     assert expected_detail in body
-    # And the same URL is exposed as `data-href` on the row so the JS
-    # row-click handler can navigate without re-encoding anything.
     assert f'data-href="{expected_detail}"' in body

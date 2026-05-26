@@ -154,8 +154,11 @@ def _queue_view(db, type, state, page, size):
             "state_badge":    _STATE_BADGE.get(state_name, "text-bg-light"),
             "subject":        w["subject"] or w["root_message_id"],
             "message_id":     w["message_id"],
-            "detail_url":     f"/patchsets/{quote(w['root_message_id'])}"
-                              + back_qs,
+            # Queue rows drill into the per-work-item detail page —
+            # the queue is a list of work-items, so one click goes to
+            # the work-item, not the patchset. The patchset is one
+            # further click from inside the work-item header.
+            "detail_url":     f"/work-items/{w['id']}{back_qs}",
             "claimed_by":     w["claimed_by"],
             "enqueued_display": _when(w["enqueued_at"]),
         })
@@ -316,6 +319,7 @@ def _patchset_view(db, root):
             "body":         m["body"] or "",
         })
 
+    work_item_back_qs = "?back=" + quote(f"/patchsets/{root}", safe="")
     work_items = []
     for w in core_db.work_items_for_patchset(db, root):
         type_name  = core_db.WORK_ITEM_TYPE_NAMES.get(w["type"], "?")
@@ -334,6 +338,7 @@ def _patchset_view(db, root):
             "message_id":    w["message_id"],
             "session_role":  w["session_role"],
             "stratum_label": w["stratum_label"],
+            "detail_url":    f"/work-items/{w['id']}{work_item_back_qs}",
         })
 
     return {
@@ -466,6 +471,7 @@ def _node_detail_view(db, node_id):
     node["health_display"]     = _health_display(node.get("health"))
     node["health_at_display"]  = _when(node.get("health_at"))
 
+    node_back_qs = f"?back={quote(f'/nodes/{node_id}', safe='')}"
     claims = []
     for w in core_db.work_items_for_node(db, _node_claimed_by_label(node)):
         type_name  = _WORK_TYPE_DISPLAY.get(w["type"], "?")
@@ -481,8 +487,9 @@ def _node_detail_view(db, node_id):
             "root_message_id":  w["root_message_id"],
             "claimed_display":   _when(w["claimed_at"]),
             "completed_display": _when(w["completed_at"]),
+            "work_item_url":    f"/work-items/{w['id']}{node_back_qs}",
             "patchset_url":     f"/patchsets/{quote(w['root_message_id'])}"
-                                + f"?back={quote(f'/nodes/{node_id}', safe='')}",
+                                + node_back_qs,
         })
 
     reviews = []
@@ -516,6 +523,92 @@ async def node_detail(request: Request, node_id: int,
     ctx = _node_detail_view(request.app.state.db, node_id)
     ctx["back_url"] = _safe_back(back) if back else "/nodes"
     return templates.TemplateResponse(request, "node_detail.html", ctx)
+
+
+# --- per-work-item detail ------------------------------------------------
+
+def _work_item_view(db, work_item_id):
+    """Build the per-work-item detail render context. Raises 404 on
+       an unknown id. Resolves the patchset (subject) and the claiming
+       node (if claimed_by names a current node) so the template can
+       render cross-links — same `?back=` round-trip the patchset and
+       node detail pages use."""
+    w = core_db.get_work_item(db, work_item_id)
+    if w is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND,
+                            f"no work-item with id {work_item_id}")
+    type_name  = core_db.WORK_ITEM_TYPE_NAMES.get(w["type"], "?")
+    state_name = core_db.WORK_ITEM_STATE_NAMES.get(w["state"], "?")
+
+    patchset = core_db.get_patchset(db, w["root_message_id"])
+    patchset_subject = patchset["subject"] if patchset else w["root_message_id"]
+
+    # claimed_by is the human label (node name when set, str(id) otherwise);
+    # try to resolve back to a node row so the template can link. Falls
+    # through to None for an unnamed-id label, a deleted node, or
+    # null claimed_by.
+    claiming_node = None
+    if w.get("claimed_by"):
+        row = db.execute(
+            "SELECT id, name, state FROM nodes WHERE name=? OR id=?",
+            (w["claimed_by"],
+             int(w["claimed_by"]) if w["claimed_by"].isdigit() else -1)
+        ).fetchone()
+        if row is not None:
+            claiming_node = dict(row)
+
+    record = w.get("record") or {}
+    # The interesting `meta.*` fields surfaced explicitly in the
+    # template so an operator scanning a failed record doesn't have
+    # to expand the collapsible JSON to see the schema reason or
+    # raw response text.
+    meta = (record.get("meta") or {}) if isinstance(record, dict) else {}
+
+    # URL-encoded back-link for cross-links into other detail pages
+    # (patchset, node). Threaded once into the context so the template
+    # doesn't have to know about quote() escaping.
+    self_back_qs = "?back=" + quote(f"/work-items/{w['id']}", safe="")
+    patchset_url = (f"/patchsets/{quote(w['root_message_id'])}"
+                    + self_back_qs)
+    node_url = (f"/nodes/{claiming_node['id']}{self_back_qs}"
+                if claiming_node else None)
+
+    return {
+        "work_item":         w,
+        "id":                w["id"],
+        "type":              type_name,
+        "type_badge":        _TYPE_BADGE.get(type_name, "text-bg-light"),
+        "state":             state_name,
+        "state_badge":       _STATE_BADGE.get(state_name, "text-bg-light"),
+        "root_message_id":   w["root_message_id"],
+        "patchset_subject":  patchset_subject,
+        "patchset_url":      patchset_url,
+        "node_url":          node_url,
+        "claiming_node":     claiming_node,
+        "claimed_at_display":   _when(w["claimed_at"]),
+        "completed_at_display": _when(w["completed_at"]),
+        "enqueued_at_display":  _when(w["enqueued_at"]),
+        "lease_expires_display": _when(w["lease_expires"]),
+        "heartbeat_at_display": _when(w["heartbeat_at"]),
+        "record":            record if isinstance(record, dict) else None,
+        "record_json":       json.dumps(record, indent=2)
+                              if isinstance(record, dict) else None,
+        "meta_schema_error":  meta.get("schema_error"),
+        "meta_raw_response":  meta.get("raw_response"),
+        "meta_raw_truncated": meta.get("raw_response_truncated"),
+    }
+
+
+@router.get("/work-items/{work_item_id:int}", response_class=HTMLResponse)
+async def work_item_detail(request: Request, work_item_id: int,
+                            back: str | None = None):
+    """The per-work-item detail page — every queue / patchset-history /
+       node-claims table links here. `?back=` carries the opener's
+       URL so the operator returns where they were; same-origin
+       paths only via _safe_back, default `/`."""
+    ctx = _work_item_view(request.app.state.db, work_item_id)
+    ctx["back_url"] = _safe_back(back) if back else "/"
+    return templates.TemplateResponse(request, "work_item.html", ctx)
 
 
 @router.get("/enroll", response_class=HTMLResponse)

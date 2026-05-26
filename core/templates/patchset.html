@@ -144,15 +144,20 @@
 
 <h2 class="h5 mt-4">Work-item history</h2>
 {% if work_items %}
-<table class="table table-sm align-middle">
+<table class="table table-sm table-hover align-middle" id="work-item-history">
   <thead>
     <tr><th>Type</th><th>Work state</th><th>Worker</th><th>Enqueued</th>
         <th>Claimed</th><th>Completed</th><th>Methodology v</th></tr>
   </thead>
   <tbody>
   {% for w in work_items %}
-    <tr>
-      <td><span class="badge {{ w.type_badge }}">{{ w.type }}</span></td>
+    <tr data-href="{{ w.detail_url }}" style="cursor: pointer;">
+      <td>
+        <a href="{{ w.detail_url }}"
+           class="link-body-emphasis text-decoration-none">
+          <span class="badge {{ w.type_badge }}">{{ w.type }}</span>
+        </a>
+      </td>
       <td><span class="badge {{ w.state_badge }}">{{ w.state }}</span></td>
       <td>{{ w.claimed_by or "—" }}</td>
       <td class="text-nowrap small">{{ w.enqueued_display }}</td>
@@ -163,6 +168,22 @@
   {% endfor %}
   </tbody>
 </table>
+<script>
+  // Delegated row-click → work-item detail. Same pattern as the
+  // queue and node listings — Name/Type cell is an anchor for
+  // keyboard nav, JS handler covers the rest of the row.
+  (function () {
+    var body = document.getElementById("work-item-history");
+    if (!body) return;
+    body.addEventListener("click", function (e) {
+      var row = e.target.closest("tr[data-href]");
+      if (!row) return;
+      if (e.target.closest("a, button, input, select, textarea, label"))
+        return;
+      window.location = row.dataset.href;
+    });
+  })();
+</script>
 {% else %}
 <p class="text-muted small">No work items have been enqueued for this patchset.</p>
 {% endif %}
