@@ -1,0 +1,74 @@
+{# Lore-clone status panel — included by settings.html and polled standalone
+   via `hx-get` every 5 s while a clone is in flight. The outermost div is
+   the swap target; its id stays stable across phases. #}
+<div id="lore-clone-panel"
+     {% if lore_clone.phase == "cloning" %}
+       hx-get="/settings/lore-clone-status"
+       hx-trigger="every 5s"
+       hx-swap="outerHTML"
+     {% endif %}>
+
+  <h2 class="h5 mt-5">Lore archive</h2>
+
+  {% if lore_clone.phase == "ready" %}
+    <div class="alert alert-success" style="max-width: 40rem">
+      <i class="bi bi-check-circle me-1"></i>
+      <strong>Ready</strong> — <code>{{ lore_clone.archive_path }}</code>
+      {% if lore_clone.elapsed_display %}
+      <span class="text-muted small ms-2">
+        (cloned in {{ lore_clone.elapsed_display }})
+      </span>
+      {% endif %}
+    </div>
+
+  {% elif lore_clone.phase == "cloning" %}
+    <div class="alert alert-info" style="max-width: 40rem">
+      <div class="d-flex justify-content-between mb-2">
+        <span>
+          <i class="bi bi-hourglass-split me-1"></i>
+          <strong>Cloning</strong>
+          {% if lore_clone.elapsed_display %}
+          <span class="text-muted small ms-1">
+            — {{ lore_clone.elapsed_display }} elapsed
+          </span>
+          {% endif %}
+        </span>
+        <span class="text-muted small">{{ lore_clone.percent }}%</span>
+      </div>
+      <div class="progress" style="height: 0.5rem">
+        <div class="progress-bar progress-bar-striped progress-bar-animated"
+             role="progressbar"
+             style="width: {{ lore_clone.percent }}%"
+             aria-valuenow="{{ lore_clone.percent }}"
+             aria-valuemin="0" aria-valuemax="100"></div>
+      </div>
+      {% if lore_clone.last_line %}
+      <div class="text-muted small mt-2">
+        <code>{{ lore_clone.last_line }}</code>
+      </div>
+      {% endif %}
+    </div>
+
+  {% elif lore_clone.phase == "error" %}
+    <div class="alert alert-danger" style="max-width: 40rem">
+      <i class="bi bi-exclamation-triangle me-1"></i>
+      <strong>Clone failed</strong>
+      <div class="small mt-1"><code>{{ lore_clone.error }}</code></div>
+      <div class="text-muted small mt-2">{{ lore_clone.help }}</div>
+    </div>
+
+  {% else %} {# absent #}
+    <div class="alert alert-warning" style="max-width: 40rem">
+      <i class="bi bi-exclamation-circle me-1"></i>
+      <strong>Not present</strong> — lore gather is paused until the archive
+      is provisioned.
+      <div class="text-muted small mt-2">
+        {{ lore_clone.help }}
+        {% if lore_clone.autoclone_enabled %}
+        <br><em>HONE_LORE_AUTOCLONE is set</em> — autoclone should already
+        be running; check <code>docker logs</code>.
+        {% endif %}
+      </div>
+    </div>
+  {% endif %}
+</div>

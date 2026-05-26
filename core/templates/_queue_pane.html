@@ -1,0 +1,40 @@
+{# The polling-aware wrapper around the work-queue chips + body. Every 5
+   seconds HTMX re-fetches `this_url` (the current filter + page + size)
+   and outerHTML-swaps the entire pane, so:
+     - newly-enqueued / state-changed work items appear without a reload,
+     - the type / state chip counts refresh in lockstep with the body,
+     - the wrapper's own `hx-get` is replaced too, so pagination and
+       chip clicks (which also target #queue-pane) leave behind a fresh
+       polling URL.
+   `hx-swap="outerHTML"` is what keeps this loop self-sustaining; with
+   `innerHTML` the wrapper's attributes wouldn't refresh and the URL
+   would drift after a pagination click. #}
+<div id="queue-pane"
+     hx-get="{{ this_url }}"
+     hx-trigger="every 5s"
+     hx-target="#queue-pane"
+     hx-swap="outerHTML">
+
+  <div class="d-flex flex-wrap gap-2 mb-2">
+    <span class="text-muted small align-self-center me-2">Type:</span>
+    {% for c in type_chips %}
+    <a href="{{ c.url }}" class="btn btn-sm
+       {%- if c.active %} btn-primary{% else %} btn-outline-secondary{% endif %}">
+      {{ c.label }} <span class="badge text-bg-light ms-1">{{ c.count }}</span>
+    </a>
+    {% endfor %}
+  </div>
+
+  <div class="d-flex flex-wrap gap-2 mb-4">
+    <span class="text-muted small align-self-center me-2">Work state:</span>
+    {% for c in state_chips %}
+    <a href="{{ c.url }}" class="btn btn-sm
+       {%- if c.active %} btn-primary{% else %} btn-outline-secondary{% endif %}">
+      {{ c.label }} <span class="badge text-bg-light ms-1">{{ c.count }}</span>
+    </a>
+    {% endfor %}
+  </div>
+
+  {% include "_queue_body.html" %}
+
+</div>

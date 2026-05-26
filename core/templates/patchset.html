@@ -1,0 +1,193 @@
+{% extends "base.html" %}
+{% block title %}{{ patchset.subject or patchset.root_message_id }} · hone-core{% endblock %}
+{% block content %}
+
+{# Back link — the opener can pass `?back=<their-url>` so the operator
+   returns exactly where they left off (queue filter + page intact). The
+   anchor is rendered server-side; no JS history dance, so reload-safe
+   and bookmarkable. #}
+<a href="{{ back_url }}" class="btn btn-link p-0 mb-3">
+  <i class="bi bi-arrow-left"></i> Back
+</a>
+
+<h1 class="h4 mb-1">{{ patchset.subject or "(no subject)" }}</h1>
+<div class="text-muted small mb-3">
+  <code>{{ patchset.root_message_id }}</code>
+</div>
+
+<div class="row g-3 mb-4">
+  <div class="col-md-6">
+    <div class="card h-100">
+      <div class="card-header py-2"><strong>Patchset</strong></div>
+      <div class="card-body py-2">
+        <dl class="row mb-0 small">
+          <dt class="col-sm-4">Submitter</dt>
+          <dd class="col-sm-8">{{ patchset.submitter_email or "—" }}</dd>
+          <dt class="col-sm-4">Sent</dt>
+          <dd class="col-sm-8">{{ patchset.sent_display }}</dd>
+          <dt class="col-sm-4">Gathered</dt>
+          <dd class="col-sm-8">{{ patchset.gathered_display }}</dd>
+          <dt class="col-sm-4">Patches</dt>
+          <dd class="col-sm-8">{{ patchset.n_patches or "—" }}</dd>
+          <dt class="col-sm-4">Series version</dt>
+          <dd class="col-sm-8">v{{ patchset.series_version }}</dd>
+          <dt class="col-sm-4">Base commit</dt>
+          <dd class="col-sm-8">
+            {% if patchset.base_commit %}<code>{{ patchset.base_commit }}</code>
+            {% else %}—{% endif %}
+          </dd>
+          <dt class="col-sm-4">Change-Id</dt>
+          <dd class="col-sm-8">
+            {% if patchset.change_id %}<code>{{ patchset.change_id }}</code>
+            {% else %}—{% endif %}
+          </dd>
+          <dt class="col-sm-4">Corpus state</dt>
+          <dd class="col-sm-8">
+            <span class="badge text-bg-secondary">{{ patchset.state_display }}</span>
+            {% if patchset.skip_reason %}
+            <span class="text-muted ms-1">({{ patchset.skip_reason }})</span>
+            {% endif %}
+          </dd>
+          {% if tags %}
+          <dt class="col-sm-4">List tags</dt>
+          <dd class="col-sm-8">
+            {% for t in tags %}
+            <span class="badge text-bg-light me-1">{{ t }}</span>
+            {% endfor %}
+          </dd>
+          {% endif %}
+        </dl>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-md-6">
+    <div class="card h-100">
+      <div class="card-header py-2">
+        <strong>Prepare-derived metadata</strong>
+      </div>
+      <div class="card-body py-2">
+        {% if metadata %}
+        <dl class="row mb-0 small">
+          <dt class="col-sm-4">Mode</dt>
+          <dd class="col-sm-8">{{ metadata.mode }}</dd>
+          <dt class="col-sm-4">Methodology v</dt>
+          <dd class="col-sm-8">{{ metadata.methodology_version or "—" }}</dd>
+          {% if metadata.subsystem %}
+          <dt class="col-sm-4">Subsystem</dt>
+          <dd class="col-sm-8"><code>{{ metadata.subsystem }}</code></dd>
+          {% endif %}
+          {% if metadata.patch_size %}
+          <dt class="col-sm-4">Size</dt>
+          <dd class="col-sm-8"><code>{{ metadata.patch_size }}</code></dd>
+          {% endif %}
+          {% if metadata.patch_type %}
+          <dt class="col-sm-4">Type</dt>
+          <dd class="col-sm-8"><code>{{ metadata.patch_type }}</code></dd>
+          {% endif %}
+          {% if metadata.maintainer %}
+          <dt class="col-sm-4">Maintainer</dt>
+          <dd class="col-sm-8"><code>{{ metadata.maintainer }}</code></dd>
+          {% endif %}
+          {% if metadata.review_intensity %}
+          <dt class="col-sm-4">Review intensity</dt>
+          <dd class="col-sm-8"><code>{{ metadata.review_intensity }}</code></dd>
+          {% endif %}
+        </dl>
+        {% else %}
+        <p class="text-muted mb-0 small">
+          No prepare task has completed for this patchset yet.
+        </p>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+
+<h2 class="h5">AI review</h2>
+{% if ai_review %}
+<p class="text-muted small mb-2">
+  Reviewed {{ ai_review.reviewed_at }} ·
+  {{ ai_review.concerns|length }} concern{{ '' if ai_review.concerns|length == 1 else 's' }}
+  · model <code>{{ ai_review.model or "—" }}</code>
+</p>
+{% if ai_review.concerns %}
+<table class="table table-sm align-middle">
+  <thead>
+    <tr><th>Severity</th><th>Stage</th><th>Source</th><th>Concern</th>
+        <th>Scope</th></tr>
+  </thead>
+  <tbody>
+  {% for c in ai_review.concerns %}
+    <tr>
+      <td><span class="badge text-bg-warning">{{ c.severity }}</span></td>
+      <td><code class="small">{{ c.stage_id }}</code></td>
+      <td><code class="small">{{ c.candidate_or_check_id }}</code></td>
+      <td>{{ c.text }}</td>
+      <td class="small text-muted">
+        {{ c.patch_scope.kind if c.patch_scope else "—" }}
+        {% if c.is_preexisting %}<em>(pre-existing)</em>{% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="text-muted small">Clean review — no concerns raised.</p>
+{% endif %}
+{% else %}
+<p class="text-muted small">No AI review has been completed for this patchset.</p>
+{% endif %}
+
+<h2 class="h5 mt-4">Work-item history</h2>
+{% if work_items %}
+<table class="table table-sm align-middle">
+  <thead>
+    <tr><th>Type</th><th>Work state</th><th>Worker</th><th>Enqueued</th>
+        <th>Claimed</th><th>Completed</th><th>Methodology v</th></tr>
+  </thead>
+  <tbody>
+  {% for w in work_items %}
+    <tr>
+      <td><span class="badge {{ w.type_badge }}">{{ w.type }}</span></td>
+      <td><span class="badge {{ w.state_badge }}">{{ w.state }}</span></td>
+      <td>{{ w.claimed_by or "—" }}</td>
+      <td class="text-nowrap small">{{ w.enqueued_display }}</td>
+      <td class="text-nowrap small">{{ w.claimed_display }}</td>
+      <td class="text-nowrap small">{{ w.completed_display }}</td>
+      <td class="small">{{ w.methodology_version or "—" }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="text-muted small">No work items have been enqueued for this patchset.</p>
+{% endif %}
+
+<h2 class="h5 mt-4">Thread ({{ messages|length }})</h2>
+{% if messages %}
+<div class="list-group mb-4">
+{% for m in messages %}
+  <details class="list-group-item">
+    <summary class="d-flex flex-wrap gap-2 align-items-center">
+      <span class="badge {{ m.type_badge }}">{{ m.type }}</span>
+      {% if m.part_index is not none %}
+      <span class="text-muted small">part {{ m.part_index }}</span>
+      {% endif %}
+      <span class="flex-grow-1">{{ m.subject or "(no subject)" }}</span>
+      <span class="text-muted small">{{ m.author }}</span>
+      <span class="text-muted small">{{ m.sent_display }}</span>
+    </summary>
+    <div class="mt-2">
+      <div class="text-muted small mb-1"><code>{{ m.message_id }}</code></div>
+      <pre class="small bg-body-tertiary p-2 rounded"
+           style="max-height: 30rem; overflow: auto;">{{ m.body }}</pre>
+    </div>
+  </details>
+{% endfor %}
+</div>
+{% else %}
+<p class="text-muted small">No messages in the corpus for this patchset yet.</p>
+{% endif %}
+
+{% endblock %}

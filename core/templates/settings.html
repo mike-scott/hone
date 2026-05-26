@@ -1,0 +1,125 @@
+{% extends "base.html" %}
+{% block title %}Settings · hone-core{% endblock %}
+{% block content %}
+<h1 class="h3 mb-4">Settings</h1>
+
+{% include "_lore_clone_panel.html" %}
+
+<h2 class="h5 mt-5">Gather</h2>
+<p class="text-muted small" style="max-width: 40rem">
+  GATHER runs every <em>cadence</em> seconds (set below). Use this to fire
+  a cycle immediately on every enabled source — handy after enabling a
+  new list-tag or right after the lore archive lands. Sources already
+  mid-cycle are unaffected.
+</p>
+<form method="post" action="/settings/gather/trigger" class="mb-3">
+  <button class="btn btn-outline-primary">
+    <i class="bi bi-play-circle me-1"></i>Trigger gather now
+  </button>
+</form>
+{% if gather_triggered %}
+<div class="alert alert-success" style="max-width: 40rem">
+  GATHER triggered — every idle source will spawn within a second.
+</div>
+{% endif %}
+
+{% if saved_settings %}
+<div class="alert alert-success" style="max-width: 40rem">Settings saved.</div>
+{% endif %}
+
+<form method="post" action="/settings" style="max-width: 40rem">
+  {% for group, fields in groups %}
+  <h2 class="h5 mt-4">{{ group.replace("_", " ").title() }}</h2>
+  {% for f in fields %}
+  <div class="mb-3">
+    <label class="form-label"
+           {% if f.kind != "sources" %}for="{{ f.name }}"{% endif %}>{{ f.label }}</label>
+    {% if f.kind == "sources" %}
+      {% for opt in f.options %}
+      <div class="form-check form-switch">
+        <input class="form-check-input" type="checkbox" role="switch"
+               name="{{ f.name }}" value="{{ opt.value }}"
+               id="src-{{ opt.value }}"{% if opt.on %} checked{% endif %}>
+        <label class="form-check-label" for="src-{{ opt.value }}">{{ opt.value }}</label>
+      </div>
+      {% endfor %}
+      {% if not f.options %}
+      <p class="text-muted small mb-0">No gather modules are installed.</p>
+      {% endif %}
+      <div class="form-text">{{ f.unit }}</div>
+    {% else %}
+      <input class="form-control{% if f.error %} is-invalid{% endif %}"
+             id="{{ f.name }}" name="{{ f.name }}" value="{{ f.value }}">
+      {% if f.error %}
+      <div class="invalid-feedback">{{ f.error }}</div>
+      {% else %}
+      <div class="form-text">{{ f.unit }}</div>
+      {% endif %}
+    {% endif %}
+  </div>
+  {% endfor %}
+  {% endfor %}
+  <button class="btn btn-primary mt-2">Save</button>
+</form>
+
+<h2 class="h5 mt-5">List-tag filter</h2>
+<p class="text-muted small" style="max-width: 40rem">
+  GATHER only ingests patchsets carrying an enabled tag. With nothing enabled
+  the filter is off and everything is gathered (ARCHITECTURE.md &rarr; List-tag
+  filter).
+</p>
+
+{% if saved_tags %}
+<div class="alert alert-success" style="max-width: 40rem">Tag filter saved.</div>
+{% endif %}
+
+{% if tags %}
+<form method="post" action="/settings/tags" style="max-width: 40rem">
+  <table class="table table-sm align-middle">
+    <thead>
+      <tr><th>Enabled</th><th>Tag</th><th>Description</th><th>Origin</th></tr>
+    </thead>
+    <tbody>
+    {% for t in tags %}
+      <tr>
+        <td>
+          <div class="form-check form-switch mb-0">
+            <input class="form-check-input" type="checkbox" role="switch"
+                   name="tag" value="{{ t.tag }}"
+                   id="tag-{{ loop.index }}"
+                   {% if t.enabled %} checked{% endif %}>
+          </div>
+        </td>
+        <td><label class="mb-0" for="tag-{{ loop.index }}">
+          <code>{{ t.tag }}</code></label></td>
+        <td class="text-muted small">{{ t.description }}</td>
+        <td><span class="text-muted small">{{ t.origin }}</span></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <button class="btn btn-primary mt-2">Save tag filter</button>
+</form>
+{% else %}
+<p class="text-muted">
+  No list tags known yet — they appear after the lore manifest seeds them or
+  GATHER observes one on an ingested patchset.
+</p>
+{% endif %}
+
+<h2 class="h5 mt-5">Deployment configuration</h2>
+<p class="text-muted small">
+  Set at container start (`core/.env`); change these by redeploying
+  (ARCHITECTURE.md &rarr; Configuration &amp; the Settings page).
+</p>
+<table class="table table-sm" style="max-width: 40rem">
+  <tbody>
+  {% for label, value in deployment %}
+    <tr>
+      <th class="fw-normal text-muted" style="width: 12rem">{{ label }}</th>
+      <td><code>{{ value }}</code></td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en" data-bs-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}hone-core{% endblock %}</title>
+  <link rel="stylesheet" href="/static/bootstrap.min.css">
+  <link rel="stylesheet" href="/static/bootstrap-icons.min.css">
+  <link rel="stylesheet" href="/static/adminlte.min.css">
+  <script>
+    // Apply the saved light/dark choice before paint — no flash of the wrong
+    // theme. Falls back to the OS preference when nothing is stored.
+    (function () {
+      var t = localStorage.getItem("hone-theme")
+        || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+      document.documentElement.setAttribute("data-bs-theme", t);
+    })();
+  </script>
+</head>
+<body class="layout-fixed sidebar-expand-lg bg-body-tertiary">
+<script>
+  // Restore the sidebar collapse state from the prior page BEFORE first
+  // paint, so the layout doesn't flash from expanded to collapsed on
+  // every navigation. AdminLTE's own persistence is the source of
+  // truth (opt-in via `data-enable-persistence="true"` on .app-sidebar
+  // below); we read the same localStorage key here just so the body
+  // class is right from the first paint, before adminlte.min.js loads
+  // at the bottom of the page and applies the same state itself.
+  (function () {
+    try {
+      if (localStorage.getItem("lte.sidebar.state") === "sidebar-collapse")
+        document.body.classList.add("sidebar-collapse");
+    } catch (e) {}
+  })();
+</script>
+<div class="app-wrapper">
+
+  <nav class="app-header navbar navbar-expand bg-body">
+    <div class="container-fluid">
+      <ul class="navbar-nav">
+        <li class="nav-item">
+          <a class="nav-link" data-lte-toggle="sidebar" href="#" role="button"
+             aria-label="Toggle sidebar"><i class="bi bi-list"></i></a>
+        </li>
+      </ul>
+      <ul class="navbar-nav ms-auto">
+        <li class="nav-item">
+          <a class="nav-link" href="#" id="theme-toggle" role="button"
+             aria-label="Toggle light/dark theme"><i class="bi"></i></a>
+        </li>
+      </ul>
+    </div>
+  </nav>
+
+  <aside class="app-sidebar bg-body-secondary shadow"
+         data-enable-persistence="true">
+    <div class="sidebar-brand">
+      <a href="/" class="brand-link"><span class="brand-text fw-light">hone-core</span></a>
+    </div>
+    <div class="sidebar-wrapper">
+      <nav class="mt-2">
+        <ul class="nav sidebar-menu flex-column" role="menu">
+          <li class="nav-item">
+            <a href="/" class="nav-link">
+              <i class="nav-icon bi bi-list-task"></i><p>Queue</p></a>
+          </li>
+          <li class="nav-item">
+            <a href="/nodes" class="nav-link">
+              <i class="nav-icon bi bi-hdd-network"></i><p>Nodes</p></a>
+          </li>
+          <li class="nav-item">
+            <a href="/settings" class="nav-link">
+              <i class="nav-icon bi bi-gear"></i><p>Settings</p></a>
+          </li>
+        </ul>
+      </nav>
+    </div>
+  </aside>
+
+  <main class="app-main">
+    <div class="app-content">
+      <div class="container-fluid py-3">
+        {% block content %}{% endblock %}
+      </div>
+    </div>
+  </main>
+
+  <footer class="app-footer">
+    <div class="float-end">hone-core-{{ version }}</div>
+    <strong>hone-core</strong> &mdash; operator console
+  </footer>
+
+</div>
+<script src="/static/bootstrap.bundle.min.js"></script>
+<script src="/static/adminlte.min.js"></script>
+<script src="/static/htmx.min.js"></script>
+<script>
+  // Light/dark toggle — flip data-bs-theme, persist the choice, swap the icon.
+  (function () {
+    var btn = document.getElementById("theme-toggle");
+    var icon = btn.querySelector("i");
+    function paint() {
+      var dark = document.documentElement.getAttribute("data-bs-theme") === "dark";
+      icon.className = "bi bi-" + (dark ? "sun" : "moon-stars");
+    }
+    paint();
+    btn.addEventListener("click", function (e) {
+      e.preventDefault();
+      var next = document.documentElement.getAttribute("data-bs-theme") === "dark"
+        ? "light" : "dark";
+      document.documentElement.setAttribute("data-bs-theme", next);
+      localStorage.setItem("hone-theme", next);
+      paint();
+    });
+  })();
+
+</script>
+</body>
+</html>
