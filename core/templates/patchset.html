@@ -107,8 +107,11 @@
 <h2 class="h5">AI review</h2>
 {% if ai_review %}
 <p class="text-muted small mb-2">
-  Reviewed {{ ai_review.reviewed_at }} ·
-  {{ ai_review.concerns|length }} concern{{ '' if ai_review.concerns|length == 1 else 's' }}
+  Reviewed {{ ai_review.reviewed_display }}
+  {% if ai_review.producer_label %}
+  by <strong>{{ ai_review.producer_label }}</strong>
+  {% endif %}
+  · {{ ai_review.concerns|length }} concern{{ '' if ai_review.concerns|length == 1 else 's' }}
   · model <code>{{ ai_review.model or "—" }}</code>
 </p>
 {% if ai_review.concerns %}

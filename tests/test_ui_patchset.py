@@ -119,6 +119,70 @@ def test_patchset_detail_404_for_unknown_root(ctx):
     assert r.status_code == 404
 
 
+# --- AI review producer attribution --------------------------------------
+
+def _approved_node(db, name):
+    enr = core_db.create_enrollment(db, node_name=name)
+    return core_db.approve_enrollment(db, enr["user_code"])
+
+
+def test_ai_review_renders_the_producing_node_name(ctx):
+    """When the ai_review row's node_id resolves to a current node,
+       the detail page renders the node's name next to the review
+       summary — operator can tell at a glance which node produced
+       which review."""
+    _plant_patchset(ctx.db)
+    node_id = _approved_node(ctx.db, "builder-7")
+    core_db.upsert_ai_review(ctx.db, "<r1@x>", concerns=[],
+                              node_id=node_id, model="claude-opus-4-7")
+    body = ctx.client.get(f"/patchsets/{quote('r1@x')}").text
+    assert "by <strong>builder-7</strong>" in body
+
+
+def test_ai_review_drops_attribution_after_node_deletion(ctx):
+    """delete_node nulls out ai_reviews.node_id (the FK forces it to,
+       otherwise the DELETE would fail). The detail page therefore
+       drops the `by …` clause entirely after a delete — the review
+       row stays, the producer label goes."""
+    _plant_patchset(ctx.db)
+    node_id = _approved_node(ctx.db, "builder-7")
+    core_db.upsert_ai_review(ctx.db, "<r1@x>", concerns=[],
+                              node_id=node_id, model="m")
+    # Before delete: producer renders.
+    assert "builder-7" in ctx.client.get(f"/patchsets/{quote('r1@x')}").text
+    core_db.delete_node(ctx.db, node_id)
+    # After delete: producer line is gone, review row is intact.
+    body = ctx.client.get(f"/patchsets/{quote('r1@x')}").text
+    assert " by <strong>" not in body
+    assert "AI review" in body                       # row itself survives
+
+
+def test_ai_review_renders_revoked_node_name(ctx):
+    """A revoked node is a tombstone — the row still exists, so the FK
+       still resolves, and the review remains attributed to that
+       (now revoked) node. Operator looking at history can tell a
+       review was produced by a node they later revoked."""
+    _plant_patchset(ctx.db)
+    node_id = _approved_node(ctx.db, "builder-7")
+    core_db.upsert_ai_review(ctx.db, "<r1@x>", concerns=[],
+                              node_id=node_id, model="m")
+    core_db.revoke_node(ctx.db, node_id)
+    body = ctx.client.get(f"/patchsets/{quote('r1@x')}").text
+    assert "by <strong>builder-7</strong>" in body
+
+
+def test_ai_review_skips_attribution_when_node_id_is_null(ctx):
+    """Legacy rows from before the audit fix landed have NULL node_id.
+       The page renders the review summary without a `by …` clause —
+       no `<deleted>` noise, just the historical record."""
+    _plant_patchset(ctx.db)
+    core_db.upsert_ai_review(ctx.db, "<r1@x>", concerns=[],
+                              node_id=None, model="m")
+    body = ctx.client.get(f"/patchsets/{quote('r1@x')}").text
+    assert " by <strong>" not in body
+    assert "&lt;deleted&gt;" not in body
+
+
 # --- queue row → detail wiring --------------------------------------------
 
 def test_queue_row_links_to_detail_with_back_to_current_view(ctx):

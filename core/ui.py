@@ -278,6 +278,19 @@ def _patchset_view(db, root):
     tags = core_db.tags_for_patchset(db, root)
     metadata = core_db.get_patchset_metadata(db, root)
     ai_review = core_db.get_ai_review(db, root)
+    if ai_review is not None:
+        # Surface the producing node's human handle next to the
+        # review. The schema's FK on ai_reviews.node_id (and
+        # delete_node's null-out-first behaviour) guarantee that
+        # node_id is either NULL or resolves to an existing nodes
+        # row — no dangling-id case to handle. A revoked node still
+        # resolves; the review just gets attributed to the revoked
+        # tombstone, which is correct.
+        ai_review["reviewed_display"] = _when(ai_review["reviewed_at"])
+        node = (core_db.get_node(db, ai_review["node_id"])
+                if ai_review["node_id"] else None)
+        ai_review["producer_label"] = (
+            node.get("name") or f"id {node['id']}") if node else None
 
     messages = []
     for m in core_db.messages_for_patchset(db, root):
