@@ -13,9 +13,12 @@ the UI skeleton.
 """
 import datetime
 import json
+import logging
 import os
 import time
 from urllib.parse import quote
+
+log = logging.getLogger("hone.ui")
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -236,6 +239,12 @@ async def queue(request: Request,
     state_int = _WORK_STATE_BY_NAME.get(state)
     version = core_db.queue_version(db, type=type_int, state=state_int)
     if is_hx and request.headers.get("x-queue-version") == version:
+        # Idle poll: the operator's open page already shows the
+        # latest state. Logged at DEBUG so the per-operator,
+        # per-5s tick doesn't fill the operator's container log
+        # at the default INFO level; raise the logger to DEBUG
+        # if you want to watch the polling loop.
+        log.debug("queue poll 204 — version unchanged (%s)", version)
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     ctx = _queue_view(db, type, state, page, size)

@@ -23,6 +23,31 @@ logging.basicConfig(
 )
 log = logging.getLogger("hone.core")
 
+
+class _QuietIdlePollFilter(logging.Filter):
+    """Drop uvicorn access-log records for the queue page's idle-poll
+       204s — they fire every 5 seconds per open operator session and
+       contribute nothing to ops awareness. Real GETs (200) and any
+       other endpoint's access logs are unaffected.
+
+       uvicorn.access formats with `record.args` as
+       `(client, method, full_path, http_version, status)` — we match
+       on the structured args, not the formatted string, so a future
+       log-format change can't silently break the filter."""
+
+    def filter(self, record):
+        args = record.args
+        if not (isinstance(args, tuple) and len(args) >= 5):
+            return True
+        method, path, status_code = args[1], args[2], args[4]
+        if (method == "GET" and status_code == 204
+                and (path == "/" or path.startswith("/?"))):
+            return False
+        return True
+
+
+logging.getLogger("uvicorn.access").addFilter(_QuietIdlePollFilter())
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
 
