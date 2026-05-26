@@ -231,13 +231,35 @@ def test_prepare_handler_threads_principles_and_guidance_into_system(monkeypatch
     assert "Return raw JSON only" in user_text
 
 
+def test_prepare_handler_omits_thread_messages_from_the_user_payload(
+        monkeypatch):
+    """The thread_messages list (review comments + replies) is shipped
+       in the claim payload by hone-core but NOT forwarded to Claude
+       — keeps the prepare prompt compact and avoids burning thousands
+       of tokens on review history the current node revision doesn't
+       use authoritatively. Re-add when prepare's review-intensity
+       classification is wired against real thread data."""
+    stub, calls = _fake_call_claude(json.dumps(_STUB_PREPARE_BODY))
+    monkeypatch.setattr("node.ai.call_claude", stub)
+    claim = dict(_PREPARE_CLAIM)
+    claim["thread_messages"] = [
+        {"message_id": "c-1@x", "body": "REVIEWER-COMMENT-SHOULD-NOT-LEAK",
+         "author_email": "rev@x", "in_reply_to": "p1@x"}]
+    tasks.handle_prepare_task(_cfg(), None, claim)
+    user_text = calls[0]["user_text"]
+    assert "REVIEWER-COMMENT-SHOULD-NOT-LEAK" not in user_text
+    assert "thread_messages" not in user_text
+
+
 def test_prepare_handler_falls_back_to_uncharacterisable_on_bad_json(monkeypatch):
     """Claude is asked for raw JSON only. If it returns prose, a
        markdown-fenced incomplete blob, or otherwise un-parseable
        output, the handler returns an `uncharacterisable` record
-       carrying the parser's reason — surfacing the failure into the
-       corpus rather than crashing the node."""
-    stub, _calls = _fake_call_claude("Sorry, I couldn't characterise this.")
+       carrying the parser's reason AND Claude's raw response on
+       `meta` so the next debugging pass can inspect WHAT the model
+       actually produced rather than guessing from just the reason."""
+    raw = "Sorry, I couldn't characterise this."
+    stub, _calls = _fake_call_claude(raw)
     monkeypatch.setattr("node.ai.call_claude", stub)
     record = tasks.handle_prepare_task(_cfg(), None, _PREPARE_CLAIM)
     assert record["task_type"] == "prepare"
@@ -246,6 +268,28 @@ def test_prepare_handler_falls_back_to_uncharacterisable_on_bad_json(monkeypatch
     # The uncharacterisable shape must not carry the success-path keys.
     assert "subsystem" not in record
     assert "self_review_record" not in record
+    # Raw response stashed on meta so the next failure is debuggable
+    # directly from work_items.record in hone-core's DB.
+    assert record["meta"]["raw_response"] == raw
+    assert record["meta"]["raw_response_length"] == len(raw)
+    assert record["meta"]["raw_response_truncated"] is False
+    _validate_record(record)
+
+
+def test_prepare_handler_truncates_runaway_raw_responses(monkeypatch):
+    """A pathologically long Claude response (model spat out a novel)
+       still gets captured on the record, but truncated so
+       work_items.record doesn't bloat. The original length is
+       preserved alongside the truncated bytes so the truncation
+       point is obvious."""
+    raw = "x" * 50000          # well past the 20 KiB cap
+    stub, _calls = _fake_call_claude(raw)
+    monkeypatch.setattr("node.ai.call_claude", stub)
+    record = tasks.handle_prepare_task(_cfg(), None, _PREPARE_CLAIM)
+    assert record["outcome"] == "uncharacterisable"
+    assert record["meta"]["raw_response_length"] == 50000
+    assert record["meta"]["raw_response_truncated"] is True
+    assert len(record["meta"]["raw_response"]) < 50000
     _validate_record(record)
 
 

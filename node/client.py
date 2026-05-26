@@ -35,6 +35,21 @@ class EnrollmentError(Exception):
        a revoked node's token refresh was rejected)."""
 
 
+class SchemaRejectedError(Exception):
+    """hone-core's completion-record schema validator returned HTTP 422
+       for a result the node just submitted. Distinct from a transport
+       error or a 5xx — the record's *shape* is wrong, not the network.
+       The runner catches this and submits a fallback failure-outcome
+       record carrying both the rejected payload and the validator's
+       reason in `meta`, so the failure lands in the corpus as
+       debuggable data rather than crashing the node."""
+
+    def __init__(self, detail: str, rejected_record: dict):
+        super().__init__(detail)
+        self.detail = detail
+        self.rejected_record = rejected_record
+
+
 def _err_code(response: httpx.Response) -> str | None:
     """The `error.code` from an OAuth error body, or None."""
     try:
@@ -241,9 +256,26 @@ class HoneCoreClient:
                       f"/v1/claims/{claim_id}/heartbeat").raise_for_status()
 
     def submit_result(self, claim_id: str, record: dict) -> None:
-        """POST /v1/claims/{id}/result — idempotent on claim_id."""
-        self._request("POST", f"/v1/claims/{claim_id}/result",
-                      json=record).raise_for_status()
+        """POST /v1/claims/{id}/result — idempotent on claim_id.
+
+           Raises SchemaRejectedError on HTTP 422 (hone-core's schema
+           validator rejected the record's shape) so the runner can
+           submit a fallback `uncharacterisable`/`unappliable`/`failed`
+           record carrying the original payload + validator's reason
+           in `meta`, instead of crashing on the bare httpx
+           HTTPStatusError. Other non-2xx responses still surface
+           via raise_for_status."""
+        r = self._request("POST", f"/v1/claims/{claim_id}/result",
+                           json=record)
+        if r.status_code == 422:
+            detail = ""
+            try:
+                detail = (r.json() or {}).get("detail", "") or ""
+            except ValueError:
+                pass
+            raise SchemaRejectedError(
+                detail or "schema validation failed", record) from None
+        r.raise_for_status()
 
     def release_claim(self, claim_id: str, reason: str = "") -> None:
         """POST /v1/claims/{id}/release — return the claim to the

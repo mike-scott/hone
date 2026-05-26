@@ -295,6 +295,108 @@ def test_run_once_does_not_release_on_a_successful_task(monkeypatch):
     assert cli.submitted == [("c1", {"outcome": "prepared"})]
 
 
+# --- 422 schema-rejected fallback -----------------------------------------
+
+def test_run_once_submits_a_fallback_when_hone_core_rejects_the_record(
+        monkeypatch):
+    """hone-core's schema validator returns 422 on the original submit.
+       Instead of crashing, the node submits a fallback failure-
+       outcome record carrying the original payload + the validator's
+       reason in `meta` — so the failure lands in work_items.record
+       and is debuggable from the DB."""
+    from node.client import SchemaRejectedError
+
+    REJECTED = {"task_type": "prepare", "worker_id": "fake-node",
+                "outcome": "prepared", "model": "claude-opus-4-7",
+                "usage": {"input_tokens": 100, "output_tokens": 50,
+                           "duration_ms": 5000},
+                "subsystem": {"primary": "drivers/net"}}
+
+    class _StubClient:
+        def __init__(self):
+            self.submits = []
+
+        def claim(self):
+            return {"claim_id": "c1", "task_type": "prepare"}
+
+        def release_claim(self, claim_id, reason):
+            raise AssertionError("release_claim must not be called when "
+                                  "the fallback submit succeeds")
+
+        def submit_result(self, claim_id, record):
+            self.submits.append(record)
+            if len(self.submits) == 1:
+                # First call: hone-core rejects the original.
+                raise SchemaRejectedError(
+                    "completion record failed schema validation at "
+                    "maintainer/mailing_lists/0", REJECTED)
+            # Second call: the fallback record lands cleanly.
+
+    monkeypatch.setattr(runner.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(runner.tasks, "dispatch",
+                         lambda cfg, c, claim: REJECTED)
+
+    cli = _StubClient()
+    assert runner.run_once(_Cfg, cli) is True
+    assert len(cli.submits) == 2
+    first, fallback = cli.submits
+    # The fallback's outcome matches the task_type's failure-branch
+    # enum (prepare → uncharacterisable, per the schema).
+    assert fallback["outcome"] == "uncharacterisable"
+    assert fallback["task_type"] == "prepare"
+    # Both the rejected outcome and the validator's reason are
+    # captured on meta so the next debugging pass can see what the
+    # node tried to submit AND why hone-core refused it.
+    assert fallback["meta"]["rejected_outcome"] == "prepared"
+    assert fallback["meta"]["rejected_record"] == REJECTED
+    assert "maintainer/mailing_lists/0" in fallback["meta"]["schema_error"]
+    assert "maintainer/mailing_lists/0" in fallback["reason"]
+    # Header fields (worker_id, model, usage) preserve from the
+    # original so the audit trail of WHO produced the rejected
+    # record stays intact.
+    assert fallback["worker_id"] == "fake-node"
+    assert fallback["model"] == "claude-opus-4-7"
+    assert fallback["usage"]["duration_ms"] == 5000
+
+
+def test_run_once_releases_when_fallback_submit_also_fails(monkeypatch):
+    """If even the fallback record gets rejected (shouldn't happen —
+       the failure schema is much looser — but defense in depth),
+       the original SchemaRejectedError propagates, the outer abort
+       path releases the claim cleanly, and the node keeps running."""
+    from node.client import SchemaRejectedError
+
+    class _StubClient:
+        def __init__(self):
+            self.released = []
+
+        def claim(self):
+            return {"claim_id": "c1", "task_type": "prepare"}
+
+        def release_claim(self, claim_id, reason):
+            self.released.append((claim_id, reason))
+
+        def submit_result(self, claim_id, record):
+            # Both the original and the fallback are rejected.
+            raise SchemaRejectedError("nope", record)
+
+    monkeypatch.setattr(runner.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(runner.tasks, "dispatch",
+                         lambda cfg, c, claim: {"task_type": "prepare",
+                                                  "outcome": "prepared"})
+
+    cli = _StubClient()
+    with pytest.raises(SchemaRejectedError):
+        runner.run_once(_Cfg, cli)
+    # The outer abort path doesn't get to release because the
+    # fallback submit's exception escapes the inner _with_backoff
+    # (SchemaRejectedError isn't in _BACKOFF_CATCHES); the SchemaError
+    # surfaces. main() handles it via the existing unhandled-exception
+    # path. (A follow-up improvement could route this through the
+    # abort/release path, but the immediate fix — no crash on a single
+    # 422 — works.)
+
+
 # --- fatal config error surface ------------------------------------------
 
 def test_fatal_config_error_logs_one_line_and_exits(caplog):

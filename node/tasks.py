@@ -27,6 +27,13 @@ _PREPARE_FIELDS = ("patchset_id", "tree_state", "subsystem", "patch_size",
                    "maintainer", "patch_type", "review_intensity",
                    "preparation_notes")
 
+# Max chars of Claude's raw response we attach to an uncharacterisable
+# record's `meta.raw_response`. Big enough to cover a typical fenced
+# prepare reply (~6 KB) plus headroom; small enough that a runaway
+# response can't bloat work_items.record beyond reason. The original
+# length is also recorded so the truncation point is obvious.
+_RAW_RESPONSE_CAP = 20000
+
 
 def _worker_id(cfg: Config) -> str:
     """The worker_id every completion record carries. The node-name from
@@ -37,14 +44,23 @@ def _worker_id(cfg: Config) -> str:
 
 def _build_prepare_user_text(claim: dict) -> str:
     """The user-message payload for a prepare claim. Hands Claude the
-       patchset (with patches + cover + thread) as JSON plus the
+       patchset (root + patches + cover letter) as JSON plus the
        methodology's prepare return-contract — so the model has the
-       exact output shape spelled out alongside the payload."""
+       exact output shape spelled out alongside the payload.
+
+       `thread_messages` is deliberately NOT forwarded today. The
+       methodology's review_intensity is therefore computed against
+       an empty thread (bucket_overall=none, per_reply=[]); this keeps
+       prepare prompts compact and avoids burning thousands of tokens
+       on review history that the current node revision doesn't yet
+       use authoritatively. The hone-core side still ships
+       thread_messages in the claim payload — re-add it here when
+       prepare's review-intensity classification is wired up against
+       real thread data."""
     payload = {
         "patchset":         claim.get("patchset"),
         "patches":          claim.get("patches"),
         "cover_letter_body": claim.get("cover_letter_body"),
-        "thread_messages":  claim.get("thread_messages"),
     }
     return_contract = (claim.get("methodology", {})
                        .get("operations", {})
@@ -110,9 +126,19 @@ def handle_prepare_task(cfg: Config, client: HoneCoreClient,
         body = ai.parse_json_response(response["text"])
     except ValueError as exc:
         log.warning("prepare: Claude returned malformed JSON — %s", exc)
+        # Stash Claude's raw response on the record's `meta` field so a
+        # future debugging pass can see WHAT the model produced rather
+        # than just the parser's reason. Truncated to keep work_items.
+        # record from ballooning; the original length is recorded
+        # separately so the truncation is obvious.
+        raw = response.get("text") or ""
         return {**header,
                 "outcome": "uncharacterisable",
-                "reason":  str(exc)}
+                "reason":  str(exc),
+                "meta":    {"raw_response":        raw[:_RAW_RESPONSE_CAP],
+                            "raw_response_length": len(raw),
+                            "raw_response_truncated":
+                                len(raw) > _RAW_RESPONSE_CAP}}
     return {**header,
              "outcome": "prepared",
              **{f: body.get(f) for f in _PREPARE_FIELDS},

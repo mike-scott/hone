@@ -8,7 +8,8 @@ import httpx
 import pytest
 
 from core import tls
-from node.client import EnrollmentError, HoneCoreClient, _err_code
+from node.client import (EnrollmentError, HoneCoreClient,
+                          SchemaRejectedError, _err_code)
 from node.config import Config
 
 
@@ -189,6 +190,48 @@ def test_403_raises_enrollment_error(cfg):
     try:
         with pytest.raises(EnrollmentError):
             c.claim()
+    finally:
+        c.close()
+
+
+def test_submit_result_422_raises_schema_rejected_with_detail(cfg):
+    """A 422 from /result carries the validator's detail in the JSON
+       body. The client lifts that into a SchemaRejectedError so the
+       runner can build a fallback failure-outcome record — instead
+       of crashing on the bare httpx.HTTPStatusError."""
+
+    def handler(request):
+        return httpx.Response(
+            422,
+            json={"detail": "completion record failed schema validation"
+                            " at maintainer/mailing_lists/0: "
+                            "Additional properties are not allowed"
+                            " ('was_cc\\'d' was unexpected)"})
+
+    c = _client_with_transport(cfg, httpx.MockTransport(handler))
+    record = {"task_type": "prepare", "outcome": "prepared"}
+    try:
+        with pytest.raises(SchemaRejectedError) as ei:
+            c.submit_result("c1", record)
+        assert "maintainer/mailing_lists/0" in ei.value.detail
+        assert ei.value.rejected_record is record    # original carried through
+    finally:
+        c.close()
+
+
+def test_submit_result_422_without_detail_still_raises_schema_rejected(cfg):
+    """Even without a usable `detail` field (e.g. a 422 from an
+       intermediate proxy), the client still raises
+       SchemaRejectedError — the runner shouldn't have to special-
+       case proxy 422s vs schema-validator 422s."""
+
+    def handler(request):
+        return httpx.Response(422, text="<html>nope</html>")
+
+    c = _client_with_transport(cfg, httpx.MockTransport(handler))
+    try:
+        with pytest.raises(SchemaRejectedError):
+            c.submit_result("c1", {"task_type": "prepare"})
     finally:
         c.close()
 

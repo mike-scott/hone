@@ -18,8 +18,22 @@ import httpx
 from common.version import __version__ as VERSION
 from node import health, tasks
 from node.ai import CallClaudeAuthError
-from node.client import EnrollmentError, HoneCoreClient
+from node.client import EnrollmentError, HoneCoreClient, SchemaRejectedError
 from node.config import Config
+
+
+# The failure-path outcome each task_type's record uses when we need
+# to submit a fallback after hone-core rejected the original record's
+# shape (HTTP 422). Picked from each branch's schema enum:
+# prepare → uncharacterisable, review/train → unappliable (deferred
+# also valid but unappliable matches "we tried, this won't work"
+# semantics better), draft → failed.
+_FALLBACK_OUTCOME = {
+    "prepare": "uncharacterisable",
+    "review":  "unappliable",
+    "train":   "unappliable",
+    "draft":   "failed",
+}
 
 # Log level is env-driven so an operator can flip to DEBUG without a
 # rebuild. HONE_LOG_LEVEL accepts the standard level names
@@ -198,10 +212,52 @@ def run_once(cfg: Config, client: HoneCoreClient) -> bool:
         # about to exit.
         _report_health_safely(cfg, client)
         raise
-    _with_backoff(cfg, "submit result",
-                  lambda: client.submit_result(claim["claim_id"], record))
+    try:
+        _with_backoff(cfg, "submit result",
+                      lambda: client.submit_result(claim["claim_id"], record))
+    except SchemaRejectedError as exc:
+        # hone-core's schema validator returned 422. Build a fallback
+        # failure-outcome record carrying the rejected payload + the
+        # validator's reason in `meta` and submit THAT, so the failure
+        # lands in the corpus as debuggable data instead of the node
+        # crashing on an unhandled httpx exception. If the fallback
+        # also fails, the original SchemaRejectedError surfaces (and
+        # the outer abort path releases the claim cleanly).
+        log.warning("submit result: hone-core 422 — submitting "
+                     "fallback %s record: %s",
+                     _FALLBACK_OUTCOME.get(claim.get("task_type"),
+                                            "uncharacterisable"),
+                     exc.detail[:200])
+        fallback = _build_schema_rejected_fallback(claim, record, exc)
+        _with_backoff(cfg, "submit fallback",
+                      lambda: client.submit_result(
+                          claim["claim_id"], fallback))
     log.info("submitted result for %s", claim.get("claim_id"))
     return True
+
+
+def _build_schema_rejected_fallback(claim: dict, record: dict,
+                                     exc: SchemaRejectedError) -> dict:
+    """Compose a failure-outcome record after hone-core rejected the
+       original record's shape (HTTP 422). The original payload + the
+       validator's reason go into `meta` so the failure remains
+       inspectable from work_items.record — not lost to a node
+       crash."""
+    task_type = claim.get("task_type", "prepare")
+    outcome = _FALLBACK_OUTCOME.get(task_type, "uncharacterisable")
+    return {
+        "task_type": task_type,
+        "worker_id": record.get("worker_id", ""),
+        "outcome":   outcome,
+        "model":     record.get("model", ""),
+        "usage":     record.get("usage")
+                      or {"input_tokens":  0, "output_tokens": 0,
+                          "duration_ms":   0},
+        "reason":    f"hone-core 422: {exc.detail[:300]}",
+        "meta":      {"rejected_outcome": record.get("outcome"),
+                      "rejected_record":  record,
+                      "schema_error":     exc.detail},
+    }
 
 
 def _print_banner() -> None:
