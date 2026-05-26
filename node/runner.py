@@ -6,6 +6,7 @@ The loop, its idle pacing, and the transient-failure backoff are real;
 bootstrap (the reference repo / methodology) and task execution are stubs.
 """
 import logging
+import os
 import random
 import signal
 import sys
@@ -20,8 +21,14 @@ from node.ai import CallClaudeAuthError
 from node.client import EnrollmentError, HoneCoreClient
 from node.config import Config
 
+# Log level is env-driven so an operator can flip to DEBUG without a
+# rebuild. HONE_LOG_LEVEL accepts the standard level names
+# (DEBUG / INFO / WARNING / ERROR); unknown values fall back to INFO.
+# Set in node/.env to e.g. `HONE_LOG_LEVEL=DEBUG` and recreate the
+# container.
+_LOG_LEVEL = os.environ.get("HONE_LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, _LOG_LEVEL, logging.INFO),
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
 )
 log = logging.getLogger("hone.node")

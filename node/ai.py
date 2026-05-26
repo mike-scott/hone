@@ -217,6 +217,15 @@ def _call_claude_cli(cfg, system, user_text, *, model):
            "--system-prompt", system]
     if chosen:
         cmd += ["--model", chosen]
+    # INFO-level send/receive lines mirror what httpx auto-logs for the
+    # SDK path — without them the CLI backend would be invisible in
+    # `docker logs`. Lengths only; the full prompts ride at DEBUG so
+    # operators can opt in to verbose tracing without flooding the
+    # default log.
+    log.info("claude CLI → model=%s system=%d user=%d chars",
+              chosen, len(system), len(user_text))
+    log.debug("claude CLI → system: %s", system)
+    log.debug("claude CLI → user:   %s", user_text)
     started = time.monotonic()
     try:
         r = subprocess.run(cmd, input=user_text,
@@ -240,6 +249,9 @@ def _call_claude_cli(cfg, system, user_text, *, model):
 
     if r.returncode != 0:
         category = _classify_cli_stderr(r.stderr)
+        log.warning("claude CLI ← exit=%d category=%s in %.1fs: %s",
+                     r.returncode, category, duration_ms / 1000,
+                     (r.stderr or "").strip()[:200])
         _record_outcome(category)
         if category == "auth":
             raise CallClaudeAuthError(
@@ -265,7 +277,12 @@ def _call_claude_cli(cfg, system, user_text, *, model):
 
     _record_outcome(None)
     usage = env.get("usage") or {}
-    return {"text":  _strip_fences(env.get("result", "")),
+    result_text = _strip_fences(env.get("result", ""))
+    log.info("claude CLI ← in=%s out=%s tokens, %.1fs",
+              usage.get("input_tokens"), usage.get("output_tokens"),
+              duration_ms / 1000)
+    log.debug("claude CLI ← result: %s", result_text)
+    return {"text":  result_text,
              "model": env.get("model") or chosen,
              "usage": {"input_tokens":  usage.get("input_tokens"),
                        "output_tokens": usage.get("output_tokens"),
