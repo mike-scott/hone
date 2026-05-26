@@ -97,6 +97,76 @@ def test_refresh_rotates_and_is_single_use(db):
     assert core_db.rotate_refresh_token(db, tok["refresh_token"]) is None
 
 
+def test_create_enrollment_rejects_a_name_already_taken(db):
+    """A node enrolling with a name that's already active is rejected at
+       the OAuth device-authorization step — no pending enrollment is
+       created, the registering node gets a fast fail."""
+    enr = core_db.create_enrollment(db, node_name="builder-7")
+    core_db.approve_enrollment(db, enr["user_code"])
+    with pytest.raises(core_db.DuplicateNodeName, match="builder-7"):
+        core_db.create_enrollment(db, node_name="builder-7")
+
+
+def test_create_enrollment_allows_name_when_existing_node_is_revoked(db):
+    """A revoked node is a tombstone — it shouldn't block a fresh
+       enrollment using the same name. The operator can also Delete
+       the tombstone if they want it gone from the listing."""
+    enr1 = core_db.create_enrollment(db, node_name="builder-7")
+    node_id = core_db.approve_enrollment(db, enr1["user_code"])
+    core_db.revoke_node(db, node_id)
+    # The same name now enrolls cleanly.
+    enr2 = core_db.create_enrollment(db, node_name="builder-7")
+    assert enr2["device_code"] != enr1["device_code"]
+
+
+def test_create_enrollment_allows_a_null_name(db):
+    """A node that didn't self-identify (node_name=None) never
+       conflicts with another such node — the duplicate check is
+       gated on a non-empty name."""
+    a = core_db.create_enrollment(db, node_name=None)
+    b = core_db.create_enrollment(db, node_name=None)
+    assert a["device_code"] != b["device_code"]
+
+
+def test_approve_enrollment_rejects_a_now_conflicting_name(db):
+    """Race-protection: two enrollments with the same name both got
+       through device_authorization (e.g. submitted simultaneously,
+       both passed the check). The first approval succeeds; the
+       second hits the active-node guard at approve_enrollment time
+       and raises DuplicateNodeName."""
+    # Both enrollments are queued in pending state.
+    enr1 = core_db.create_enrollment(db, node_name="builder-7")
+    # Manually queue a second pending enrollment with the same name —
+    # bypassing the create-time check to simulate the race window.
+    db.execute(
+        "INSERT INTO node_enrollments (device_code_hash,user_code,"
+        "node_name,task_types,state,interval_seconds,created_at,expires_at) "
+        "VALUES ('h','C-2','builder-7',NULL,?,5,?,?)",
+        (core_db.NODE_ENROLLMENT_STATE_PENDING,
+         int(__import__("time").time()),
+         int(__import__("time").time()) + 900))
+    db.commit()
+    # First approval lands.
+    core_db.approve_enrollment(db, enr1["user_code"])
+    # Second approval now conflicts.
+    with pytest.raises(core_db.DuplicateNodeName, match="builder-7"):
+        core_db.approve_enrollment(db, "C-2")
+
+
+def test_active_node_with_name_helper(db):
+    enr = core_db.create_enrollment(db, node_name="builder-7")
+    node_id = core_db.approve_enrollment(db, enr["user_code"])
+    match = core_db.active_node_with_name(db, "builder-7")
+    assert match is not None and match["id"] == node_id
+    assert core_db.active_node_with_name(db, "builder-8") is None
+    # Revoked → no longer matches.
+    core_db.revoke_node(db, node_id)
+    assert core_db.active_node_with_name(db, "builder-7") is None
+    # NULL / empty name never matches.
+    assert core_db.active_node_with_name(db, None) is None
+    assert core_db.active_node_with_name(db, "") is None
+
+
 def test_revoke_node_kills_its_tokens(db):
     node_id = _approved_node(db)
     tok = core_db.issue_tokens(db, node_id)

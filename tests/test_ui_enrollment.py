@@ -70,6 +70,33 @@ def test_deny_enrollment(ctx):
         == core_db.NODE_ENROLLMENT_STATE_DENIED
 
 
+def test_approve_silently_skips_a_now_conflicting_enrollment(ctx):
+    """If a duplicate-name conflict materialises between when the
+       pending enrollment was created and when the operator clicks
+       Approve (e.g. another enrollment for the same name landed
+       first), the click silently redirects rather than 500-ing. The
+       row stays on the page; the operator can deny it."""
+    # Plant a pending enrollment for "builder-7", then a separate
+    # already-approved active node with the same name.
+    enr_pending = core_db.create_enrollment(ctx.db, node_name="builder-7")
+    # Manually wedge an active node into the table so the approve-time
+    # guard fires (the create-time guard would have rejected, but the
+    # race-protection check at approve_enrollment is what we want to
+    # exercise here).
+    ctx.db.execute(
+        "INSERT INTO nodes (name, state, enrolled_at) VALUES (?, ?, 0)",
+        ("builder-7", core_db.NODE_STATE_ACTIVE))
+    ctx.db.commit()
+
+    r = ctx.client.post(
+        f"/nodes/enrollments/{enr_pending['user_code']}/approve")
+    assert r.status_code == 200             # redirected to /nodes, no crash
+    # The pending enrollment is still pending — operator can now deny it.
+    enr = core_db.get_enrollment_by_user_code(
+        ctx.db, enr_pending["user_code"])
+    assert enr["state"] == core_db.NODE_ENROLLMENT_STATE_PENDING
+
+
 def test_enrolled_node_renders_state_active(ctx):
     enr = core_db.create_enrollment(ctx.db, node_name="builder-9")
     core_db.approve_enrollment(ctx.db, enr["user_code"])

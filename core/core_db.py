@@ -2040,12 +2040,42 @@ def set_gather_state(db, source, cursor):
 # OAuth node enrollment & bearer tokens  (see API.md, ARCHITECTURE.md)
 # ===========================================================================
 
+class DuplicateNodeName(Exception):
+    """Raised when an enrollment would create or approve a node whose
+       name is already taken by an ACTIVE node. Revoked tombstones do
+       not block — they're discarded identities, and an operator who
+       wants the row gone can use `delete_node`. The API surface
+       maps this to HTTP 409 Conflict; the UI silently drops the
+       click so the pending row stays visible and the operator can
+       deny it."""
+
+
+def active_node_with_name(db, node_name):
+    """The active node row matching this name, or None. Used by the
+       enrollment guards — a non-None return is the duplicate-name
+       conflict. A NULL / empty name never matches (a node that
+       didn't self-identify can't conflict with one that did)."""
+    if not node_name:
+        return None
+    row = db.execute(
+        "SELECT * FROM nodes WHERE name=? AND state=?",
+        (node_name, NODE_STATE_ACTIVE)).fetchone()
+    return dict(row) if row else None
+
+
 def create_enrollment(db, *, node_name=None, task_types=None,
                       ttl_seconds=900, interval_seconds=5):
     """Begin a device-authorization enrollment. Returns
        {device_code, user_code, expires_in, interval}. The secrets are
        returned ONCE - device_code is hashed for storage; user_code is kept
-       in clear for the operator's approval lookup."""
+       in clear for the operator's approval lookup.
+
+       Raises DuplicateNodeName if `node_name` matches an already-
+       active node. (Revoked tombstones don't block — see
+       active_node_with_name.)"""
+    if active_node_with_name(db, node_name) is not None:
+        raise DuplicateNodeName(
+            f"a node already exists with name {node_name!r}")
     now = int(time.time())
     device_code = _token()
     for _ in range(10):                          # retry an (astronomical) clash
@@ -2106,7 +2136,10 @@ def approve_enrollment(db, user_code, *, node_name=None, decided_by=None):
     """Operator approval: create the enrollment's `nodes` row and mark the
        enrollment approved. Returns the new node id. Raises KeyError if the
        user_code is unknown, ValueError if the enrollment is not pending or
-       has expired."""
+       has expired, DuplicateNodeName if approving would create a
+       second active node with the same name (the race-protection
+       check that guards the create_enrollment/approve_enrollment
+       window when two concurrent enrolments share a name)."""
     enr = get_enrollment_by_user_code(db, user_code)
     if enr is None:
         raise KeyError(user_code)
@@ -2114,11 +2147,15 @@ def approve_enrollment(db, user_code, *, node_name=None, decided_by=None):
         raise ValueError(f"enrollment already {enr['state']}")
     if enr["expires_at"] is not None and enr["expires_at"] <= int(time.time()):
         raise ValueError("enrollment expired")
+    resolved_name = node_name or enr["node_name"]
+    if active_node_with_name(db, resolved_name) is not None:
+        raise DuplicateNodeName(
+            f"a node already exists with name {resolved_name!r}")
     now = int(time.time())
     node_id = db.execute(
         "INSERT INTO nodes (name,task_types,state,enrolled_at) "
         "VALUES (?,?,?,?)",
-        (node_name or enr["node_name"], enr["task_types"],
+        (resolved_name, enr["task_types"],
          NODE_STATE_ACTIVE, now)).lastrowid
     db.execute(
         "UPDATE node_enrollments SET state=?, node_id=?, decided_at=?, "

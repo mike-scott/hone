@@ -64,6 +64,38 @@ def test_device_authorization_issues_codes(ctx):
     assert d["verification_uri"] == "https://core.example:8000/enroll"
 
 
+def test_device_authorization_rejects_a_duplicate_active_name(ctx):
+    """A node calling /v1/oauth/device_authorization with a name that's
+       already in use by an ACTIVE node gets HTTP 409 — fast-fail
+       feedback the node logs and exits on, no operator round-trip."""
+    # Enroll + approve a first node under name "builder-7".
+    da = ctx.client.post("/v1/oauth/device_authorization",
+                          json={"node_name": "builder-7"},
+                          headers=FLEET).json()
+    core_db.approve_enrollment(ctx.db, da["user_code"])
+    # A second device-auth attempt under the same name is rejected.
+    r = ctx.client.post("/v1/oauth/device_authorization",
+                        json={"node_name": "builder-7"}, headers=FLEET)
+    assert r.status_code == 409
+    assert "builder-7" in r.json()["detail"]
+
+
+def test_device_authorization_allows_reenrollment_after_revoke(ctx):
+    """Revoked nodes are tombstones — they don't block fresh
+       enrollments under the same name. Operators relying on the
+       Delete button to clean up tombstones don't have to step
+       through revoke→delete→enroll for the common 'swap a misbehaving
+       node for a healthy one' workflow."""
+    da = ctx.client.post("/v1/oauth/device_authorization",
+                          json={"node_name": "builder-7"},
+                          headers=FLEET).json()
+    node_id = core_db.approve_enrollment(ctx.db, da["user_code"])
+    core_db.revoke_node(ctx.db, node_id)
+    r = ctx.client.post("/v1/oauth/device_authorization",
+                        json={"node_name": "builder-7"}, headers=FLEET)
+    assert r.status_code == 200
+
+
 # --- the device-code grant -------------------------------------------------
 
 def test_token_pending_then_slow_down(ctx):

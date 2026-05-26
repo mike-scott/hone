@@ -392,12 +392,15 @@ async def enroll(request: Request, code: str | None = None):
 
 @router.post("/nodes/enrollments/{user_code}/approve")
 async def approve_enrollment(request: Request, user_code: str):
-    """Approve a pending enrollment — the node joins the fleet."""
+    """Approve a pending enrollment — the node joins the fleet. Errors
+       (already decided / expired / unknown / name now conflicts with
+       an active node) silently redirect; the operator sees the row's
+       state on the refreshed page."""
     try:
         core_db.approve_enrollment(request.app.state.db, user_code,
                                    decided_by="operator")
-    except (KeyError, ValueError):
-        pass                               # already decided / expired / gone
+    except (KeyError, ValueError, core_db.DuplicateNodeName):
+        pass
     return RedirectResponse("/nodes", status_code=303)
 
 

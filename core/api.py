@@ -139,15 +139,22 @@ _DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
 def device_authorization(request: Request,
                          body: DeviceAuthRequest | None = None):
     """Begin node enrollment — issue a device code + user code. The node logs
-       the user code for an operator and polls /v1/oauth/token (RFC 8628)."""
+       the user code for an operator and polls /v1/oauth/token (RFC 8628).
+
+       Returns HTTP 409 Conflict if the requested node_name is already
+       in use by an ACTIVE node — the registering node can log the
+       conflict and exit, no operator approval round-trip needed."""
     cfg = request.app.state.config
     rc = request.app.state.runtime_config
-    enr = core_db.create_enrollment(
-        request.app.state.db,
-        node_name=body.node_name if body else None,
-        task_types=body.task_types if body else None,
-        ttl_seconds=rc.device_code_ttl,
-        interval_seconds=rc.device_poll_interval)
+    try:
+        enr = core_db.create_enrollment(
+            request.app.state.db,
+            node_name=body.node_name if body else None,
+            task_types=body.task_types if body else None,
+            ttl_seconds=rc.device_code_ttl,
+            interval_seconds=rc.device_poll_interval)
+    except core_db.DuplicateNodeName as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc))
     base = cfg.public_url.rstrip("/")
     return {"device_code": enr["device_code"],
             "user_code": enr["user_code"],
