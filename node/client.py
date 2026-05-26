@@ -105,6 +105,22 @@ class HoneCoreClient:
         r = self._oauth_request(
             "/v1/oauth/device_authorization",
             {"node_name": self._cfg.node_name, "task_types": _TASK_TYPES})
+        # 409 means hone-core rejected the enrollment because the
+        # requested node_name is already held by an active node. The
+        # response body's `detail` carries the human-readable reason
+        # — lift it into an EnrollmentError so main()'s existing
+        # one-line clean-exit path surfaces it cleanly rather than
+        # crashing with an httpx traceback whose body isn't printed.
+        if r.status_code == 409:
+            detail = ""
+            try:
+                detail = r.json().get("detail", "")
+            except ValueError:
+                pass
+            raise EnrollmentError(
+                detail or "hone-core rejected this node's enrollment "
+                "(HTTP 409). Check HONE_NODE_NAME is unique across "
+                "the fleet.") from None
         r.raise_for_status()
         da = r.json()
         log.warning("ENROLL THIS NODE — open %s and enter code:  %s",

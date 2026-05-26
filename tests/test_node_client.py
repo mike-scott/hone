@@ -51,6 +51,37 @@ def test_refresh_without_a_token_is_a_fatal_enrollment_error(cfg):
         c._refresh_token()
 
 
+def test_409_from_device_authorization_raises_enrollment_error(cfg, monkeypatch):
+    """A duplicate-name conflict at /v1/oauth/device_authorization
+       surfaces to main()'s clean-exit path as an EnrollmentError
+       carrying the conflict detail — not an httpx traceback whose
+       body-buried reason isn't printed."""
+    c = HoneCoreClient(cfg)
+    monkeypatch.setattr(
+        c, "_oauth_request",
+        lambda path, body: httpx.Response(
+            409, json={"detail":
+                       "a node already exists with name 'builder-7'"}))
+    with pytest.raises(EnrollmentError, match="builder-7") as ei:
+        c._begin_device_flow()
+    # Suppressed cause — the body's reason IS the operator-facing
+    # message; we don't want an httpx traceback chained underneath.
+    assert ei.value.__cause__ is None
+
+
+def test_409_without_detail_field_falls_back_to_a_generic_message(
+        cfg, monkeypatch):
+    """If hone-core (or some intermediate proxy) returns a 409 with no
+       JSON body or no `detail` field, we still produce a useful
+       operator message — pointing them at HONE_NODE_NAME."""
+    c = HoneCoreClient(cfg)
+    monkeypatch.setattr(
+        c, "_oauth_request",
+        lambda path, body: httpx.Response(409, text="<html>nope</html>"))
+    with pytest.raises(EnrollmentError, match="HONE_NODE_NAME"):
+        c._begin_device_flow()
+
+
 def test_adopt_tokens_persists_the_ca_and_builds_the_client(cfg, tmp_path):
     src = str(tmp_path / "core-tls")
     tls.ensure_certs(src, ["core.example"])
