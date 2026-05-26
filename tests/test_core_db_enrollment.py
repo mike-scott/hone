@@ -105,6 +105,58 @@ def test_revoke_node_kills_its_tokens(db):
     assert core_db.rotate_refresh_token(db, tok["refresh_token"]) is None
 
 
+def test_delete_node_removes_the_row_and_its_tokens(db):
+    """`delete_node` is the hard-delete companion to `revoke_node`:
+       the row, the tokens, and the device-grant link all go. The
+       audit references on ai_reviews are NULLed rather than dropped
+       so the historical record survives the deletion."""
+    node_id = _approved_node(db)
+    tok = core_db.issue_tokens(db, node_id)
+    # Plant an ai_reviews row referencing the node so we can check the
+    # nullification.
+    core_db.upsert_patchset(db, "<r1@x>", subject="t", n_patches=1)
+    core_db.upsert_ai_review(db, "<r1@x>", concerns=[], node_id=node_id)
+
+    assert core_db.delete_node(db, node_id) is True
+
+    # The node row, its tokens, and any auth lookups are gone.
+    assert core_db.get_node(db, node_id) is None
+    assert core_db.resolve_access_token(db, tok["access_token"]) is None
+    assert db.execute(
+        "SELECT COUNT(*) FROM node_tokens WHERE node_id=?",
+        (node_id,)).fetchone()[0] == 0
+    # Audit refs preserved: the ai_review row remains; its node_id is
+    # NULLed so the FK no longer points anywhere.
+    rev = core_db.get_ai_review(db, "<r1@x>")
+    assert rev is not None
+    assert rev["node_id"] is None
+    # Idempotent: a re-delete on the same id is a no-op returning False.
+    assert core_db.delete_node(db, node_id) is False
+
+
+def test_delete_node_returns_false_for_unknown_id(db):
+    assert core_db.delete_node(db, 99999) is False
+
+
+def test_delete_node_nulls_an_enrollment_reference(db):
+    """An enrollment that has been approved + completed links to its
+       resulting node via node_enrollments.node_id. Deleting that node
+       must NULL the link (not raise an FK violation) so a re-enrolment
+       afterwards can succeed without surgery."""
+    node_id = _approved_node(db)
+    # Find the enrollment row that resulted in node_id.
+    enr_row = db.execute(
+        "SELECT id FROM node_enrollments WHERE node_id=?",
+        (node_id,)).fetchone()
+    assert enr_row is not None
+
+    assert core_db.delete_node(db, node_id) is True
+    again = db.execute(
+        "SELECT node_id FROM node_enrollments WHERE id=?",
+        (enr_row["id"],)).fetchone()
+    assert again is not None and again["node_id"] is None
+
+
 def test_complete_enrollment_makes_the_device_code_single_use(db):
     enr = core_db.create_enrollment(db)
     eid = core_db.get_enrollment_by_device_code(db, enr["device_code"])["id"]

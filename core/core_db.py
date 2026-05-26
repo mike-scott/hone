@@ -2227,6 +2227,32 @@ def revoke_node(db, node_id):
     db.commit()
 
 
+def delete_node(db, node_id):
+    """Hard-delete an enrolled node — remove the row, delete its tokens
+       (the only NOT-NULL FK pointing back), and NULL the audit-trail
+       references on ai_reviews and node_enrollments so the historical
+       record survives the deletion. Returns True when a row was
+       removed, False when the node_id was unknown.
+
+       Distinct from `revoke_node`, which is a soft delete: revoke
+       keeps the row visible with state=revoked and only invalidates
+       tokens. Delete is for the operator who wants the node gone
+       from the fleet listing. Any in-flight work the node had
+       claimed becomes orphaned (claimed_by is a TEXT column, not an
+       FK) and is rescued when its lease lapses via reclaim_expired."""
+    if db.execute("SELECT 1 FROM nodes WHERE id=?",
+                  (node_id,)).fetchone() is None:
+        return False
+    db.execute("DELETE FROM node_tokens WHERE node_id=?", (node_id,))
+    db.execute("UPDATE ai_reviews SET node_id=NULL WHERE node_id=?",
+               (node_id,))
+    db.execute("UPDATE node_enrollments SET node_id=NULL WHERE node_id=?",
+               (node_id,))
+    db.execute("DELETE FROM nodes WHERE id=?", (node_id,))
+    db.commit()
+    return True
+
+
 def get_node(db, node_id):
     """The node row as a dict, or None."""
     row = db.execute("SELECT * FROM nodes WHERE id=?", (node_id,)).fetchone()

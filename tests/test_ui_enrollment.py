@@ -75,3 +75,40 @@ def test_enrolled_node_renders_state_active(ctx):
     core_db.approve_enrollment(ctx.db, enr["user_code"])
     r = ctx.client.get("/nodes")
     assert "builder-9" in r.text and "active" in r.text
+
+
+# --- delete an enrolled node ---------------------------------------------
+
+def test_nodes_page_renders_a_delete_form_per_enrolled_row(ctx):
+    """Each enrolled-node row carries a POST form that targets the
+       delete endpoint. The browser-side confirm() means a fat-finger
+       click won't immediately fire it; the test asserts on the form
+       wiring (action + button), not on the confirm dialog."""
+    enr = core_db.create_enrollment(ctx.db, node_name="builder-7")
+    node_id = core_db.approve_enrollment(ctx.db, enr["user_code"])
+    body = ctx.client.get("/nodes").text
+    assert f'action="/nodes/{node_id}/delete"' in body
+    assert "Delete</button>" in body
+    assert "confirm(" in body                         # the JS confirm hook
+
+
+def test_delete_node_via_ui_removes_the_node_and_redirects(ctx):
+    """A POST to /nodes/{id}/delete drops the row, kills tokens, and
+       lands back on the refreshed /nodes page where the row is gone."""
+    enr = core_db.create_enrollment(ctx.db, node_name="builder-7")
+    node_id = core_db.approve_enrollment(ctx.db, enr["user_code"])
+    tok = core_db.issue_tokens(ctx.db, node_id)
+
+    r = ctx.client.post(f"/nodes/{node_id}/delete")
+    assert r.status_code == 200             # TestClient follows the redirect
+    assert "builder-7" not in r.text        # off the enrolled list
+    assert core_db.get_node(ctx.db, node_id) is None
+    assert core_db.resolve_access_token(ctx.db, tok["access_token"]) is None
+
+
+def test_delete_node_via_ui_is_idempotent_on_unknown_id(ctx):
+    """A double-submit from a stale tab — or a click against an
+       already-deleted node — must not 500; it just redirects to
+       /nodes again."""
+    r = ctx.client.post("/nodes/99999/delete")
+    assert r.status_code == 200             # redirect followed, no crash

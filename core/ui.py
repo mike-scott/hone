@@ -401,6 +401,15 @@ async def approve_enrollment(request: Request, user_code: str):
     return RedirectResponse("/nodes", status_code=303)
 
 
+@router.post("/nodes/{node_id}/delete")
+async def delete_node(request: Request, node_id: int):
+    """Hard-delete an enrolled node from the fleet — removes the row,
+       deletes its tokens, NULLs the audit references. A no-op if the
+       node was already deleted (e.g. a stale tab posting twice)."""
+    core_db.delete_node(request.app.state.db, node_id)
+    return RedirectResponse("/nodes", status_code=303)
+
+
 @router.post("/nodes/enrollments/{user_code}/deny")
 async def deny_enrollment(request: Request, user_code: str):
     """Deny a pending enrollment."""
