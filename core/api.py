@@ -41,15 +41,26 @@ _RECORD_VALIDATOR = jsonschema.Draft202012Validator(_RECORD_SCHEMA)
 
 
 def _validate_record(record):
-    """422 on a malformed completion record; a no-op when it's valid."""
-    errors = sorted(_RECORD_VALIDATOR.iter_errors(record),
-                    key=lambda e: str(list(e.absolute_path)))
-    if errors:
-        e = errors[0]
-        loc = "/".join(str(p) for p in e.absolute_path) or "<root>"
+    """422 on a malformed completion record; a no-op when it's valid.
+
+       Uses jsonschema's `best_match` so a oneOf-branch failure (the
+       common case for completion records — task_type discriminates
+       four branches) reports the SPECIFIC inner field that tripped,
+       not the root-level "not valid under any of the given schemas".
+       Without best_match, a single misspelled key in
+       `maintainer.mailing_lists[0]` surfaces as a 23 KB dict dump
+       at `<root>` — useless to the node submitting the result.
+       With it, the same failure reports
+       `maintainer/mailing_lists/0: Additional properties are not
+       allowed ('was_cc'd' was unexpected)`."""
+    err = jsonschema.exceptions.best_match(
+        _RECORD_VALIDATOR.iter_errors(record))
+    if err is not None:
+        loc = "/".join(str(p) for p in err.absolute_path) or "<root>"
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
-            f"completion record failed schema validation at {loc}: {e.message}")
+            f"completion record failed schema validation at {loc}: "
+            f"{err.message}")
 
 
 # --- request bodies --------------------------------------------------------

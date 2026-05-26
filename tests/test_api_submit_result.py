@@ -160,6 +160,39 @@ def test_malformed_review_record_rejected(client):
     assert r.status_code == 422 and "schema validation" in r.json()["detail"]
 
 
+def test_schema_error_pinpoints_the_specific_failing_field(client):
+    """A nested record with a single typo'd key in a deep field
+       returns a 422 whose `detail` names the specific inner path —
+       not a root-level "no branch matched" dump. This is what
+       makes the fallback-record path debuggable: the node sees
+       `maintainer/mailing_lists/0` and knows exactly which field
+       to fix, rather than receiving 23 KB of stringified record."""
+    # Take a valid PREPARE record (success path), corrupt ONE inner
+    # field with an unknown key, and POST it. Even with the rest of
+    # the document structurally sound, the additionalProperties=false
+    # on prepare_mailing_list_entry should pinpoint the offender.
+    body = {"task_type": "prepare", "worker_id": "1",
+             "outcome": "prepared",
+             "model": "claude-opus-4-7", "usage": USAGE,
+             "self_review_record": {"summary": "ok", "challenges": []},
+             **PREPARE_METADATA}
+    # Inject the schema-incompatible field shape that triggered the
+    # original real-world failure.
+    body["maintainer"] = dict(PREPARE_METADATA["maintainer"])
+    body["maintainer"]["mailing_lists"] = [
+        {"address": "linux-arm-msm@vger.kernel.org",
+         "was_cc'd": True}]                       # ← apostrophe, not _d
+
+    r = client.http.post("/v1/claims/c1/result", json=body, headers=HEADERS)
+    assert r.status_code == 422
+    detail = r.json()["detail"]
+    # The specific path is named in the detail message — the deep
+    # field is identified, not the root.
+    assert "maintainer/mailing_lists/0" in detail
+    # And the offending key is named outright.
+    assert "was_cc" in detail
+
+
 def test_methodology_version_on_record_is_rejected(client):
     """The schema forbids methodology_version on the record (it lives on
        the row, set at claim time). A node that echoes it back is 422'd."""
