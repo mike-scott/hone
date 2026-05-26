@@ -117,6 +117,80 @@ def test_queue_pane_carries_htmx_polling_attributes(ctx):
     assert 'hx-trigger="every 5s"' in body
     assert 'hx-target="#queue-pane"' in body
     assert 'hx-swap="outerHTML"' in body
+    # The pane echoes the current queue version back on every poll, so
+    # the handler can 204 a tick when nothing has changed.
+    assert 'X-Queue-Version' in body
+
+
+# --- 304-style short-circuit ----------------------------------------------
+
+def test_queue_version_changes_only_on_activity(ctx):
+    """queue_version moves on enqueue, on claim, and on result; two reads
+       with no activity in between return the same value."""
+    v0 = core_db.queue_version(ctx.db)
+    assert core_db.queue_version(ctx.db) == v0           # idempotent
+    _enqueue_review(ctx.db, "<r-1@x>", "p")
+    v_enqueued = core_db.queue_version(ctx.db)
+    assert v_enqueued != v0                              # enqueue moves it
+    core_db.claim_work_item(
+        ctx.db, "w-1", methodology_version=1,
+        types=(core_db.WORK_ITEM_TYPE_REVIEW,))
+    v_claimed = core_db.queue_version(ctx.db)
+    assert v_claimed != v_enqueued                       # claim moves it
+    assert core_db.queue_version(ctx.db) == v_claimed    # then settles
+
+
+def test_queue_version_is_filter_scoped(ctx):
+    """queue_version is computed over the filtered set, so a `type=train`
+       polling client doesn't get bumped when only review rows change."""
+    _enqueue_review(ctx.db, "<r-1@x>", "p")
+    v_review = core_db.queue_version(
+        ctx.db, type=core_db.WORK_ITEM_TYPE_REVIEW)
+    v_train  = core_db.queue_version(
+        ctx.db, type=core_db.WORK_ITEM_TYPE_TRAIN)
+    # New review row → the train-filtered version is unchanged.
+    _enqueue_review(ctx.db, "<r-2@x>", "p2")
+    assert core_db.queue_version(
+        ctx.db, type=core_db.WORK_ITEM_TYPE_REVIEW) != v_review
+    assert core_db.queue_version(
+        ctx.db, type=core_db.WORK_ITEM_TYPE_TRAIN) == v_train
+
+
+def test_hx_request_with_matching_version_returns_204(ctx):
+    """An HTMX poll whose X-Queue-Version matches the current version
+       gets a 204 — HTMX then skips the swap. This is the whole point of
+       the upgrade: no template render and no response body when nothing
+       has changed."""
+    _enqueue_review(ctx.db, "<r-1@x>", "p")
+    version = core_db.queue_version(ctx.db)
+    r = ctx.client.get("/", headers={"HX-Request": "true",
+                                       "X-Queue-Version": version})
+    assert r.status_code == 204
+    assert r.text == ""
+
+
+def test_hx_request_with_stale_version_returns_200_with_new_version(ctx):
+    """A poll with a stale (or missing) X-Queue-Version is the cache
+       miss: the server renders the partial and embeds the new version
+       in the wrapper's hx-headers attribute. The next poll will then
+       round-trip that fresh value."""
+    _enqueue_review(ctx.db, "<r-1@x>", "p")
+    fresh_version = core_db.queue_version(ctx.db)
+    r = ctx.client.get("/", headers={"HX-Request": "true",
+                                       "X-Queue-Version": "stale-0"})
+    assert r.status_code == 200
+    assert fresh_version in r.text
+
+
+def test_full_page_load_never_short_circuits(ctx):
+    """A real browser navigation always renders, even when the client
+       (somehow) sent X-Queue-Version. We only short-circuit HTMX
+       polls — never a fresh page load."""
+    _enqueue_review(ctx.db, "<r-1@x>", "p")
+    version = core_db.queue_version(ctx.db)
+    r = ctx.client.get("/", headers={"X-Queue-Version": version})
+    assert r.status_code == 200
+    assert "Work queue" in r.text         # full base.html chrome rendered
 
 
 def test_queue_htmx_partial_returns_self_renewing_pane(ctx):
@@ -201,7 +275,7 @@ def test_queue_chips_show_per_axis_counts(ctx):
     _enqueue_train(ctx.db, "<r-2@x>", "<p-2@x>", "train one")
     body = ctx.client.get("/").text
     # type chips: All=2, review=1, train=1
-    assert "Type:" in body and "State:" in body
+    assert "Type:" in body and "Work state:" in body
     # filter URLs round-trip the axes
     assert 'href="/?type=review"' in body
     assert 'href="/?state=claimable"' in body

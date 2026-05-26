@@ -1470,6 +1470,44 @@ def list_work_items(db, *, type=None, state=None, limit=200, offset=0):
     return [dict(r) for r in db.execute(sql, params)]
 
 
+def queue_version(db, *, type=None, state=None):
+    """A short, monotone token for the filtered queue's current activity
+       state — two reads return the same value iff no row has appeared,
+       transitioned state, been claimed, or completed in between.
+
+       The UI's auto-poll passes the value back in an `X-Queue-Version`
+       header; the queue handler returns 204 No Content when the header
+       matches (so HTMX skips the swap and the server skips the
+       template render). Cheap: one indexed aggregate over the filtered
+       set. See docs/ARCHITECTURE-WORK-LIFECYCLE.md.
+
+       `(max_activity, count, state_sum)`:
+         - max_activity covers state transitions and new arrivals at
+           wall-clock granularity (claimed_at / completed_at /
+           enqueued_at).
+         - count catches the rare drop case (a row removed without any
+           timestamp moving).
+         - state_sum catches state transitions that happen in the same
+           wall-clock second as the prior poll, where max_activity
+           would otherwise tie. (Timestamps are int seconds — under a
+           bulk fleet claim several rows can transition in a single
+           second; without state_sum the poll would return 204 and the
+           operator wouldn't see the badge flip until the next claim
+           crossed a second boundary.)"""
+    sql = ("SELECT COALESCE(MAX(COALESCE(completed_at, claimed_at, "
+           "enqueued_at)), 0) AS t, COUNT(*) AS n, "
+           "COALESCE(SUM(state), 0) AS s FROM work_items")
+    params, where = [], []
+    if type is not None:
+        where.append("type=?"); params.append(type)
+    if state is not None:
+        where.append("state=?"); params.append(state)
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    r = db.execute(sql, params).fetchone()
+    return f"{r['t']}-{r['n']}-{r['s']}"
+
+
 def work_items_for_patchset(db, root_message_id):
     """Every work-item attached to a patchset, oldest-enqueued first — the
        queue history a per-patchset detail page renders."""

@@ -8,12 +8,20 @@
        polling URL.
    `hx-swap="outerHTML"` is what keeps this loop self-sustaining; with
    `innerHTML` the wrapper's attributes wouldn't refresh and the URL
-   would drift after a pagination click. #}
+   would drift after a pagination click.
+
+   `hx-headers` echoes the queue's current version back on every poll.
+   The handler compares it to the live `queue_version` and returns 204
+   No Content when they match — HTMX then skips the swap and the
+   server skips the template render. The version itself moves whenever
+   any row in the filtered set is enqueued, transitions state, or is
+   claimed/completed. See core_db.queue_version + core/ui.py queue(). #}
 <div id="queue-pane"
      hx-get="{{ this_url }}"
      hx-trigger="every 5s"
      hx-target="#queue-pane"
-     hx-swap="outerHTML">
+     hx-swap="outerHTML"
+     hx-headers='{"X-Queue-Version": "{{ queue_version }}"}'>
 
   <div class="d-flex flex-wrap gap-2 mb-2">
     <span class="text-muted small align-self-center me-2">Type:</span>

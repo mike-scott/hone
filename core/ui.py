@@ -17,7 +17,7 @@ import os
 import time
 from urllib.parse import quote
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, HTTPException, Request, Response, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
@@ -222,16 +222,30 @@ async def queue(request: Request,
        one work-item type (prepare / review / train); `?state=` filters to
        one state. Unknown axis values are ignored. `?page=` and `?size=`
        page the listing (page is 1-indexed; size is clamped to one of
-       _PAGE_SIZES — defaults to 50)."""
-    ctx = _queue_view(request.app.state.db, type, state, page, size)
+       _PAGE_SIZES — defaults to 50).
+
+       Auto-poll short-circuit: the #queue-pane wrapper echoes the
+       last-known `X-Queue-Version` on every HTMX request. When it
+       matches the current filtered queue's version, we return 204 No
+       Content so HTMX skips the swap and the server skips the template
+       render. A full-page navigation (no HX-Request header) always
+       renders — a real browser navigation isn't an idempotent poll."""
+    db = request.app.state.db
+    is_hx = request.headers.get("hx-request") == "true"
+    type_int  = _WORK_TYPE_BY_NAME.get(type)
+    state_int = _WORK_STATE_BY_NAME.get(state)
+    version = core_db.queue_version(db, type=type_int, state=state_int)
+    if is_hx and request.headers.get("x-queue-version") == version:
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    ctx = _queue_view(db, type, state, page, size)
+    ctx["queue_version"] = version
     # HTMX swap requests (pagination + the auto-poll wrapper) get just
     # the `_queue_pane.html` partial — chips + body + the self-renewing
     # `hx-get` wrapper — so the page chrome and the sidebar don't
     # re-render and the wrapper's polling URL stays in lockstep with
     # the filter / page state.
-    template = ("_queue_pane.html"
-                if request.headers.get("hx-request") == "true"
-                else "queue.html")
+    template = "_queue_pane.html" if is_hx else "queue.html"
     return templates.TemplateResponse(request, template, ctx)
 
 
