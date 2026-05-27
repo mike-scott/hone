@@ -62,6 +62,60 @@
   <button class="btn btn-primary mt-2">Save</button>
 </form>
 
+<h2 class="h5 mt-5">Methodology</h2>
+<p class="text-muted small" style="max-width: 40rem">
+  The hone methodology drives every prepare / review / train / draft node
+  response. Export the active version for off-line edits; import a YAML
+  to replace it. Imports validate against
+  <code>common/schema/methodology.schema.yaml</code> and become the new
+  active version in the <code>methodology_versions</code> table — the
+  DB is on the persistent data volume, so the imported methodology
+  survives container restarts. hone-core auto-bumps the document's
+  <code>version</code> field on import (you don't hand-manage it); an
+  upload byte-identical to the active version is rejected so a
+  re-import of the file you just exported doesn't create a duplicate
+  row.
+</p>
+
+{% if methodology_imported %}
+<div class="alert alert-success" style="max-width: 40rem">
+  Methodology imported — now active at version <code>{{ methodology_imported }}</code>.
+  In-flight claims keep their pinned version; new claims use the new one.
+</div>
+{% endif %}
+{% if methodology_error %}
+<div class="alert alert-danger" style="max-width: 40rem">
+  Import failed: {{ methodology_error }}
+</div>
+{% endif %}
+
+<div class="d-flex flex-wrap gap-2 align-items-center mb-2"
+     style="max-width: 40rem">
+  {% if methodology.version is not none %}
+  <a class="btn btn-outline-primary" href="{{ methodology.export_url }}"
+     download>
+    <i class="bi bi-download me-1"></i>Export active (v{{ methodology.version }})
+  </a>
+  {% else %}
+  <span class="text-muted small">No methodology bootstrapped yet.</span>
+  {% endif %}
+</div>
+
+<form method="post" action="/settings/methodology/import"
+      enctype="multipart/form-data"
+      data-confirm="Replace the active methodology with the uploaded YAML? In-flight claims keep their pinned version; new claims use the new one."
+      style="max-width: 40rem">
+  <div class="input-group">
+    <input type="file" class="form-control" name="file"
+           accept=".yaml,.yml,application/x-yaml,text/yaml" required>
+    <button type="submit" class="btn btn-primary">
+      <i class="bi bi-upload me-1"></i>Import
+    </button>
+  </div>
+  <div class="form-text">YAML only · max
+    {{ methodology.upload_cap_kib }} KiB.</div>
+</form>
+
 <h2 class="h5 mt-5">List-tag filter</h2>
 <p class="text-muted small" style="max-width: 40rem">
   GATHER only ingests patchsets carrying an enabled tag. With nothing enabled

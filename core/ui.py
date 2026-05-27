@@ -20,8 +20,9 @@ from urllib.parse import quote
 
 log = logging.getLogger("hone.ui")
 
-from fastapi import APIRouter, HTTPException, Request, Response, status
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import (APIRouter, File, HTTPException, Request, Response,
+                      UploadFile, status)
+from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from common.version import __version__ as VERSION
@@ -780,6 +781,41 @@ async def lore_clone_status(request: Request):
         {"lore_clone": _lore_clone_view(request.app.state.lore_clone)})
 
 
+_METHODOLOGY_SCHEMA_PATH = os.path.join(
+    os.path.dirname(_HERE), "common", "schema", "methodology.schema.yaml")
+
+# Cap on uploaded YAML size — the packaged default-methodology.yaml is ~70 KB
+# at present; 1 MiB leaves plenty of room for growth and stops accidental
+# multi-megabyte uploads from reaching the YAML parser.
+_METHODOLOGY_UPLOAD_CAP_BYTES = 1 * 1024 * 1024
+
+
+_METHODOLOGY_ERROR_MESSAGES = {
+    "parse":     "Could not parse the upload as YAML.",
+    "shape":     "Top-level value must be a YAML mapping (object).",
+    "schema":    "Document failed methodology-schema validation — see "
+                 "container logs for the exact field path.",
+    "too_large": ("Upload exceeds the methodology size cap "
+                  f"({_METHODOLOGY_UPLOAD_CAP_BYTES // 1024} KiB)."),
+    "identical": "Upload is byte-identical to the current active "
+                 "methodology — no new version created.",
+}
+
+
+def _methodology_view(db):
+    """The view-model the Methodology panel renders — active version,
+       export URL, and the upload cap (rendered next to the file
+       input). The active methodology lives in the DB
+       (methodology_versions table); the UI never reads from disk."""
+    active = core_db.active_methodology(db)
+    base = {"upload_cap_kib": _METHODOLOGY_UPLOAD_CAP_BYTES // 1024}
+    if active is None:
+        return {**base, "version": None, "export_url": None}
+    version, _document = active
+    return {**base, "version": version,
+             "export_url":     "/settings/methodology/export"}
+
+
 @router.get("/settings", response_class=HTMLResponse)
 async def settings(request: Request):
     """View the deployment configuration and edit the operator-tunable
@@ -789,11 +825,17 @@ async def settings(request: Request):
     available = gather.gather_api.available()
     values = {f"{g}.{k}": rc[g][k] for g, k, *_ in runtime_config.FIELDS}
     saved = request.query_params.get("saved")
+    imported = request.query_params.get("methodology_imported")
+    meth_error = request.query_params.get("methodology_error")
     return templates.TemplateResponse(request, "settings.html", {
         "groups":     _settings_fields(values, available),
         "tags":       _tag_rows(request.app.state.db),
         "deployment": _deployment_view(request.app.state.config),
         "lore_clone": _lore_clone_view(request.app.state.lore_clone),
+        "methodology": _methodology_view(request.app.state.db),
+        "methodology_imported": imported,
+        "methodology_error":
+            _METHODOLOGY_ERROR_MESSAGES.get(meth_error or ""),
         "saved_settings":   saved == "1",
         "saved_tags":       saved == "tags",
         "gather_triggered": saved == "triggered"})
@@ -821,6 +863,8 @@ async def save_settings(request: Request):
         "tags":       _tag_rows(request.app.state.db),
         "deployment": _deployment_view(request.app.state.config),
         "lore_clone": _lore_clone_view(request.app.state.lore_clone),
+        "methodology": _methodology_view(request.app.state.db),
+        "methodology_imported": None, "methodology_error": None,
         "saved_settings":   False, "saved_tags": False,
         "gather_triggered": False}, status_code=400)
 
@@ -837,6 +881,116 @@ async def trigger_gather(request: Request):
     if trigger is not None:
         trigger.set()
     return RedirectResponse("/settings?saved=triggered", status_code=303)
+
+
+# --- methodology import / export ------------------------------------------
+
+@router.get("/settings/methodology/export")
+async def export_methodology(request: Request):
+    """Download the active methodology as YAML. Filename carries the
+       DB version so an operator keeping a few revisions on disk can
+       tell them apart without diffing."""
+    import yaml
+    db = request.app.state.db
+    active = core_db.active_methodology(db)
+    if active is None:
+        raise HTTPException(status_code=404, detail="no active methodology")
+    version, document = active
+    body = yaml.safe_dump(document, sort_keys=False,
+                           default_flow_style=False, allow_unicode=True)
+    return PlainTextResponse(
+        body, media_type="application/x-yaml",
+        headers={"Content-Disposition":
+                  f'attachment; filename="methodology-v{version}.yaml"'})
+
+
+def _canonical_methodology_bytes(document):
+    """Stable byte-representation of a methodology dict for equality
+       comparison. JSON with sort_keys=True is canonical for the pure
+       data shapes a methodology contains (no datetimes, no custom
+       objects — yaml.safe_load returns dict/list/str/int/bool/None).
+       Used by import_methodology to detect "this is byte-identical
+       to the active version, don't create a duplicate row"."""
+    return json.dumps(document, sort_keys=True,
+                       ensure_ascii=False).encode("utf-8")
+
+
+@router.post("/settings/methodology/import")
+async def import_methodology(request: Request,
+                              file: UploadFile = File(...)):
+    """Upload a methodology YAML. Validates against
+       common/schema/methodology.schema.yaml, then adds it to the DB
+       as a new active version (superseding the current active row in
+       methodology_versions). The DB row is the persistent store —
+       hone-core boots from the same DB on the next restart, so the
+       imported methodology survives without a sidecar disk file.
+
+       Two version-related behaviors:
+
+         - **Content-identical reject**: if the upload is byte-
+           identical (canonical JSON) to the active version, the
+           import is refused with a flash message and NO new DB row
+           is created. Prevents accidental no-op duplicates when an
+           operator re-uploads the file they just exported.
+
+         - **doc.version auto-bump**: the document's top-level
+           `version` field is set to
+           `max(active.version, uploaded.version) + 1` before
+           storage. The schema describes doc.version as something
+           hone-core controls (bumped on every accepted merge-gate
+           change); an import IS a merge-gate-equivalent change, so
+           hone-core takes ownership rather than trusting the value
+           the operator put in the file. This means the operator
+           need not hand-bump the field when editing offline."""
+    import jsonschema
+    import yaml
+    raw = await file.read(_METHODOLOGY_UPLOAD_CAP_BYTES + 1)
+    if len(raw) > _METHODOLOGY_UPLOAD_CAP_BYTES:
+        return RedirectResponse(
+            "/settings?methodology_error=too_large", status_code=303)
+    try:
+        document = yaml.safe_load(raw.decode("utf-8"))
+    except (yaml.YAMLError, UnicodeDecodeError) as exc:
+        log.warning("methodology import: parse failure: %s", exc)
+        return RedirectResponse(
+            "/settings?methodology_error=parse", status_code=303)
+    if not isinstance(document, dict):
+        return RedirectResponse(
+            "/settings?methodology_error=shape", status_code=303)
+    with open(_METHODOLOGY_SCHEMA_PATH, encoding="utf-8") as f:
+        schema = yaml.safe_load(f)
+    try:
+        jsonschema.validate(document, schema,
+                             cls=jsonschema.Draft202012Validator)
+    except jsonschema.ValidationError as exc:
+        log.warning("methodology import: schema validation failed: %s",
+                     exc.message)
+        return RedirectResponse(
+            "/settings?methodology_error=schema", status_code=303)
+    db = request.app.state.db
+    active = core_db.active_methodology(db)
+    if active is not None:
+        _active_db_version, active_doc = active
+        if (_canonical_methodology_bytes(document)
+                == _canonical_methodology_bytes(active_doc)):
+            log.info("methodology import: byte-identical to active "
+                      "v%d; refusing to create a duplicate row",
+                      _active_db_version)
+            return RedirectResponse(
+                "/settings?methodology_error=identical",
+                status_code=303)
+        # Auto-bump doc.version: hone-core takes ownership of the
+        # field rather than trusting the operator's value.
+        active_doc_version   = active_doc.get("version", 1)
+        uploaded_doc_version = document.get("version", 1)
+        document["version"]  = max(active_doc_version,
+                                    uploaded_doc_version) + 1
+    note = f"imported from {file.filename or 'upload'}"
+    version = core_db.add_methodology_version(db, document, note=note)
+    log.info("methodology imported: db_version=%d doc_version=%d from=%s",
+              version, document.get("version"), file.filename)
+    return RedirectResponse(
+        f"/settings?methodology_imported={version}", status_code=303)
 
 
 @router.post("/settings/tags")

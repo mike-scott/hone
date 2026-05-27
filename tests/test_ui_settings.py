@@ -21,6 +21,7 @@ def ctx(tmp_path):
     app.state.config = SimpleNamespace(
         config_path=config_path, hostname="core.example", http_port=8000,
         public_url="https://core.example:8000", data_dir="/data",
+        methodology_dir=str(tmp_path / "methodology"),
         fleet_secret="FLEETSECRETVALUE", admin_token="ADMINTOKENVALUE")
     # Lore-clone status — same shape `core.main._initial_lore_status` builds
     # at lifespan startup. The tests cover the absent / ready / cloning /
@@ -267,3 +268,169 @@ def test_trigger_gather_is_a_no_op_when_supervisor_isnt_running(ctx):
     ctx.app.state.gather_trigger = None
     r = ctx.client.post("/settings/gather/trigger")
     assert r.status_code == 200 and "GATHER triggered" in r.text
+
+
+# --- methodology import / export ------------------------------------------
+
+def _seed_active_methodology(db):
+    """Drop a tiny but schema-valid methodology into the DB so the
+       export + active-version surfaces have something to render.
+       Mirrors the shape of core/default-methodology.yaml at the
+       structural level (principles, stages, checks, severity_scale,
+       operations) — using the real packaged default keeps the fixture
+       honest against methodology.schema.yaml evolution (a hand-rolled
+       minimal doc would drift the moment the schema adds a required
+       field)."""
+    import os as _os
+    default_path = _os.path.join(_os.path.dirname(__file__), "..",
+                                   "core", "default-methodology.yaml")
+    with open(default_path, encoding="utf-8") as f:
+        document = yaml.safe_load(f)
+    return core_db.add_methodology_version(db, document,
+                                            note="test seed"), document
+
+
+def test_settings_page_shows_methodology_panel_with_active_version(ctx):
+    version, _doc = _seed_active_methodology(ctx.db)
+    body = ctx.client.get("/settings").text
+    assert "Methodology" in body
+    assert f"Export active (v{version})" in body
+    assert 'action="/settings/methodology/import"' in body
+
+
+def test_settings_page_shows_no_methodology_when_unbootstrapped(ctx):
+    body = ctx.client.get("/settings").text
+    assert "No methodology bootstrapped yet" in body
+
+
+def test_export_methodology_returns_yaml_with_versioned_filename(ctx):
+    version, doc = _seed_active_methodology(ctx.db)
+    r = ctx.client.get("/settings/methodology/export")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("application/x-yaml")
+    assert (f'filename="methodology-v{version}.yaml"'
+            in r.headers["content-disposition"])
+    # Body round-trips through YAML and matches the seeded document.
+    assert yaml.safe_load(r.text) == doc
+
+
+def test_export_methodology_404_when_unbootstrapped(ctx):
+    r = ctx.client.get("/settings/methodology/export")
+    assert r.status_code == 404
+
+
+def test_import_methodology_installs_new_active_version_in_the_db(ctx):
+    """The import endpoint creates a new active version in the DB. The
+       DB is on the persistent data volume, so the imported methodology
+       survives container restarts without any sidecar disk file."""
+    _v1, _ = _seed_active_methodology(ctx.db)
+    # Upload a content-different copy so the identical-rejection
+    # branch doesn't fire — the exact doc.version auto-bump rules
+    # are covered in their own tests below.
+    _, doc = _seed_active_methodology(ctx.db)             # second seed
+    doc["description"] = "uploaded copy"
+    payload = yaml.safe_dump(doc, sort_keys=False).encode("utf-8")
+    r = ctx.client.post("/settings/methodology/import",
+                         files={"file": ("uploaded.yaml", payload,
+                                          "application/x-yaml")})
+    assert r.status_code == 200                          # follows the 303
+    assert "Methodology imported" in r.text
+    active = core_db.active_methodology(ctx.db)
+    assert active is not None
+    assert active[1]["description"] == "uploaded copy"
+
+
+def test_import_methodology_rejects_unparseable_yaml(ctx):
+    """Bad YAML doesn't crash the endpoint — it lands the operator
+       back on /settings with an error banner and no DB or disk
+       write."""
+    r = ctx.client.post("/settings/methodology/import",
+                         files={"file": ("bad.yaml",
+                                          b"key: : :\n  - [", "text/yaml")})
+    assert r.status_code == 200                          # follows the 303
+    assert "Import failed" in r.text
+    assert core_db.active_methodology(ctx.db) is None    # never imported
+
+
+def test_import_methodology_rejects_schema_invalid_document(ctx):
+    """A YAML that parses but doesn't match methodology.schema.yaml
+       (here: missing required top-level keys) is rejected at validate
+       time before any DB write."""
+    payload = yaml.safe_dump({"this": "is not a methodology"}).encode("utf-8")
+    r = ctx.client.post("/settings/methodology/import",
+                         files={"file": ("bad.yaml", payload,
+                                          "application/x-yaml")})
+    assert r.status_code == 200
+    assert "Import failed" in r.text
+    assert core_db.active_methodology(ctx.db) is None
+
+
+def test_import_methodology_rejects_byte_identical_upload(ctx):
+    """Re-uploading the export of the active methodology must NOT
+       create a duplicate DB row — the import endpoint canonical-JSON-
+       compares the upload against the active and rejects with the
+       'identical' flash message. Audit-trail discipline: every row in
+       methodology_versions reflects a real change."""
+    _v, doc = _seed_active_methodology(ctx.db)
+    before_rows = ctx.db.execute(
+        "SELECT COUNT(*) FROM methodology_versions").fetchone()[0]
+    payload = yaml.safe_dump(doc, sort_keys=False).encode("utf-8")
+    r = ctx.client.post("/settings/methodology/import",
+                         files={"file": ("same.yaml", payload,
+                                          "application/x-yaml")})
+    assert r.status_code == 200                              # follows the 303
+    assert "byte-identical" in r.text
+    after_rows = ctx.db.execute(
+        "SELECT COUNT(*) FROM methodology_versions").fetchone()[0]
+    assert after_rows == before_rows                         # no new row
+
+
+def test_import_methodology_autobumps_doc_version_above_active(ctx):
+    """hone-core takes ownership of the document `version` field on
+       import — the stored value is max(active.version, uploaded.version)+1
+       regardless of what the operator put in the file. Schema's stated
+       design: doc.version is hone-core-controlled, bumped on every
+       merge-gate-equivalent change."""
+    _v1, _ = _seed_active_methodology(ctx.db)                # active.version=1
+    _, doc = _seed_active_methodology(ctx.db)
+    doc["version"] = 1                                       # below active
+    doc["description"] = "edited offline"                    # break identity
+    payload = yaml.safe_dump(doc, sort_keys=False).encode("utf-8")
+    r = ctx.client.post("/settings/methodology/import",
+                         files={"file": ("edit.yaml", payload,
+                                          "application/x-yaml")})
+    assert r.status_code == 200
+    assert "Methodology imported" in r.text
+    active = core_db.active_methodology(ctx.db)
+    assert active is not None
+    # active.doc.version was 1; uploaded was 1 → stored as max(1,1)+1 = 2
+    assert active[1]["version"] == 2
+
+
+def test_import_methodology_autobump_respects_uploaded_higher_version(ctx):
+    """If the operator hand-bumps doc.version above active, the auto-
+       bump uses THAT as the floor — `max(active, uploaded) + 1`. So
+       upload v99 over active v1 → stored as v100. Lets an operator
+       carry an externally-coordinated version number forward without
+       hone-core silently collapsing it."""
+    _v1, _ = _seed_active_methodology(ctx.db)
+    _, doc = _seed_active_methodology(ctx.db)
+    doc["version"] = 99
+    doc["description"] = "externally-versioned"
+    payload = yaml.safe_dump(doc, sort_keys=False).encode("utf-8")
+    r = ctx.client.post("/settings/methodology/import",
+                         files={"file": ("v99.yaml", payload,
+                                          "application/x-yaml")})
+    assert r.status_code == 200
+    active = core_db.active_methodology(ctx.db)
+    assert active[1]["version"] == 100                       # max(1,99)+1
+
+
+def test_import_methodology_rejects_oversized_upload(ctx):
+    """A multi-megabyte upload short-circuits with the size-cap error
+       — the YAML parser never sees the input."""
+    big = b"# padding\n" * (200 * 1024)                  # ~2 MiB
+    r = ctx.client.post("/settings/methodology/import",
+                         files={"file": ("big.yaml", big, "text/yaml")})
+    assert r.status_code == 200
+    assert "exceeds the methodology size cap" in r.text
