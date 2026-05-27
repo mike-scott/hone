@@ -1093,139 +1093,6 @@ operations:
 
       ---
 
-      ### Output Contract
-
-      Return a single JSON object. No prose, no markdown fences.
-
-      ```json
-      {
-        "patchset_id": "string",
-        "tree_state": {
-          "tree_available": "boolean",
-          "base_commit_declared": "string or null",
-          "base_commit_source": "trailer | none",
-          "base_in_tree": "boolean or null",
-          "base_commit_timestamp": "integer or null",
-          "base_commit_subject": "string or null",
-          "kernel_version_at_base": "string or null",
-          "applies_cleanly": "boolean or null",
-          "apply_failure_reason": "string or null",
-          "prerequisite_patch_ids": ["string", "..."]
-        },
-        "subsystem": {
-          "primary": "string",
-          "primary_status": "string or null",
-          "primary_tree": "string or null",
-          "secondary": ["string", "..."],
-          "cross_cutting": "boolean",
-          "uncertain_paths": ["string", "..."],
-          "source": "tree | thread | mixed"
-        },
-        "patch_size": {
-          "lines_added": "integer",
-          "lines_removed": "integer",
-          "files_modified": "integer",
-          "files_added": "integer",
-          "files_deleted": "integer",
-          "files_renamed": "integer",
-          "hunks": "integer",
-          "bucket": "trivial | small | medium | large | huge",
-          "series_length": "integer",
-          "churn_ratio": {
-            "max": "float or null",
-            "mean": "float or null",
-            "high_churn_file_count": "integer or null"
-          },
-          "source": "tree | thread"
-        },
-        "maintainer": {
-          "primary": "string or null",
-          "primary_role": "string or null",
-          "authoritative_set": [
-            {"email": "string", "name": "string", "files_owned": "integer", "replied": "boolean", "role": "string"}
-          ],
-          "authoritative_reviewer_set": [ /* same shape */ ],
-          "mailing_lists": [{"address": "string", "was_cc'd": "boolean"}],
-          "cc_coverage": "float or null",
-          "list_coverage": "float or null",
-          "engagement_rate": "float or null",
-          "out_of_scope_engaged": [{"email": "string", "role": "string", "reply_count": "integer"}],
-          "all_engaged": [{"email": "string", "role": "string", "reply_count": "integer"}],
-          "cc_list_size": "integer",
-          "primary_uncertain_reason": "string or null",
-          "source": "tree | thread"
-        },
-        "patch_type": {
-          "primary": "bugfix | feature | refactor | cleanup | performance | documentation | build | revert | merge_prep | unknown",
-          "secondary": ["string", "..."],
-          "evidence": {
-            "primary": "string",
-            "secondary": {"tag": "evidence string"},
-            "bugfix_strength": "strong | weak | null",
-            "refactor_authorship_confidence": "high | low | null"
-          },
-          "fixes_verified": [
-            {"hash": "string", "exists": "boolean", "age_days": "integer or null", "file_overlap_ratio": "float or null", "suspicious_reason": "string or null"}
-          ],
-          "file_activity": {
-            "mean_commits_last_year": "float or null",
-            "max_commits_last_year": "integer or null",
-            "oldest_last_touched_days": "integer or null",
-            "newest_last_touched_days": "integer or null",
-            "submitter_recently_touched_files_ratio": "float or null"
-          },
-          "source": "tree | thread"
-        },
-        "review_intensity": {
-          "bucket_overall": "none | light | moderate | heavy",
-          "bucket_in_scope": "none | light | moderate | heavy | null",
-          "reply_count": "integer",
-          "unique_reviewers": "integer",
-          "trailer_only_count": "integer",
-          "light_count": "integer",
-          "substantive_count": "integer",
-          "deep_count": "integer",
-          "in_scope_reply_count": "integer or null",
-          "in_scope_unique_reviewers": "integer or null",
-          "in_scope_trailer_only_count": "integer or null",
-          "in_scope_light_count": "integer or null",
-          "in_scope_substantive_count": "integer or null",
-          "in_scope_deep_count": "integer or null",
-          "had_nack": "boolean",
-          "had_v_next": "boolean",
-          "had_authoritative_ack": "boolean or null",
-          "per_reply": [
-            {
-              "message_id": "<the comment's Message-Id>",
-              "substance": "trailer_only | light | substantive | deep",
-              "in_scope": "boolean (whether the reply's author is in maintainer.authoritative_set / authoritative_reviewer_set)"
-            }
-          ],
-          "source": "tree | thread"
-        },
-        "preparation_notes": {
-          "warnings": ["string", "..."],
-          "confidence": "high | medium | low",
-          "confidence_reason": "string",
-          "mode": "authoritative | heuristic | mixed",
-          "mode_degradation_reason": "string or null"
-        },
-        "self_review_record": {
-          "summary": "string (required, non-empty)",
-          "challenges": [
-            {
-              "target_kind": "claim | verification | field | ...",
-              "target_id": "string (field path, e.g., 'metadata.subsystem.primary[0]')",
-              "challenge_kind": "mode_honesty | verification_skipped | silent_scope_narrowing | ...",
-              "challenge_text": "string",
-              "outcome": "upheld | revised | dropped",
-              "outcome_note": "string (required)"
-            }
-          ]
-        }
-      }
-      ```
-
       ### Quality Bar
 
       - **Discovery is mandatory, fabrication is forbidden.** The base commit you report in `tree_state.base_commit_declared` must come from a `base-commit:` trailer that exists in the patchset. If no such trailer is present, the field is `null` and you operate in heuristic mode. Never guess a base.
@@ -1263,16 +1130,21 @@ operations:
       You are producing data that will be aggregated across 100,000 patchsets and used to define statistical strata. Consistency across patchsets matters more than cleverness on any single patchset. **Authoritative answers are preferred but heuristic answers are not failures** — the `source` and `mode` fields exist precisely so downstream code can handle both correctly. What matters is honesty about which you produced.
 
       When in doubt: don't guess. Use `null`, set the appropriate `source`, mark the mode honestly, and let downstream stratification decide what to do with that signal.
-
-      Emit the JSON object now.
     return: |
-      Return a single JSON object conforming EXACTLY to this JSON Schema —
-      every required field present, no additional properties, every
-      key spelled as shown:
+      Return a single JSON object that conforms EXACTLY to the JSON
+      Schema below. Rules:
+
+      - Every required field present.
+      - No additional properties.
+      - Every key spelled CHARACTER-FOR-CHARACTER as the schema shows.
+        Do NOT autocorrect schema keys to more natural English
+        spellings — if the schema says `was_cc_d`, emit `was_cc_d`,
+        not `was_cc'd`.
+      - Raw JSON only — no prose, no markdown fences, no preamble.
+
+      Schema:
 
       %COMPLETION_RECORD_SCHEMA_JSON%
-
-      Return raw JSON only — no prose, no markdown fences.
 
   review:
     guidance: |
@@ -1357,11 +1229,23 @@ operations:
       location citation, or `"stage3"` for a Stage 3 challenge. The
       `summary` is required even when no challenges arose.
     return: |
-      Return a single JSON object conforming to the review-record
-      shape in docs/API.md → *The review record* and
-      common/schema/completion-record.schema.yaml. The outcome is "reviewed"
-      (with concerns[]) or "unappliable" / "deferred" (with a reason
-      string). Raw JSON only.
+      The outcome is "reviewed" (with concerns[]) or "unappliable" /
+      "deferred" (with a reason string).
+
+      Return a single JSON object that conforms EXACTLY to the JSON
+      Schema below. Rules:
+
+      - Every required field present.
+      - No additional properties.
+      - Every key spelled CHARACTER-FOR-CHARACTER as the schema shows.
+        Do NOT autocorrect schema keys to more natural English
+        spellings — if the schema says `was_cc_d`, emit `was_cc_d`,
+        not `was_cc'd`.
+      - Raw JSON only — no prose, no markdown fences, no preamble.
+
+      Schema:
+
+      %COMPLETION_RECORD_SCHEMA_JSON%
 
   train:
     guidance: |
@@ -1421,16 +1305,28 @@ operations:
       new_candidate or revise_existing (pool role only). The
       `summary` is required even when no challenges arose.
     return: |
-      Return a single JSON object conforming to the train-record
-      shape in docs/API.md → *The train record* and
-      common/schema/completion-record.schema.yaml. The outcome is "trained"
-      (with concerns_considered, comment_points, point_matches,
-      candidate_outcomes, check_outcomes, summary, and proposals[])
-      or "unappliable" / "deferred" (with a reason string). Schema
-      invariants: every concern_id referenced anywhere must appear
+      The outcome is "trained" (with concerns_considered, comment_points,
+      point_matches, candidate_outcomes, check_outcomes, summary, and
+      proposals[]) or "unappliable" / "deferred" (with a reason string).
+      Schema invariants: every concern_id referenced anywhere must appear
       in concerns_considered; every point_id referenced in
       point_matches must exist in comment_points; in holdout role,
-      proposals[] is empty. Raw JSON only.
+      proposals[] is empty.
+
+      Return a single JSON object that conforms EXACTLY to the JSON
+      Schema below. Rules:
+
+      - Every required field present.
+      - No additional properties.
+      - Every key spelled CHARACTER-FOR-CHARACTER as the schema shows.
+        Do NOT autocorrect schema keys to more natural English
+        spellings — if the schema says `was_cc_d`, emit `was_cc_d`,
+        not `was_cc'd`.
+      - Raw JSON only — no prose, no markdown fences, no preamble.
+
+      Schema:
+
+      %COMPLETION_RECORD_SCHEMA_JSON%
 
   draft:
     guidance: |
@@ -1500,13 +1396,23 @@ operations:
       payload challenged on bounded-authoring grounds. The
       `summary` is required even when no challenges arose.
     return: |
-      Return a single JSON object conforming to the draft-record
-      shape in docs/API.md → *The draft record* and
-      common/schema/completion-record.schema.yaml. The outcome is "drafted"
-      (with eligibility_dispositions[], proposals[],
-      cross_proposal_dependencies[], and node_notes) or "failed"
-      (with a reason string). A "drafted" record with zero proposals
-      is valid — every flag may be dispositioned as decline or
-      defer. Per-recommendation payload shapes are enumerated in
-      docs/API.md → *The draft record → Per-recommendation payload
-      shapes*. Raw JSON only.
+      The outcome is "drafted" (with eligibility_dispositions[],
+      proposals[], cross_proposal_dependencies[], and node_notes) or
+      "failed" (with a reason string). A "drafted" record with zero
+      proposals is valid — every flag may be dispositioned as decline
+      or defer.
+
+      Return a single JSON object that conforms EXACTLY to the JSON
+      Schema below. Rules:
+
+      - Every required field present.
+      - No additional properties.
+      - Every key spelled CHARACTER-FOR-CHARACTER as the schema shows.
+        Do NOT autocorrect schema keys to more natural English
+        spellings — if the schema says `was_cc_d`, emit `was_cc_d`,
+        not `was_cc'd`.
+      - Raw JSON only — no prose, no markdown fences, no preamble.
+
+      Schema:
+
+      %COMPLETION_RECORD_SCHEMA_JSON%
