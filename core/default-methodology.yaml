@@ -633,11 +633,6 @@ report_finalization:
       disposition is a separate
       patch, never a gate on this series.
   severity_scale:
-    # Rubric-wide policy. The `weighting` is used by statistical
-    # aggregation (severity_weighted_catch_rate, etc.); the
-    # `uncertainty_rule` resolves findings that match criteria from
-    # two levels; `cross_kind_defaults` set defaults for concerns whose
-    # patch_scope kind is series or cross_patch.
     weighting:
       critical: 2.0
       major: 1.0
@@ -649,12 +644,6 @@ report_finalization:
       series: major
       cross_patch: major
       patch: null
-    # The five levels, most severe first. Each level keeps the existing
-    # `tag` / `meaning` / `blocks_merge` shape and adds structured
-    # `criteria` and `anchors`. Criteria carry stable IDs that a node's
-    # severity_rationale references when assigning a finding's severity.
-    # Anchors are calibration examples drawn from the corpus; they start
-    # empty and accumulate as audit reveals drift.
     levels:
       - tag: critical
         meaning: |
@@ -856,12 +845,6 @@ report_finalization:
               `maintainability-problem` at minor, not this.
         anchors: []
 
-# The four operation prompts a node consults when handling a claim of
-# the corresponding task type. Each carries the prompt text (`guidance`)
-# and a prose description of what the node should return (`return`,
-# complementing the formal completion-record schema). Prompts version
-# with the methodology — every methodology_version bump fixes the
-# prompts a given task was run against.
 
 operations:
 

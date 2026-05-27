@@ -444,10 +444,16 @@ $defs:
     additionalProperties: false
     required: [prepare, review, train, draft]
     description: >-
-      The four operation prompts. One entry per node task type
+      The four operation prompts a node consults when handling a
+      claim of the corresponding task type. One entry per task type
       (prepare / review / train / draft). All four are required —
       a methodology with missing operations cannot serve a full
       claim mix and would let the node defeat its prompt by absence.
+      Operation prompts version with the methodology: every
+      methodology_version bump fixes the prompts a given task was
+      run against, so the prompt text used for a completed claim is
+      recoverable from methodology_versions.document — see
+      docs/ARCHITECTURE.md → Methodology evolution.
     properties:
       prepare:
         $ref: "#/$defs/operation"
@@ -469,6 +475,12 @@ $defs:
     description: >-
       One operation prompt — the guidance text sent to a node for the
       operation, plus a prose description of the expected return.
+      The `return` prose complements (does not replace) the formal
+      completion-record schema at common/schema/completion-record.
+      schema.yaml: the schema is authoritative on the structural
+      shape; `return` describes the task-specific outcome semantics
+      (`outcome` values, fields required per outcome, invariants
+      between fields) that the schema's branched `oneOf` enforces.
     properties:
       guidance:
         type: string
