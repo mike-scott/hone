@@ -304,14 +304,56 @@ def test_settings_page_shows_no_methodology_when_unbootstrapped(ctx):
 
 
 def test_export_methodology_returns_yaml_with_versioned_filename(ctx):
+    """The export renders the active methodology as YAML with a
+       version-stamped filename. Body round-trips through YAML; the
+       prose fields land in canonicalized form (Markdown reflowed
+       at PROSE_WRAP_COLUMN by core/methodology_format) which is
+       what the seeded default-methodology.yaml fixture already is
+       — so an idempotent equality holds."""
+    from core.methodology_format import normalize_methodology
     version, doc = _seed_active_methodology(ctx.db)
     r = ctx.client.get("/settings/methodology/export")
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("application/x-yaml")
     assert (f'filename="methodology-v{version}.yaml"'
             in r.headers["content-disposition"])
-    # Body round-trips through YAML and matches the seeded document.
-    assert yaml.safe_load(r.text) == doc
+    # Export canonicalizes prose fields — compare against the
+    # normalized form of the seeded document.
+    assert yaml.safe_load(r.text) == normalize_methodology(doc)
+
+
+def test_export_methodology_preserves_default_style(ctx):
+    """The exported YAML mirrors core/default-methodology.yaml's style
+       — literal block scalars (`|`) for multi-line strings, list
+       items indented under their parent key — so an operator can
+       diff the export against the on-disk default by eye and hand-
+       edit without fighting PyYAML's default escape-heavy quoted-
+       string form.
+
+       Tracks the cosmetic side of the export-format audit: a round-
+       trip through yaml.safe_dump (PyYAML defaults) was producing
+       valid-but-ugly YAML that obscured real content drift behind
+       formatting noise."""
+    _seed_active_methodology(ctx.db)
+    body = ctx.client.get("/settings/methodology/export").text
+    # Literal block scalars: at least one `: |\n` survives the dump,
+    # rather than the default `: "…\n…"` quoted form.
+    assert ": |\n" in body
+    # List items indented under their parent key. The default
+    # methodology has principles at the top level, so the export
+    # should show `principles:\n  - id:` not `principles:\n- id:`.
+    assert "principles:\n  - id:" in body
+    # No PyYAML line-continuation backslashes — the custom dumper's
+    # literal-block representer keeps multi-line strings out of
+    # quoted-scalar territory where PyYAML's wrap would inject `\`.
+    assert "\\\n" not in body
+    # And the bytes round-trip back to the active document in
+    # canonicalized form (export normalizes prose via methodology_
+    # format.normalize_methodology).
+    import yaml
+    from core.methodology_format import normalize_methodology
+    assert yaml.safe_load(body) == normalize_methodology(
+        core_db.active_methodology(ctx.db)[1])
 
 
 def test_export_methodology_404_when_unbootstrapped(ctx):

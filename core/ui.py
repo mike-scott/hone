@@ -26,7 +26,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from common.version import __version__ as VERSION
-from core import core_db, gather, runtime_config
+from core import core_db, gather, methodology_format, runtime_config
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 templates = Jinja2Templates(directory=os.path.join(_HERE, "templates"))
@@ -885,21 +885,80 @@ async def trigger_gather(request: Request):
 
 # --- methodology import / export ------------------------------------------
 
+def _build_methodology_dumper():
+    """Subclass yaml.SafeDumper so an exported methodology looks like
+       the source default-methodology.yaml — diffable by eye, hand-
+       editable. Two overrides:
+
+         - increase_indent(flow=False, indentless=False) → False
+           forces list items to be indented under their parent key
+           (`  - id: foo`), instead of PyYAML's default left-hugging
+           form (`- id: foo`).
+         - str representer emits a literal block scalar (`|`) for any
+           string containing a newline, instead of PyYAML's default
+           double-quoted form with `\\n` escapes. Single-line strings
+           keep the default unquoted style.
+
+       PyYAML doesn't expose dumper config that achieves this via
+       safe_dump kwargs; the subclass is the documented path."""
+    import yaml
+
+    class _IndentedDumper(yaml.SafeDumper):
+        def increase_indent(self, flow=False, indentless=False):
+            return super().increase_indent(flow, False)
+
+    def _str_representer(dumper, data):
+        if "\n" in data:
+            return dumper.represent_scalar(
+                "tag:yaml.org,2002:str", data, style="|")
+        return dumper.represent_scalar("tag:yaml.org,2002:str", data)
+
+    _IndentedDumper.add_representer(str, _str_representer)
+    return _IndentedDumper
+
+
+def _dump_methodology_yaml(document):
+    """Serialize a methodology dict as YAML matching the style of
+       core/default-methodology.yaml. Shared between the export
+       endpoint and any future "render methodology as YAML" use
+       cases (e.g. a CLI dump command).
+
+       Prose wrapping is owned upstream by core/methodology_format
+       (mdformat at PROSE_WRAP_COLUMN). The custom representer
+       above forces every multi-line string to `|` literal block
+       style, which preserves those line breaks verbatim — PyYAML's
+       own `width` knob is moot for literal blocks and would not
+       fire on any single-line field in the methodology either."""
+    import yaml
+    return yaml.dump(document, Dumper=_build_methodology_dumper(),
+                      sort_keys=False, default_flow_style=False,
+                      allow_unicode=True)
+
+
 @router.get("/settings/methodology/export")
 async def export_methodology(request: Request):
     """Download the active methodology as YAML. Filename carries the
        DB version so an operator keeping a few revisions on disk can
-       tell them apart without diffing."""
-    import yaml
+       tell them apart without diffing. Style mirrors
+       core/default-methodology.yaml (literal block scalars,
+       indented list items) and prose is reflowed to
+       methodology_format.PROSE_WRAP_COLUMN — see
+       core/methodology_format for the canonicalization rules.
+
+       Defensive normalization on read: a DB row from before the
+       canonicalizer landed gets reflowed for the download so the
+       operator sees consistent output regardless of when v1 was
+       bootstrapped. Idempotent — already-normalized content passes
+       through unchanged."""
     db = request.app.state.db
     active = core_db.active_methodology(db)
     if active is None:
         raise HTTPException(status_code=404, detail="no active methodology")
     version, document = active
-    body = yaml.safe_dump(document, sort_keys=False,
-                           default_flow_style=False, allow_unicode=True)
+    document = methodology_format.normalize_methodology(document)
     return PlainTextResponse(
-        body, media_type="application/x-yaml",
+        _dump_methodology_yaml(document),
+        media_type="application/x-yaml",
         headers={"Content-Disposition":
                   f'attachment; filename="methodology-v{version}.yaml"'})
 
@@ -967,12 +1026,23 @@ async def import_methodology(request: Request,
                      exc.message)
         return RedirectResponse(
             "/settings?methodology_error=schema", status_code=303)
+    # Canonicalize prose fields BEFORE the content-identical
+    # check, so an operator who re-uploads the export they edited
+    # (with different whitespace / line breaks but the same
+    # semantics) gets the identical-rejection rather than spawning
+    # a near-duplicate row. See
+    # core/methodology_format.normalize_methodology.
+    document = methodology_format.normalize_methodology(document)
     db = request.app.state.db
     active = core_db.active_methodology(db)
     if active is not None:
         _active_db_version, active_doc = active
+        # Compare both sides in normalized form — protects the
+        # identical-reject path during the transition where an
+        # already-active DB row pre-dates this canonicalizer.
+        active_doc_norm = methodology_format.normalize_methodology(active_doc)
         if (_canonical_methodology_bytes(document)
-                == _canonical_methodology_bytes(active_doc)):
+                == _canonical_methodology_bytes(active_doc_norm)):
             log.info("methodology import: byte-identical to active "
                       "v%d; refusing to create a duplicate row",
                       _active_db_version)
