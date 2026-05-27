@@ -164,9 +164,15 @@ def _call_claude_sdk(cfg, system, user_text, *, model, max_tokens):
     # text turn there's exactly one block of type "text".
     text = "".join(block.text for block in resp.content
                     if getattr(block, "type", None) == "text")
+    # Same cache-aware summation as the CLI path: SDK's input_tokens
+    # is the uncached portion only when prompt-caching is in play.
+    cache_read     = getattr(resp.usage, "cache_read_input_tokens",     None) or 0
+    cache_creation = getattr(resp.usage, "cache_creation_input_tokens", None) or 0
+    input_uncached = resp.usage.input_tokens or 0
+    input_total    = input_uncached + cache_read + cache_creation
     return {"text":  _strip_fences(text),
              "model": chosen,
-             "usage": {"input_tokens":  resp.usage.input_tokens,
+             "usage": {"input_tokens":  input_total,
                        "output_tokens": resp.usage.output_tokens,
                        "duration_ms":   duration_ms}}
 
@@ -279,13 +285,24 @@ def _call_claude_cli(cfg, system, user_text, *, model):
     _record_outcome(None)
     usage = env.get("usage") or {}
     result_text = _strip_fences(env.get("result", ""))
-    log.info("claude CLI ← in=%s out=%s tokens, %.1fs",
-              usage.get("input_tokens"), usage.get("output_tokens"),
-              duration_ms / 1000)
+    # The CLI's `input_tokens` is the *non-cached* portion only; cached
+    # portions are reported separately. Sum all three so `input_tokens`
+    # downstream reflects what Claude actually processed (otherwise a
+    # 30k-token prompt served mostly from cache looks like a ~10-token
+    # request in the work-item record). Keep the cache split exposed
+    # too — useful for the per-call cost breakdown.
+    cache_read     = usage.get("cache_read_input_tokens")     or 0
+    cache_creation = usage.get("cache_creation_input_tokens") or 0
+    input_uncached = usage.get("input_tokens")                or 0
+    input_total    = input_uncached + cache_read + cache_creation
+    log.info("claude CLI ← in=%d (uncached=%d cache_read=%d cache_new=%d) "
+             "out=%s tokens, %.1fs",
+              input_total, input_uncached, cache_read, cache_creation,
+              usage.get("output_tokens"), duration_ms / 1000)
     log.debug("claude CLI ← result: %s", result_text)
     return {"text":  result_text,
              "model": env.get("model") or chosen,
-             "usage": {"input_tokens":  usage.get("input_tokens"),
+             "usage": {"input_tokens":  input_total,
                        "output_tokens": usage.get("output_tokens"),
                        "duration_ms":   duration_ms}}
 

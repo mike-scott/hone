@@ -201,7 +201,8 @@ class _CliCfg:
 # --- CLI backend ---------------------------------------------------------
 
 def _envelope(text="ok", model="claude-opus-4-7",
-              input_tokens=100, output_tokens=50, is_error=False):
+              input_tokens=100, output_tokens=50, is_error=False,
+              cache_creation_input_tokens=0, cache_read_input_tokens=0):
     """A `claude --output-format json` envelope shaped how the CLI
        emits it on a successful turn."""
     return {
@@ -216,8 +217,8 @@ def _envelope(text="ok", model="claude-opus-4-7",
         "total_cost_usd":    0.0001,
         "usage": {"input_tokens":  input_tokens,
                   "output_tokens": output_tokens,
-                  "cache_creation_input_tokens": 0,
-                  "cache_read_input_tokens":     0},
+                  "cache_creation_input_tokens": cache_creation_input_tokens,
+                  "cache_read_input_tokens":     cache_read_input_tokens},
     }
 
 
@@ -268,6 +269,31 @@ def test_cli_backend_runs_claude_with_the_right_cmdline(monkeypatch):
     # User text on stdin (not in argv).
     assert calls[0]["input"] == "USER-MESSAGE"
     assert "USER-MESSAGE" not in cmd
+
+
+def test_cli_backend_sums_cache_tokens_into_input_tokens(monkeypatch):
+    """The CLI envelope's `input_tokens` is the *non-cached* portion
+       only. cache_creation_input_tokens (first-write to cache) and
+       cache_read_input_tokens (served from cache) must be added in,
+       otherwise a 30k-token prompt served from cache looks like a
+       ~10-token request in the completion record.
+
+       Tracks audit finding #1: token usage was severely under-
+       reported because the wrapper was reading bare `input_tokens`
+       and ignoring the cache split."""
+    env = _envelope(input_tokens=50,
+                     cache_creation_input_tokens=200,
+                     cache_read_input_tokens=29750,
+                     output_tokens=1000)
+    _patch_run(monkeypatch, stdout=json.dumps(env), returncode=0)
+    out = ai.call_claude(_CliCfg(), "SYS", "USER")
+    assert out["usage"]["input_tokens"] == 30000      # 50 + 200 + 29750
+    assert out["usage"]["output_tokens"] == 1000
+    # No cache fields leak into usage — the completion-record schema
+    # has additionalProperties:false on `usage`, cache splits live
+    # in `meta` per docs.
+    assert "cache_read_input_tokens" not in out["usage"]
+    assert "cache_creation_input_tokens" not in out["usage"]
 
 
 def test_cli_backend_uses_anthropic_model_from_cfg(monkeypatch):
