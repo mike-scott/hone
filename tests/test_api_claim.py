@@ -150,6 +150,43 @@ def test_substitute_passes_non_string_values_through():
     assert out == {"count": 42, "flag": True, "nada": None, "msg": "hi ok"}
 
 
+def test_substitute_reindents_multiline_values_to_line_indent():
+    """A multi-line replacement value adopts the leading whitespace of
+       the line where the token sits, prefixed onto every newline.
+       This is what keeps a JSON block dropped inside an indented
+       bullet from breaking out of its container."""
+    src = "preamble\n    %BLOB%\ntail"
+    out = api._substitute(src, {"%BLOB%": '{\n  "k": "v"\n}'})
+    # The opening brace lands where the token was (column 4 — handled
+    # by the token's own position). Each continuation line picks up
+    # the 4-space indent from the line.
+    assert out == 'preamble\n    {\n      "k": "v"\n    }\ntail'
+
+
+def test_substitute_does_not_reindent_when_line_has_no_indent():
+    """A token at column 0 leaves continuation lines at column 0 —
+       no leading whitespace means no re-indent. Idempotent for
+       single-line values too."""
+    out_multiline = api._substitute(
+        "%BLOB%", {"%BLOB%": '{\n  "k": "v"\n}'})
+    assert out_multiline == '{\n  "k": "v"\n}'
+    out_single = api._substitute(
+        "x %TOK% y", {"%TOK%": "hi"})
+    assert out_single == "x hi y"
+
+
+def test_substitute_uses_only_leading_whitespace_not_full_prefix():
+    """If non-whitespace precedes the token on the line, the re-indent
+       still uses just the LEADING whitespace of the line — not the
+       column where the token starts. (Otherwise the alignment would
+       jut out into prose space.)"""
+    src = "    text before %BLOB% after"
+    out = api._substitute(src, {"%BLOB%": "L1\nL2"})
+    # Continuation lines get the 4-space indent from the line, NOT
+    # alignment with the column where %BLOB% started.
+    assert out == "    text before L1\n    L2 after"
+
+
 def test_methodology_variables_returns_iso_and_long_dates():
     """The variable registry exposes %DATE_SHORT% (ISO-8601, fixed
        length 10) and %DATE_LONG% (natural-language form). Both
@@ -164,13 +201,70 @@ def test_methodology_variables_returns_iso_and_long_dates():
     assert vars_["%DATE_SHORT%"][:4] in vars_["%DATE_LONG%"]
 
 
+def test_methodology_variables_includes_completion_record_schema_per_task(
+        ):
+    """%COMPLETION_RECORD_SCHEMA_JSON% is per-task-type: the prepare
+       branch's $ref-resolved schema gets injected for a prepare
+       claim, the review branch for a review claim, etc. Lets the
+       methodology drop a single token where it wants the
+       authoritative output contract."""
+    prepare_vars = api._methodology_variables("prepare")
+    review_vars  = api._methodology_variables("review")
+    assert "%COMPLETION_RECORD_SCHEMA_JSON%" in prepare_vars
+    assert "%COMPLETION_RECORD_SCHEMA_JSON%" in review_vars
+    # Schemas are distinct — prepare's task_type const is "prepare",
+    # review's is "review".
+    assert '"const": "prepare"' in prepare_vars[
+        "%COMPLETION_RECORD_SCHEMA_JSON%"]
+    assert '"const": "review"' in review_vars[
+        "%COMPLETION_RECORD_SCHEMA_JSON%"]
+    # No task_type → variable is omitted (existing callers don't get
+    # surprised).
+    assert "%COMPLETION_RECORD_SCHEMA_JSON%" not in api._methodology_variables()
+
+
+def test_completion_record_schema_has_refs_resolved():
+    """The injected schema is self-contained — no $ref nodes left to
+       chase. The model gets the full shape inline rather than
+       references it can't follow."""
+    schema_json = api._methodology_variables("prepare")[
+        "%COMPLETION_RECORD_SCHEMA_JSON%"]
+    # The original schema has $refs to e.g. prepare_tree_state; after
+    # resolution they're inlined and the literal "$ref" string is
+    # gone from the prepare branch.
+    assert "$ref" not in schema_json
+    # And specific inlined field shapes are present (was_cc_d is
+    # the often-missed mailing_list field name — the whole point of
+    # injecting the schema is so Claude sees it spelled correctly).
+    assert "was_cc_d" in schema_json
+
+
+def test_compile_methodology_injects_resolved_schema_into_return(monkeypatch):
+    """End-to-end: a prepare-task return field carrying the new
+       %COMPLETION_RECORD_SCHEMA_JSON% token comes back with the
+       inlined JSON Schema in place, at the right indent."""
+    doc = {"principles": [],
+            "operations": {"prepare": {
+                "guidance": "g",
+                # Indented placement to exercise the indent re-apply.
+                "return": "  schema:\n    %COMPLETION_RECORD_SCHEMA_JSON%"}}}
+    out = api._compile_methodology(doc, "prepare")
+    ret = out["operations"]["prepare"]["return"]
+    assert "%COMPLETION_RECORD_SCHEMA_JSON%" not in ret
+    # Schema is in the output, indented 4 spaces — same indent as
+    # the placeholder's line in the source.
+    assert "\n    {" in ret           # opening brace on a 4-indented line
+    assert '"const": "prepare"' in ret
+
+
 def test_compile_methodology_substitutes_date_into_principles(monkeypatch):
     """End-to-end: a principle body carrying %DATE_LONG% comes back
        with the live date string, not the literal token. Variables
        are monkeypatched to a fixed value so the test is hermetic."""
     monkeypatch.setattr(api, "_methodology_variables",
-                         lambda: {"%DATE_LONG%": "Tuesday, 26 May 2026",
-                                  "%DATE_SHORT%": "2026-05-26"})
+                         lambda *_a, **_kw: {
+                             "%DATE_LONG%": "Tuesday, 26 May 2026",
+                             "%DATE_SHORT%": "2026-05-26"})
     doc = {"principles": [
         {"id": "set-current-date",
          "title": "Establish the current date",

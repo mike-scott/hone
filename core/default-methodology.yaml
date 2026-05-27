@@ -1266,17 +1266,13 @@ operations:
 
       Emit the JSON object now.
     return: |
-      Return a single JSON object conforming to the prepare-record
-      shape documented in docs/API.md → *The prepare record* and validated
-      by common/schema/completion-record.schema.yaml. The object's outcome is
-      either "prepared" (with the structured metadata fields populated
-      flat at the top level of the record — no metadata wrapper) or
-      "uncharacterisable" (with a reason string). The success-path
-      record carries the structured fields the prompt's Output Contract
-      enumerates (patchset_id, tree_state, subsystem, patch_size,
-      maintainer, patch_type, review_intensity, preparation_notes) plus
-      self_review_record. Return raw JSON only — no prose, no markdown
-      fences.
+      Return a single JSON object conforming EXACTLY to this JSON Schema —
+      every required field present, no additional properties, every
+      key spelled as shown:
+
+      %COMPLETION_RECORD_SCHEMA_JSON%
+
+      Return raw JSON only — no prose, no markdown fences.
 
   review:
     guidance: |

@@ -11,6 +11,7 @@ HTTP call per task instead of three.
 """
 import copy
 import datetime
+import json
 import os
 import re
 import secrets
@@ -284,19 +285,68 @@ _OUTCOME_STATE = {
 _VAR_RE = re.compile(r"%[A-Z][A-Z0-9_]*%")
 
 
-def _methodology_variables():
+def _resolve_refs(node, defs, seen=None):
+    """Inline `{"$ref": "#/$defs/X"}` nodes from `defs` so the
+       returned schema is self-contained (no $refs left to chase).
+       `seen` tracks the in-progress ref chain to break the unlikely
+       cycle without an infinite loop."""
+    if seen is None:
+        seen = ()
+    if isinstance(node, dict):
+        ref = node.get("$ref", "")
+        if isinstance(ref, str) and ref.startswith("#/$defs/"):
+            name = ref.split("/")[-1]
+            if name in seen or name not in defs:
+                return node
+            return _resolve_refs(defs[name], defs, seen + (name,))
+        return {k: _resolve_refs(v, defs, seen) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_resolve_refs(v, defs, seen) for v in node]
+    return node
+
+
+def _completion_record_schemas():
+    """Per-task-type JSON-Schema branches from common/schema/completion-
+       record.schema.yaml, with $refs resolved so each one is a
+       self-contained JSON document. Built once at import time;
+       returned as a {task_type: pretty-JSON-string} dict for
+       direct injection via the %COMPLETION_RECORD_SCHEMA_JSON%
+       variable."""
+    defs = _RECORD_SCHEMA.get("$defs", {})
+    out = {}
+    for tt in ("prepare", "review", "train", "draft"):
+        branch = defs.get(f"{tt}_record")
+        if branch is not None:
+            out[tt] = json.dumps(_resolve_refs(branch, defs), indent=2)
+    return out
+
+
+_COMPLETION_RECORD_SCHEMAS = _completion_record_schemas()
+
+
+def _methodology_variables(task_type=None):
     """Live values substituted into the compiled methodology slice at
-       claim time. Today: the current date in two human-friendly forms.
-       Future additions land alongside (NODE_NAME, METHODOLOGY_VERSION,
-       PATCH_SUBJECT for train, …) — the registry grows here."""
+       claim time. Today:
+         - %DATE_LONG% / %DATE_SHORT% — the current date in two
+           human-friendly forms.
+         - %COMPLETION_RECORD_SCHEMA_JSON% — when `task_type` is
+           given, the JSON Schema for that task type's completion
+           record (with $refs resolved). Lets the methodology drop
+           a single placeholder where it wants the authoritative
+           output contract, instead of hardcoding a verbal
+           description that drifts from the schema."""
     now = datetime.datetime.now(datetime.timezone.utc)
-    return {
+    out = {
         # "Tuesday, 26 May 2026" — natural-language form for prose
         # framing (e.g. the set-current-date principle).
         "%DATE_LONG%":  now.strftime("%A, %-d %B %Y"),
         # "2026-05-26" — ISO-8601 for trailers / comparisons / logs.
         "%DATE_SHORT%": now.strftime("%Y-%m-%d"),
     }
+    if task_type and task_type in _COMPLETION_RECORD_SCHEMAS:
+        out["%COMPLETION_RECORD_SCHEMA_JSON%"] = \
+            _COMPLETION_RECORD_SCHEMAS[task_type]
+    return out
 
 
 def _substitute(value, variables):
@@ -305,13 +355,40 @@ def _substitute(value, variables):
        through lists and dicts. Unknown tokens are passed through
        unchanged — see _VAR_RE rationale above."""
     if isinstance(value, str):
-        return _VAR_RE.sub(
-            lambda m: variables.get(m.group(0), m.group(0)), value)
+        return _expand_tokens(value, variables)
     if isinstance(value, list):
         return [_substitute(v, variables) for v in value]
     if isinstance(value, dict):
         return {k: _substitute(v, variables) for k, v in value.items()}
     return value
+
+
+def _expand_tokens(s, variables):
+    """Replace `%NAME%` tokens in a string. Multi-line replacement
+       values are RE-INDENTED to match the leading-whitespace prefix
+       of the line the token sits on, so a JSON block dropped into
+       an indented bullet stays at that indent across the block
+       (otherwise lines 2+ would land at column 0 and break the
+       containing markdown/YAML structure)."""
+    def replace(match):
+        token = match.group(0)
+        value = variables.get(token)
+        if value is None:
+            return token
+        if "\n" not in value:
+            return value
+        # Find the line the token starts on, lift its leading
+        # whitespace, prefix every newline in the replacement with
+        # it. First line of the replacement doesn't need re-indenting
+        # — the token's own position handles that.
+        line_start = s.rfind("\n", 0, match.start()) + 1
+        prefix_to_token = s[line_start:match.start()]
+        leading_ws = prefix_to_token[
+            :len(prefix_to_token) - len(prefix_to_token.lstrip())]
+        if leading_ws:
+            return value.replace("\n", "\n" + leading_ws)
+        return value
+    return _VAR_RE.sub(replace, s)
 
 
 def _compile_methodology(document, task_type_name):
@@ -341,7 +418,7 @@ def _compile_methodology(document, task_type_name):
                 "operations": {task_type_name:
                               document.get("operations", {}).get(task_type_name,
                                                                   {})}}
-    return _substitute(compiled, _methodology_variables())
+    return _substitute(compiled, _methodology_variables(task_type_name))
 
 
 def _patches_payload(db, root):
