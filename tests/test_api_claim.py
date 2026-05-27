@@ -105,6 +105,84 @@ def test_compile_methodology_omits_other_operations():
                                               "return": "rr"}}
 
 
+# --- variable substitution ------------------------------------------------
+
+def test_substitute_replaces_known_tokens_in_strings():
+    """%NAME% tokens get replaced from the variables dict; everything
+       else passes through verbatim."""
+    out = api._substitute("today is %DATE_LONG%, run %DATE_SHORT%",
+                           {"%DATE_LONG%": "Tuesday, 26 May 2026",
+                            "%DATE_SHORT%": "2026-05-26"})
+    assert out == "today is Tuesday, 26 May 2026, run 2026-05-26"
+
+
+def test_substitute_leaves_unknown_tokens_in_place():
+    """Methodology text may want to discuss the syntax itself; an
+       unknown token like %FUTURE_VAR% is left literal, not stripped
+       or errored on."""
+    out = api._substitute("hello %FUTURE_VAR% world",
+                           {"%DATE_LONG%": "x"})
+    assert out == "hello %FUTURE_VAR% world"
+
+
+def test_substitute_recurses_through_lists_and_dicts():
+    """The methodology slice is a nested dict/list of strings —
+       _substitute walks the structure and replaces tokens inside
+       every string regardless of depth."""
+    doc = {
+        "principles": [
+            {"body": "the date is %DATE_LONG%"},
+            {"body": "iso: %DATE_SHORT%"},
+        ],
+        "operations": {"prepare": {"guidance": "now: %DATE_LONG%"}},
+    }
+    out = api._substitute(doc, {"%DATE_LONG%": "L", "%DATE_SHORT%": "S"})
+    assert out["principles"][0]["body"] == "the date is L"
+    assert out["principles"][1]["body"] == "iso: S"
+    assert out["operations"]["prepare"]["guidance"] == "now: L"
+
+
+def test_substitute_passes_non_string_values_through():
+    """Non-string leaves (int, bool, None) are not touched; only
+       string nodes are scanned."""
+    doc = {"count": 42, "flag": True, "nada": None, "msg": "hi %X%"}
+    out = api._substitute(doc, {"%X%": "ok"})
+    assert out == {"count": 42, "flag": True, "nada": None, "msg": "hi ok"}
+
+
+def test_methodology_variables_returns_iso_and_long_dates():
+    """The variable registry exposes %DATE_SHORT% (ISO-8601, fixed
+       length 10) and %DATE_LONG% (natural-language form). Both
+       come off the same UTC `now` snapshot."""
+    vars_ = api._methodology_variables()
+    assert set(vars_) == {"%DATE_LONG%", "%DATE_SHORT%"}
+    # ISO date: YYYY-MM-DD, ten chars, three dashes.
+    assert len(vars_["%DATE_SHORT%"]) == 10
+    assert vars_["%DATE_SHORT%"].count("-") == 2
+    # Long form is at least 12 chars (e.g. "1 May 2026" = 10, with
+    # weekday prefix ≥ 16) and contains the same year as ISO.
+    assert vars_["%DATE_SHORT%"][:4] in vars_["%DATE_LONG%"]
+
+
+def test_compile_methodology_substitutes_date_into_principles(monkeypatch):
+    """End-to-end: a principle body carrying %DATE_LONG% comes back
+       with the live date string, not the literal token. Variables
+       are monkeypatched to a fixed value so the test is hermetic."""
+    monkeypatch.setattr(api, "_methodology_variables",
+                         lambda: {"%DATE_LONG%": "Tuesday, 26 May 2026",
+                                  "%DATE_SHORT%": "2026-05-26"})
+    doc = {"principles": [
+        {"id": "set-current-date",
+         "title": "Establish the current date",
+         "body": "the current date is %DATE_LONG% (%DATE_SHORT%)"}],
+            "operations": {"prepare": {"guidance": "g", "return": "r"}}}
+    out = api._compile_methodology(doc, "prepare")
+    body = out["core"]["principles"][0]["body"]
+    assert "%DATE_LONG%" not in body
+    assert "Tuesday, 26 May 2026" in body
+    assert "2026-05-26" in body
+
+
 # --- /v1/claims endpoint --------------------------------------------------
 
 def test_claim_returns_204_when_queue_empty(ctx):

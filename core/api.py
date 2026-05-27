@@ -10,7 +10,9 @@ messages, training comments, compiled methodology), so a node makes one
 HTTP call per task instead of three.
 """
 import copy
+import datetime
 import os
+import re
 import secrets
 import time
 
@@ -258,6 +260,60 @@ _OUTCOME_STATE = {
 }
 
 
+# --- methodology variable substitution -----------------------------------
+#
+# The compiled methodology slice supports `%NAME%` placeholders that get
+# replaced with live values at claim-compile time, so the static YAML
+# can refer to dynamic things (today's date today, the node name
+# eventually, etc.) without the methodology author having to imagine
+# every concrete value.
+#
+# Format rules:
+#   - Token: `%[A-Z][A-Z0-9_]*%` (uppercase ASCII + underscores).
+#   - Lookup table built per claim by _methodology_variables().
+#   - Unknown tokens are LEFT IN PLACE — methodology prose might want
+#     to discuss the syntax itself ("the %DATE_LONG% placeholder is
+#     substituted at claim time…").
+#
+# Variable choice rationale: `%NAME%` avoids the brace collisions with
+# JSON / Python-format / Jinja that pepper the methodology's prompt
+# bodies, and the methodology already uses %DATE% in the
+# set-current-date principle — this pass formalises what was already
+# implicitly there.
+
+_VAR_RE = re.compile(r"%[A-Z][A-Z0-9_]*%")
+
+
+def _methodology_variables():
+    """Live values substituted into the compiled methodology slice at
+       claim time. Today: the current date in two human-friendly forms.
+       Future additions land alongside (NODE_NAME, METHODOLOGY_VERSION,
+       PATCH_SUBJECT for train, …) — the registry grows here."""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    return {
+        # "Tuesday, 26 May 2026" — natural-language form for prose
+        # framing (e.g. the set-current-date principle).
+        "%DATE_LONG%":  now.strftime("%A, %-d %B %Y"),
+        # "2026-05-26" — ISO-8601 for trailers / comparisons / logs.
+        "%DATE_SHORT%": now.strftime("%Y-%m-%d"),
+    }
+
+
+def _substitute(value, variables):
+    """Walk a methodology slice and replace `%NAME%` tokens in every
+       string with the matching `variables[token]` value. Recurses
+       through lists and dicts. Unknown tokens are passed through
+       unchanged — see _VAR_RE rationale above."""
+    if isinstance(value, str):
+        return _VAR_RE.sub(
+            lambda m: variables.get(m.group(0), m.group(0)), value)
+    if isinstance(value, list):
+        return [_substitute(v, variables) for v in value]
+    if isinstance(value, dict):
+        return {k: _substitute(v, variables) for k, v in value.items()}
+    return value
+
+
 def _compile_methodology(document, task_type_name):
     """The methodology compilation handed to the node: a `core` slice plus the
        operation-specific guidance + return spec for `task_type_name`. The
@@ -270,17 +326,22 @@ def _compile_methodology(document, task_type_name):
        documentation_review / report_finalization at the top level (per
        common/schema/methodology.schema.yaml). The compiled slice wraps the
        selection under a synthetic `core` key so the node sees a clean
-       core-vs-operations split."""
+       core-vs-operations split.
+
+       The returned slice has %NAME% placeholders substituted via
+       _methodology_variables() — see the comment block above the
+       _VAR_RE definition."""
     _CORE_KEYS = ("principles", "stages", "checks",
                   "documentation_review", "report_finalization")
     if task_type_name == "prepare":
         core_slice = {"principles": document.get("principles", [])}
     else:
         core_slice = {k: document[k] for k in _CORE_KEYS if k in document}
-    return {"core": core_slice,
-            "operations": {task_type_name:
-                          document.get("operations", {}).get(task_type_name,
-                                                              {})}}
+    compiled = {"core": core_slice,
+                "operations": {task_type_name:
+                              document.get("operations", {}).get(task_type_name,
+                                                                  {})}}
+    return _substitute(compiled, _methodology_variables())
 
 
 def _patches_payload(db, root):

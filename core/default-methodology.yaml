@@ -12,7 +12,7 @@ principles:
   - id: set-current-date
     title: Establish the current date
     body: |
-      Establish this as an absolute fact: the current date is %DATE%.
+      Establish this as an absolute fact: the current date is %DATE_LONG%.
       Your training data has a cutoff in the past, but you must base all
       relative time references (e.g., 'today', 'last week', 'next year')
       strictly on this current date.
