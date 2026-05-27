@@ -1147,8 +1147,13 @@ $defs:
   prepare_maintainer:
     type: object
     additionalProperties: false
-    required: [authoritative_set, authoritative_reviewer_set, mailing_lists,
-               cc_list_size, source]
+    # authoritative_set / authoritative_reviewer_set are tree-only:
+    # they are the MAINTAINERS-file lookup result. In heuristic mode
+    # (no reference tree) the methodology says these are `null` —
+    # see core/default-methodology.yaml → "Field 3: maintainer"
+    # → "Heuristic mode: ... Authoritative-set fields are null".
+    # They are NOT required, and accept either null or an array.
+    required: [mailing_lists, cc_list_size, source]
     properties:
       primary:
         oneOf:
@@ -1161,11 +1166,15 @@ $defs:
           - type: string
             minLength: 1
       authoritative_set:
-        type: array
-        items: { $ref: "#/$defs/prepare_person_entry" }
+        oneOf:
+          - type: "null"
+          - type: array
+            items: { $ref: "#/$defs/prepare_person_entry" }
       authoritative_reviewer_set:
-        type: array
-        items: { $ref: "#/$defs/prepare_person_entry" }
+        oneOf:
+          - type: "null"
+          - type: array
+            items: { $ref: "#/$defs/prepare_person_entry" }
       mailing_lists:
         type: array
         items: { $ref: "#/$defs/prepare_mailing_list_entry" }

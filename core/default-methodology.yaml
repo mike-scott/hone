@@ -1011,7 +1011,14 @@ operations:
       5. Capture **`maintainer.out_of_scope_engaged`**: people who replied substantively but aren't in the authoritative sets.
       6. **`maintainer.source`**: `"tree"`.
 
-      **Heuristic mode:** fall back to the base prompt's `To:`/`Cc:`/replies inference. Authoritative-set fields are `null`. `maintainer.source` is `"thread"`.
+      **Heuristic mode:** fall back to the base prompt's `To:`/`Cc:`/replies inference. **`authoritative_set` and `authoritative_reviewer_set` are `null`** (not `[]`, not a populated list parsed from `To:`). `maintainer.source` is `"thread"`.
+
+      In heuristic mode you have no MAINTAINERS file, so you cannot know who is *authoritatively* a maintainer vs. reviewer for the touched files. Specifically:
+
+      - Do NOT populate `authoritative_set` or `authoritative_reviewer_set` from the `To:` header. People on `To:` are recipients, not necessarily maintainers/reviewers — they go in `all_engaged` (when they reply) and the thread's `mailing_lists` (when the address is a list), but never in the authoritative-`*` sets unless you have MAINTAINERS evidence.
+      - Do NOT label people as `role: "maintainer"` vs `role: "reviewer"` based on training-data knowledge of who typically maintains what subsystem. That is fabrication: the role split has no thread-derived basis. The whole point of `mode = heuristic` is to be honest that you don't have authoritative role information.
+
+      If the `To:` line includes 8 people on a Qualcomm SM8250 device-tree patch, in heuristic mode all 8 are simply "recipients" — `authoritative_set: null`, `authoritative_reviewer_set: null`. Downstream code reads `mode = heuristic` and handles the absence appropriately.
 
       ---
 

@@ -186,6 +186,43 @@ def test_prepare_prepared_without_self_review_record_is_rejected(schema):
     _reject(schema, _prepare(outcome="prepared", **_PREPARE_METADATA))
 
 
+def test_prepare_accepts_null_for_authoritative_sets(schema):
+    """In heuristic mode (no reference tree) the authoritative-* sets
+       are the MAINTAINERS-file lookup result and have no honest value
+       — the methodology directs Claude to emit `null`, not `[]` and
+       not a populated list parsed from the To: header. The schema
+       accepts either null or an array.
+
+       Tracks audit finding #3: work-item 2 populated
+       authoritative_reviewer_set with names lifted from the cover
+       letter's To: header in heuristic mode (which is a methodology
+       violation), and would have hit a schema rejection if it had
+       done the right thing and emitted null."""
+    record = _prepare(outcome="prepared",
+                       self_review_record=_SELF_REVIEW,
+                       **{**_PREPARE_METADATA,
+                          "maintainer": {
+                              "authoritative_set":           None,
+                              "authoritative_reviewer_set":  None,
+                              "mailing_lists":               [],
+                              "cc_list_size":                0,
+                              "source":                      "thread"}})
+    _validate(schema, record)
+
+
+def test_prepare_authoritative_sets_can_be_omitted(schema):
+    """They're no longer in `required` (since heuristic mode lets them
+       be absent entirely). Empty maintainer block with just the
+       still-required fields validates."""
+    record = _prepare(outcome="prepared",
+                       self_review_record=_SELF_REVIEW,
+                       **{**_PREPARE_METADATA,
+                          "maintainer": {"mailing_lists": [],
+                                          "cc_list_size":  0,
+                                          "source":        "thread"}})
+    _validate(schema, record)
+
+
 def test_prepare_accepts_null_for_tree_only_subobjects(schema):
     """In heuristic mode (no reference kernel tree on the node) the
        tree-only sub-objects `patch_size.churn_ratio` and
