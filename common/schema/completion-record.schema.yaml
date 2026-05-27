@@ -1020,6 +1020,13 @@ $defs:
         enum: [tree, thread, mixed]
 
   prepare_churn_ratio:
+    # Entire sub-object is tree-only. In heuristic mode (no reference
+    # tree) it is honest to emit `null` for the whole block — the
+    # node never ran the queries that would have filled the leaves.
+    # The schema accepts either `null` (whole block) or the populated
+    # object; see prepare_patch_size.churn_ratio for the oneOf
+    # wrapper. The methodology's `mode` field on preparation_notes
+    # is the load-bearing signal for which shape downstream sees.
     type: object
     additionalProperties: false
     required: [max, mean, high_churn_file_count]
@@ -1037,6 +1044,29 @@ $defs:
           - type: "null"
           - type: integer
             minimum: 0
+
+  prepare_file_activity:
+    # Tree-only sub-object: every leaf needs a git query against the
+    # reference tree. In heuristic mode the whole block is honestly
+    # `null` (see prepare_patch_type.file_activity for the oneOf
+    # wrapper at the use site).
+    type: object
+    additionalProperties: false
+    properties:
+      mean_commits_last_year:
+        oneOf: [ { type: "null" }, { type: number, minimum: 0.0 } ]
+      max_commits_last_year:
+        oneOf: [ { type: "null" }, { type: integer, minimum: 0 } ]
+      oldest_last_touched_days:
+        oneOf: [ { type: "null" }, { type: integer, minimum: 0 } ]
+      newest_last_touched_days:
+        oneOf: [ { type: "null" }, { type: integer, minimum: 0 } ]
+      submitter_recently_touched_files_ratio:
+        oneOf:
+          - type: "null"
+          - type: number
+            minimum: 0.0
+            maximum: 1.0
 
   prepare_patch_size:
     type: object
@@ -1073,7 +1103,9 @@ $defs:
         type: integer
         minimum: 1
       churn_ratio:
-        $ref: "#/$defs/prepare_churn_ratio"
+        oneOf:
+          - type: "null"
+          - $ref: "#/$defs/prepare_churn_ratio"
       source:
         type: string
         enum: [tree, thread]
@@ -1240,23 +1272,9 @@ $defs:
         type: array
         items: { $ref: "#/$defs/prepare_fixes_verified_entry" }
       file_activity:
-        type: object
-        additionalProperties: false
-        properties:
-          mean_commits_last_year:
-            oneOf: [ { type: "null" }, { type: number, minimum: 0.0 } ]
-          max_commits_last_year:
-            oneOf: [ { type: "null" }, { type: integer, minimum: 0 } ]
-          oldest_last_touched_days:
-            oneOf: [ { type: "null" }, { type: integer, minimum: 0 } ]
-          newest_last_touched_days:
-            oneOf: [ { type: "null" }, { type: integer, minimum: 0 } ]
-          submitter_recently_touched_files_ratio:
-            oneOf:
-              - type: "null"
-              - type: number
-                minimum: 0.0
-                maximum: 1.0
+        oneOf:
+          - type: "null"
+          - $ref: "#/$defs/prepare_file_activity"
       source:
         type: string
         enum: [tree, thread]

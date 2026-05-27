@@ -186,6 +186,30 @@ def test_prepare_prepared_without_self_review_record_is_rejected(schema):
     _reject(schema, _prepare(outcome="prepared", **_PREPARE_METADATA))
 
 
+def test_prepare_accepts_null_for_tree_only_subobjects(schema):
+    """In heuristic mode (no reference kernel tree on the node) the
+       tree-only sub-objects `patch_size.churn_ratio` and
+       `patch_type.file_activity` are honest as bare `null` — the
+       node never ran the git queries that fill them. The schema
+       accepts either null or the populated shape; the methodology's
+       `preparation_notes.mode` field is the load-bearing signal.
+
+       Tracks audit finding #2: prepare runs in heuristic mode were
+       being rejected at submit_result time because Claude emitted
+       bare null for file_activity while the schema required an
+       object."""
+    record = _prepare(outcome="prepared",
+                       self_review_record=_SELF_REVIEW,
+                       **{**_PREPARE_METADATA,
+                          "patch_size": {**_PREPARE_METADATA["patch_size"],
+                                          "churn_ratio": None,
+                                          "source": "thread"},
+                          "patch_type": {**_PREPARE_METADATA["patch_type"],
+                                          "file_activity": None,
+                                          "source": "thread"}})
+    _validate(schema, record)
+
+
 # --- review ----------------------------------------------------------------
 
 def test_review_reviewed_with_concerns(schema):
