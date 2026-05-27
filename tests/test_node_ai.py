@@ -44,8 +44,8 @@ def test_parse_json_response_returns_the_object():
     assert out == {"k": "v"}
 
 
-def test_parse_json_response_raises_on_malformed_json():
-    with pytest.raises(ValueError, match="not valid JSON"):
+def test_parse_json_response_raises_on_no_json_present():
+    with pytest.raises(ValueError, match="no parseable JSON object"):
         ai.parse_json_response("Sorry, can't help with that.")
 
 
@@ -56,6 +56,59 @@ def test_parse_json_response_raises_on_non_object():
         ai.parse_json_response("[1, 2, 3]")
     with pytest.raises(ValueError, match="expected an object"):
         ai.parse_json_response('"just a string"')
+
+
+def test_parse_json_response_recovers_from_prose_preamble():
+    """Claude habitually narrates before emitting JSON — "Based on my
+       discovery, …" preambles + bullets, then a fenced JSON block at
+       the end. The parser scans past the prose, finds the first
+       parseable `{` object, returns it. This is the production
+       failure mode we hit on work-item 1."""
+    raw = (
+        "Based on my discovery, no kernel tree path is accessible.\n"
+        "I'll operate in heuristic mode.\n\n"
+        "Now analyzing the patchset content:\n"
+        "- No `base-commit:` trailer\n"
+        "- All patches target Qualcomm clock drivers\n\n"
+        '```json\n'
+        '{"outcome": "prepared", "patchset_id": "<r1@x>"}\n'
+        '```')
+    out = ai.parse_json_response(raw)
+    assert out == {"outcome": "prepared", "patchset_id": "<r1@x>"}
+
+
+def test_parse_json_response_recovers_from_prose_postamble():
+    """The mirror case — JSON first, then a trailing explanation.
+       raw_decode stops at the end of the first complete object and
+       ignores everything after it."""
+    raw = ('{"outcome": "prepared", "k": "v"}\n\n'
+           "Note: I operated in heuristic mode because no tree was "
+           "available.")
+    out = ai.parse_json_response(raw)
+    assert out == {"outcome": "prepared", "k": "v"}
+
+
+def test_parse_json_response_skips_a_stray_brace_in_prose(monkeypatch):
+    """A `{` inside a prose preamble that doesn't open valid JSON
+       (e.g. an apologetic '{ note: ... }' written as prose) must
+       not trap the scanner — it keeps trying later `{` positions."""
+    raw = ("Note: in this case { I'd normally do X } but actually:\n"
+           '{"outcome": "ok"}')
+    out = ai.parse_json_response(raw)
+    assert out == {"outcome": "ok"}
+
+
+def test_parse_json_response_handles_fenced_json_after_prose():
+    """The exact production shape — multi-paragraph prose, then a
+       ```json … ``` block. The first-pass fence strip won't match
+       (prose precedes the fence), but the second-pass scan finds
+       the JSON inside the fence anyway."""
+    raw = ("Some narration.\n\n"
+           "```json\n"
+           '{"outcome": "prepared"}\n'
+           "```")
+    out = ai.parse_json_response(raw)
+    assert out == {"outcome": "prepared"}
 
 
 # --- auth-error translation ----------------------------------------------

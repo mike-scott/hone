@@ -290,17 +290,51 @@ def _call_claude_cli(cfg, system, user_text, *, model):
 
 
 def parse_json_response(text):
-    """Parse Claude's response text as a JSON object. Returns the dict on
-       success or raises ValueError with a short prose reason on failure
-       — the caller wraps that into an uncharacterisable / failed
-       completion record per the operation's failure-path contract."""
+    """Parse Claude's response text as a JSON object. Returns the dict
+       on success or raises ValueError with a short prose reason on
+       failure — the caller wraps that into an uncharacterisable /
+       failed completion record per the operation's failure-path
+       contract.
+
+       Tolerant of prose around the JSON: Claude is asked for raw JSON
+       only, but habitually narrates — "Based on my discovery, …"
+       preambles and `Now analyzing…` postambles are common and the
+       methodology's "no prose" directive alone doesn't suppress them.
+       The parser first strips an enclosing markdown fence (the
+       cleanest case), then scans for the first structural JSON
+       character and uses json.raw_decode to pluck out the first
+       complete object, ignoring any trailing content. Equivalent to
+       "find the JSON in this otherwise-text response"."""
+    cleaned = _strip_fences(text)
+    # First-pass: maybe the cleaned text IS pure JSON (the happy case
+    # after fence stripping).
+    direct_err = None
     try:
-        obj = json.loads(text)
+        obj = json.loads(cleaned)
     except json.JSONDecodeError as e:
-        raise ValueError(
-            f"response is not valid JSON: {e.msg} at line {e.lineno} "
-            f"col {e.colno}") from e
-    if not isinstance(obj, dict):
+        direct_err = e
+    else:
+        if isinstance(obj, dict):
+            return obj
         raise ValueError(
             f"response JSON is a {type(obj).__name__}, expected an object")
-    return obj
+    # Second-pass: scan for the first `{` that opens a parseable JSON
+    # object somewhere in the text. raw_decode consumes one JSON value
+    # from a string and reports where it stopped, ignoring trailing
+    # content — exactly what we want when Claude wraps the object in
+    # prose. Try every `{` position in order so a stray `{` in an
+    # earlier sentence doesn't trap us.
+    decoder = json.JSONDecoder()
+    for i, ch in enumerate(cleaned):
+        if ch != "{":
+            continue
+        try:
+            obj, _end = decoder.raw_decode(cleaned[i:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            return obj
+    raise ValueError(
+        f"response contains no parseable JSON object: "
+        f"{direct_err.msg} at line {direct_err.lineno} "
+        f"col {direct_err.colno}") from direct_err
