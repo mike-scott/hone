@@ -19,6 +19,7 @@ class Config:
     core_url:           str    # HONE_CORE_URL — the hone-core base URL
     fleet_secret:       str    # HONE_FLEET_SECRET — gates the enrollment API
     anthropic_api_key:  str    # ANTHROPIC_API_KEY — Claude API token (sdk only)
+    anthropic_model:    str    # ANTHROPIC_MODEL — model id; empty = code default
     claude_backend:     str    # HONE_CLAUDE_BACKEND — 'sdk' | 'cli'
     node_name:          str    # HONE_NODE_NAME — label shown to the operator
     data_dir:           str    # HONE_DATA — the mapped persistent volume
@@ -52,6 +53,7 @@ class Config:
             core_url           = os.environ["HONE_CORE_URL"].rstrip("/"),
             fleet_secret       = os.environ["HONE_FLEET_SECRET"],
             anthropic_api_key  = os.environ.get("ANTHROPIC_API_KEY", ""),
+            anthropic_model    = os.environ.get("ANTHROPIC_MODEL", "").strip(),
             claude_backend     = backend,
             node_name          = os.environ.get("HONE_NODE_NAME",
                                                 socket.gethostname()),

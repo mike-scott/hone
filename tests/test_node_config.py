@@ -12,6 +12,7 @@ def _set_minimum(monkeypatch, **extra):
     monkeypatch.setenv("HONE_FLEET_SECRET", "fleet")
     monkeypatch.delenv("HONE_CLAUDE_BACKEND", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
     for k, v in extra.items():
         monkeypatch.setenv(k, v)
 
@@ -66,6 +67,24 @@ def test_backend_value_is_lowercased(monkeypatch):
     _set_minimum(monkeypatch, HONE_CLAUDE_BACKEND="CLI")
     cfg = Config.from_env()
     assert cfg.claude_backend == "cli"
+
+
+def test_anthropic_model_defaults_to_empty_when_unset(monkeypatch):
+    """Unset ANTHROPIC_MODEL leaves cfg.anthropic_model empty — the
+       dispatcher then falls back to ai.DEFAULT_MODEL."""
+    _set_minimum(monkeypatch, HONE_CLAUDE_BACKEND="cli")
+    cfg = Config.from_env()
+    assert cfg.anthropic_model == ""
+
+
+def test_anthropic_model_is_read_from_env(monkeypatch):
+    """ANTHROPIC_MODEL flows through Config.from_env so operators can
+       pin the model from .env without code changes."""
+    _set_minimum(monkeypatch,
+                  HONE_CLAUDE_BACKEND="cli",
+                  ANTHROPIC_MODEL="claude-sonnet-4-6")
+    cfg = Config.from_env()
+    assert cfg.anthropic_model == "claude-sonnet-4-6"
 
 
 def test_claude_backends_enum_documents_supported_values():

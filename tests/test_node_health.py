@@ -113,6 +113,7 @@ def test_ai_records_auth_error_for_health(monkeypatch):
     ai._record_outcome(None)        # start clean
     with pytest.raises(ai.CallClaudeAuthError):
         ai.call_claude(SimpleNamespace(anthropic_api_key="sk-bad",
+                                         anthropic_model="",
                                          claude_backend="sdk"),
                        "system", "user")
     assert ai.get_last_error() == "auth"

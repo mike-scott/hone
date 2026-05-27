@@ -37,8 +37,11 @@ services:
       # $HOME/.claude) — see the commented mount below.
       HONE_CORE_URL:        "${HONE_CORE_URL:?set it in .env}"
       HONE_FLEET_SECRET:    "${HONE_FLEET_SECRET:?set it in .env}"
-      HONE_CLAUDE_BACKEND:  "${HONE_CLAUDE_BACKEND:-sdk}"
+      HONE_CLAUDE_BACKEND:  "${HONE_CLAUDE_BACKEND:-cli}"
+      ANTHROPIC_BASE_URL:   "${ANTHROPIC_BASE_URL:-}"
+      ANTHROPIC_AUTH_TOKEN: "${ANTHROPIC_AUTH_TOKEN:-}"
       ANTHROPIC_API_KEY:    "${ANTHROPIC_API_KEY:-}"
+      ANTHROPIC_MODEL:      "${ANTHROPIC_MODEL:-}"
     volumes:
       - hone-node-data:/data             # linux clones + scratch (self-populated)
       # OPT-IN: Claude Code subscribers without API billing can use the CLI

@@ -186,6 +186,7 @@ class SimpleNamespaceCfg:
        the SDK-path API key. Tests for the CLI backend instantiate with
        claude_backend='cli' to flip the dispatcher."""
     anthropic_api_key = "sk-test-placeholder"
+    anthropic_model = ""
     claude_backend = "sdk"
 
 
@@ -193,6 +194,7 @@ class _CliCfg:
     """A config with HONE_CLAUDE_BACKEND=cli set, for the CLI-path tests.
        anthropic_api_key isn't read but kept for shape parity."""
     anthropic_api_key = ""
+    anthropic_model = ""
     claude_backend = "cli"
 
 
@@ -266,6 +268,33 @@ def test_cli_backend_runs_claude_with_the_right_cmdline(monkeypatch):
     # User text on stdin (not in argv).
     assert calls[0]["input"] == "USER-MESSAGE"
     assert "USER-MESSAGE" not in cmd
+
+
+def test_cli_backend_uses_anthropic_model_from_cfg(monkeypatch):
+    """When the call site doesn't pass `model=`, the dispatcher falls
+       back to cfg.anthropic_model (sourced from $ANTHROPIC_MODEL) and
+       passes it to `claude --model`. This is the operator-facing
+       knob that lets .env pin the model without code changes."""
+    calls = _patch_run(monkeypatch, stdout=json.dumps(_envelope()),
+                        returncode=0)
+    cfg = _CliCfg()
+    cfg.anthropic_model = "claude-sonnet-4-6"
+    ai.call_claude(cfg, "SYS", "USER")          # no explicit model=
+    cmd = calls[0]["cmd"]
+    assert cmd[cmd.index("--model") + 1] == "claude-sonnet-4-6"
+
+
+def test_explicit_model_kwarg_beats_cfg_anthropic_model(monkeypatch):
+    """Explicit model= at the call site wins over cfg.anthropic_model.
+       Keeps the env knob from silently overriding per-call requests
+       (none today, but future operations may want it)."""
+    calls = _patch_run(monkeypatch, stdout=json.dumps(_envelope()),
+                        returncode=0)
+    cfg = _CliCfg()
+    cfg.anthropic_model = "claude-sonnet-4-6"
+    ai.call_claude(cfg, "SYS", "USER", model="claude-opus-4-7")
+    cmd = calls[0]["cmd"]
+    assert cmd[cmd.index("--model") + 1] == "claude-opus-4-7"
 
 
 def test_cli_backend_strips_fences_in_the_envelope_result(monkeypatch):

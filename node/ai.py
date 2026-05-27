@@ -67,9 +67,9 @@ class CallClaudeAuthError(Exception):
        producing the same clean error each time until the key is
        valid."""
 
-# Default model. Overridable per call (and via ANTHROPIC_MODEL on the
-# config — see node/config.py if you need it environment-driven).
-DEFAULT_MODEL = "claude-opus-4-7"
+# Default model. Resolution order in call_claude: explicit `model=`
+# kwarg → cfg.anthropic_model (ANTHROPIC_MODEL env) → DEFAULT_MODEL.
+DEFAULT_MODEL = "claude-sonnet-4-6"
 
 # Output budget for a single completion. Prepare / review / train / draft
 # all fit comfortably under this; bumped only if a future task's
@@ -114,9 +114,10 @@ def call_claude(cfg, system, user_text, *, model=None,
        of backend — the runner's main() prints the clean error and
        exits. Non-success outcomes update node.ai._LAST_ERROR so the
        health snapshot picks up the category."""
+    resolved = model or cfg.anthropic_model or None
     if cfg.claude_backend == "cli":
-        return _call_claude_cli(cfg, system, user_text, model=model)
-    return _call_claude_sdk(cfg, system, user_text, model=model,
+        return _call_claude_cli(cfg, system, user_text, model=resolved)
+    return _call_claude_sdk(cfg, system, user_text, model=resolved,
                              max_tokens=max_tokens)
 
 
