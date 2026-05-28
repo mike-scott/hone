@@ -11,9 +11,11 @@ unreachable churn — left unchecked this reached 116 GB.
 
 CLI:
   refrepo.py base <patch-file>          print the patch's base-commit: trailer
-  refrepo.py prepare <commit> <wt-dir>  ensure <commit> present (fetch it once,
+  refrepo.py prepare <commit> <wt-dir> [tree]
+                                        ensure <commit> present (fetch it once,
                                         serially, from the known remotes if
-                                        missing); add a detached worktree
+                                        missing — trying [tree] first when
+                                        given); add a detached worktree
   refrepo.py cleanup <wt-dir> [...]     remove prepared worktree(s)
   refrepo.py gc                         bound the repo (git gc --prune=now)
   refrepo.py status                     repo size + live worktrees
@@ -25,18 +27,20 @@ import re
 import subprocess
 import sys
 
+from node import cgit
+
 # The reference kernel repo. $HONE_REPO_DIR in the containerized node; the
 # precursor single-host tree otherwise.
 REPO = os.environ.get("HONE_REPO_DIR") or os.path.expanduser("~/src/linux-mainline")
 
-# The bounded set of remotes a base commit may be fetched from. Kept small on
-# purpose — every extra integration tree is more daily-rebased churn to gc.
-REMOTES = {
-    "origin":     "git://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git",
-    "linux-next": "git://git.kernel.org/pub/scm/linux/kernel/git/next/linux-next.git",
-    "net-next":   "git://git.kernel.org/pub/scm/linux/kernel/git/netdev/net-next.git",
-    "tip":        "git://git.kernel.org/pub/scm/linux/kernel/git/tip/tip.git",
-}
+# The remotes a base commit may be fetched from, derived from the shared
+# named-trees registry (node/cgit.py) so prepare's Tier-0 base resolution
+# and review's base fetch agree on the tree set and names — a recorded
+# `tree_state.base_tree` maps straight to a remote here. Keyed by the
+# registry's canonical name; the git_url is the fetch URL. (Every extra
+# integration tree is more daily-rebased churn to gc, so the registry is
+# kept small.)
+REMOTES = {t.name: t.git_url for t in cgit.DEFAULT_TREES}
 
 BASE_RE = re.compile(r'^base-commit:\s*([0-9a-f]{12,40})\b', re.I | re.M)
 
@@ -66,14 +70,31 @@ def base_of(patch_file):
     return m.group(1) if m else None
 
 
-def prepare(commit, wt_dir):
+def _fetch_order(base_tree=None):
+    """The order to try remotes in. With a `base_tree` hint that names a
+       known remote, try it first, then the rest; otherwise the default
+       registry order. The hint is just a reordering — every remote is
+       still tried — so a stale hint (linux-next force-pushes daily, so
+       a base recorded there at prepare time may be gone by review time)
+       costs at most one failed fetch, never a missed commit."""
+    names = list(REMOTES)
+    if base_tree and base_tree in REMOTES:
+        names = [base_tree] + [n for n in names if n != base_tree]
+    return names
+
+
+def prepare(commit, wt_dir, *, base_tree=None):
     """Ensure <commit> is present in the reference repo — fetching it once,
        serially, from the known remotes if missing — then add a detached
        worktree at <wt_dir>. Returns (wt_dir, 'present'|'fetched').
-       Raises RuntimeError if the commit cannot be obtained."""
+       Raises RuntimeError if the commit cannot be obtained.
+
+       `base_tree` is the tree the prepare phase resolved the base in
+       (tree_state.base_tree); when it names a known remote that remote
+       is fetched first, falling back to the full serial scan."""
     status = "present"
     if not have(commit):
-        for name in REMOTES:
+        for name in _fetch_order(base_tree):
             _ensure_remote(name)
             _git("fetch", "--quiet", name, commit)
             if have(commit):
@@ -122,7 +143,7 @@ def main():
     if cmd == "base" and len(a) >= 3:
         print(base_of(a[2]) or "")
     elif cmd == "prepare" and len(a) >= 4:
-        wt, how = prepare(a[2], a[3])
+        wt, how = prepare(a[2], a[3], base_tree=a[4] if len(a) >= 5 else None)
         print(f"{wt}\t{how}")
     elif cmd == "cleanup" and len(a) >= 3:
         cleanup(*a[2:])
