@@ -7,7 +7,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from core import core_db, ui
+from core import core_db, runtime_config, ui
 
 
 @pytest.fixture
@@ -16,6 +16,11 @@ def ctx(tmp_path):
     app = FastAPI()
     app.include_router(ui.router)
     app.state.db = db
+    # /nodes now sorts rows into health buckets and needs the
+    # runtime config's heartbeat threshold to decide what counts as
+    # stale (see ui._nodes_view).
+    app.state.runtime_config = runtime_config.load(
+        str(tmp_path / "config.yaml"))
     return SimpleNamespace(client=TestClient(app), db=db)
 
 

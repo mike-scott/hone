@@ -481,9 +481,126 @@ def _health_display(health):
 
 # --- node management -------------------------------------------------------
 
+def _relative_duration(seconds):
+    """Compact duration string for a `now - timestamp` interval. Used
+       by the nodes-table freshness and running-time columns where
+       operators want a glanceable "how long" rather than a precise
+       UTC string. Returns "—" for None / 0 so empty cells read as
+       blank rather than `0s`."""
+    if seconds is None or seconds <= 0:
+        return "—"
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m {int(seconds % 60):02d}s"
+    if seconds < 86400:
+        return f"{int(seconds // 3600)}h {int((seconds % 3600) // 60):02d}m"
+    return f"{int(seconds // 86400)}d {int((seconds % 86400) // 3600):02d}h"
+
+
+# Bucket order on the /nodes page — loudest first, with idle
+# collapsed at the bottom. Mirrors the fleet-pulse chip's
+# loudest-wins logic so operators see the same priority across
+# both surfaces.
+_NODE_BUCKETS = (("errored",   "Errored"),
+                  ("stale",     "Stale"),
+                  ("in_flight", "In flight"),
+                  ("idle",      "Idle"))
+
+
+def _nodes_view(db, runtime_cfg):
+    """The view-model the /nodes table partial renders. Sorts each
+       enrolled node into one of four buckets — errored / stale /
+       in_flight / idle — and augments each row with the
+       running-time and freshness fields the table columns show.
+
+       Bucketing follows the same loudest-wins rule the fleet-pulse
+       chip uses: a node carrying an anthropic-error wins over
+       staleness, in-flight wins over plain idle. Each bucket is
+       sorted by last_seen DESC so the most-recently-active row
+       within the bucket appears first."""
+    now = int(time.time())
+    stale_after = (runtime_cfg.heartbeat_seconds
+                    * _FLEET_STALE_HEARTBEAT_MULT)
+    back_qs = "?back=" + quote("/nodes", safe="")
+
+    # Build a name → in-flight claim index so we can attach the
+    # claim to the right node row in a single pass below. One query,
+    # bounded by the number of CLAIMED work items.
+    claim_by_worker = {}
+    for w in core_db.list_work_items(
+            db, state=core_db.WORK_ITEM_STATE_CLAIMED, limit=10_000):
+        if w["claimed_by"]:
+            claim_by_worker.setdefault(w["claimed_by"], w)
+
+    buckets = {k: [] for k, _ in _NODE_BUCKETS}
+    for n in core_db.list_nodes(db):
+        n = dict(n)
+        if n["state"] != core_db.NODE_STATE_ACTIVE:
+            continue                                  # revoked → hidden
+        health = n.get("health") or {}
+        anth_err = (health.get("last_anthropic_error")
+                     if isinstance(health, dict) else None)
+        last_seen = n.get("last_seen") or 0
+        claim = claim_by_worker.get(n.get("name"))
+
+        # Loudest-wins bucket assignment.
+        if anth_err:
+            bucket = "errored"
+        elif last_seen and (now - last_seen) > stale_after:
+            bucket = "stale"
+        elif claim:
+            bucket = "in_flight"
+        else:
+            bucket = "idle"
+
+        freshness = (now - last_seen) if last_seen else None
+        running   = (now - claim["claimed_at"]
+                      if claim and claim["claimed_at"] else None)
+        n.update({
+            "task_types_display":  _types(n.get("task_types")),
+            "state_display":       core_db.NODE_STATE_NAMES.get(
+                                       n["state"], "?"),
+            "freshness_display":   _relative_duration(freshness),
+            "last_seen_tooltip":   _when(last_seen) if last_seen else "",
+            "running_time_display":_relative_duration(running),
+            "claim":               claim,
+            "claim_subject":       (claim["subject"]
+                                     or claim["root_message_id"]
+                                     if claim else None),
+            "claim_type":          (core_db.WORK_ITEM_TYPE_NAMES.get(
+                                         claim["type"], "?")
+                                     if claim else None),
+            "claim_url":           (f"/work-items/{claim['id']}{back_qs}"
+                                     if claim else None),
+            "health_display":      _health_display(n.get("health")),
+            "detail_url":          f"/nodes/{n['id']}{back_qs}",
+        })
+        buckets[bucket].append(n)
+
+    # Sort within each bucket — most-recently-seen first.
+    for key in buckets:
+        buckets[key].sort(key=lambda r: r.get("last_seen") or 0,
+                           reverse=True)
+
+    # Render-ready bucket list with counts; preserves the loudest-
+    # first order from _NODE_BUCKETS.
+    bucketed = [{"key": k, "label": label, "rows": buckets[k],
+                  "count": len(buckets[k]),
+                  "collapsed_by_default": k == "idle"}
+                 for k, label in _NODE_BUCKETS]
+    return {"buckets": bucketed,
+             "total":   sum(b["count"] for b in bucketed),
+             "node_state_active": core_db.NODE_STATE_ACTIVE}
+
+
 @router.get("/nodes", response_class=HTMLResponse)
 async def nodes(request: Request):
-    """The node fleet: the pending-enrollment queue and the enrolled nodes."""
+    """The node fleet: the pending-enrollment queue and the enrolled
+       nodes, sorted into health buckets (errored / stale / in-flight
+       / idle). The bucketed table partial polls /nodes/fleet-table
+       every 10s so an operator sees rows move between buckets and
+       running-time tick without reloading."""
     db = request.app.state.db
     pending = []
     for e in core_db.list_pending_enrollments(db):
@@ -491,26 +608,22 @@ async def nodes(request: Request):
         e["task_types_display"] = _types(e.get("task_types"))
         e["requested_display"]  = _when(e.get("created_at"))
         pending.append(e)
+    ctx = {"pending": pending,
+            **_nodes_view(db, request.app.state.runtime_config)}
+    return templates.TemplateResponse(request, "nodes.html", ctx)
 
-    # The current page's URL is the destination the detail page's
-    # ← Back link returns to. Threaded onto every row's detail_url.
-    back_qs = "?back=" + quote("/nodes", safe="")
 
-    fleet = []
-    for n in core_db.list_nodes(db):
-        n = dict(n)
-        n["task_types_display"] = _types(n.get("task_types"))
-        n["state_display"]      = core_db.NODE_STATE_NAMES.get(
-                                      n["state"], "?")
-        n["last_seen_display"]  = _when(n.get("last_seen"))
-        n["health_display"]     = _health_display(n.get("health"))
-        n["health_at_display"]  = _when(n.get("health_at"))
-        n["detail_url"]         = f"/nodes/{n['id']}{back_qs}"
-        fleet.append(n)
-
-    return templates.TemplateResponse(request, "nodes.html", {
-        "pending": pending, "nodes": fleet,
-        "node_state_active": core_db.NODE_STATE_ACTIVE})
+@router.get("/nodes/fleet-table", response_class=HTMLResponse)
+async def nodes_fleet_table(request: Request):
+    """The bucketed enrolled-nodes table as an HTML partial — polled
+       by the /nodes page every 10s. Skips the pending-enrollment
+       table (static between approve/deny clicks; an unnecessary
+       re-render would steal focus from any Approve button mid-
+       hover)."""
+    return templates.TemplateResponse(
+        request, "_nodes_fleet_table.html",
+        _nodes_view(request.app.state.db,
+                     request.app.state.runtime_config))
 
 
 # --- per-node detail ------------------------------------------------------
