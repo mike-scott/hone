@@ -1,108 +1,15 @@
 {# The queue page's body — the items table + the paginator (top + bottom).
    Rendered on its own for HTMX swap requests (paging clicks), and included
-   by queue.html for full page loads. The outermost div is the swap target. #}
-
-{# The 3-column bar that frames the items table on both sides — same
-   layout top and bottom: Showing X-Y of Z | paginator (centered) | Per
-   page. The middle col-4 holds the paginator when there's more than one
-   page; otherwise it renders empty so the Showing text and the size
-   selector stay anchored to the left/right edges across page counts.
-   The size selector has no `id` so the bar can appear twice without
-   duplicating an id in the DOM. #}
-{% macro paging_bar(paging, margin) %}
-<div class="row align-items-center {{ margin }}">
-  <div class="col-4">
-    <span class="text-muted small">
-      Showing <strong>{{ paging.start }}</strong>–<strong>{{ paging.end }}</strong>
-      of <strong>{{ paging.total }}</strong>
-    </span>
-  </div>
-  <div class="col-4 text-center">
-    {% if paging.pages > 1 %}{{ paginator(paging) }}{% endif %}
-  </div>
-  <div class="col-4">
-    <div class="d-flex align-items-center gap-2 justify-content-end">
-      <label class="text-muted small mb-0">Per page:</label>
-      <select class="form-select form-select-sm" style="width: auto"
-              onchange="window.location.href = this.options[this.selectedIndex].dataset.url">
-        {% for opt in paging.size_options %}
-        <option value="{{ opt.value }}" data-url="{{ opt.url }}"
-                {% if opt.value == paging.size %}selected{% endif %}>
-          {{ opt.value }}
-        </option>
-        {% endfor %}
-      </select>
-    </div>
-  </div>
-</div>
-{% endmacro %}
-
-{# One paginator definition, used twice — once inside each paging_bar
-   (top + bottom). Mb is the margin-bottom class so the caller can drop
-   the gap when nesting inside the bar. #}
-{% macro paginator(paging, mb="mb-0") %}
-<nav aria-label="Queue pagination">
-  <ul class="pagination pagination-sm justify-content-center {{ mb }}">
-    <li class="page-item {% if not paging.has_prev %}disabled{% endif %}">
-      <a class="page-link" href="{{ paging.first_url }}"
-         {% if paging.has_prev %}
-           hx-get="{{ paging.first_url }}"
-           hx-target="#queue-pane" hx-swap="outerHTML"
-           hx-push-url="true"
-         {% endif %}
-         aria-label="First page"><i class="bi bi-chevron-double-left"></i></a>
-    </li>
-    <li class="page-item {% if not paging.has_prev %}disabled{% endif %}">
-      <a class="page-link" href="{{ paging.prev_url }}"
-         {% if paging.has_prev %}
-           hx-get="{{ paging.prev_url }}"
-           hx-target="#queue-pane" hx-swap="outerHTML"
-           hx-push-url="true"
-         {% endif %}
-         aria-label="Previous page"><i class="bi bi-chevron-left"></i></a>
-    </li>
-    {% if paging.show_first_ellipsis %}
-    <li class="page-item disabled"><span class="page-link">…</span></li>
-    {% endif %}
-    {% for w in paging.window %}
-    <li class="page-item {% if w.active %}active{% endif %}">
-      <a class="page-link" href="{{ w.url }}"
-         {% if not w.active %}
-           hx-get="{{ w.url }}"
-           hx-target="#queue-pane" hx-swap="outerHTML"
-           hx-push-url="true"
-         {% endif %}>{{ w.page }}</a>
-    </li>
-    {% endfor %}
-    {% if paging.show_last_ellipsis %}
-    <li class="page-item disabled"><span class="page-link">…</span></li>
-    {% endif %}
-    <li class="page-item {% if not paging.has_next %}disabled{% endif %}">
-      <a class="page-link" href="{{ paging.next_url }}"
-         {% if paging.has_next %}
-           hx-get="{{ paging.next_url }}"
-           hx-target="#queue-pane" hx-swap="outerHTML"
-           hx-push-url="true"
-         {% endif %}
-         aria-label="Next page"><i class="bi bi-chevron-right"></i></a>
-    </li>
-    <li class="page-item {% if not paging.has_next %}disabled{% endif %}">
-      <a class="page-link" href="{{ paging.last_url }}"
-         {% if paging.has_next %}
-           hx-get="{{ paging.last_url }}"
-           hx-target="#queue-pane" hx-swap="outerHTML"
-           hx-push-url="true"
-         {% endif %}
-         aria-label="Last page"><i class="bi bi-chevron-double-right"></i></a>
-    </li>
-  </ul>
-</nav>
-{% endmacro %}
+   by queue.html for full page loads. The outermost div is the swap target.
+   Paging macros live in _paginator.html (shared with /nodes/{id}'s
+   Recent claims paginator); we import with hx_target="#queue-pane" so
+   page clicks fire HTMX outer-HTML swaps of the wrapper. #}
+{% from "_paginator.html" import paging_bar with context %}
 
 <div id="queue-body">
 
   {% if items %}
-  {{ paging_bar(paging, margin="mb-2") }}
+  {{ paging_bar(paging, hx_target="#queue-pane", margin="mb-2") }}
 
   {# Rows are clickable: the subject is a real <a> for keyboard / screen-
      reader navigation, and a delegated JS handler turns the rest of the
@@ -150,7 +57,7 @@
     })();
   </script>
 
-  {{ paging_bar(paging, margin="mt-2") }}
+  {{ paging_bar(paging, hx_target="#queue-pane", margin="mt-2") }}
 
   {% else %}
   <p class="text-muted">

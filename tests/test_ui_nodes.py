@@ -255,3 +255,103 @@ def test_live_panel_404_for_unknown_node(ctx):
        between page-load and the next 10s tick — HTMX leaves the
        prior panel state alone in that case."""
     assert ctx.client.get("/nodes/99999/live").status_code == 404
+
+
+# --- Recent-claims pagination ----------------------------------------------
+
+def _completed_claim(db, *, claimed_by, root, completed_at):
+    """A terminal-state work_item owned by the node — populates the
+       Recent claims history the paginator slices."""
+    if not db.execute("SELECT 1 FROM patchsets WHERE root_message_id=?",
+                       (root,)).fetchone():
+        _patchset(db, root)
+    db.execute(
+        "INSERT INTO work_items (type,root_message_id,state,claimed_by,"
+        "claimed_at,completed_at,enqueued_at) VALUES (?,?,?,?,?,?,?)",
+        (core_db.WORK_ITEM_TYPE_PREPARE, root,
+         core_db.WORK_ITEM_STATE_COMPLETED, claimed_by,
+         completed_at - 30, completed_at, completed_at - 60))
+    db.commit()
+
+
+def _seed_claims(db, node_name, n):
+    now = int(time.time())
+    for i in range(n):
+        _completed_claim(db, claimed_by=node_name, root=f"<c{i}@x>",
+                          completed_at=now - i)
+
+
+def test_recent_claims_defaults_to_10_per_page(ctx):
+    """Recent claims paginate at 10 by default — with 15 claims the
+       first page shows 10 + a paginator, and the heading reflects
+       the FULL count, not the page slice."""
+    now = int(time.time())
+    nid = _node(ctx.db, name="worker", last_seen=now,
+                 health={"last_anthropic_error": None})
+    _seed_claims(ctx.db, "worker", 15)
+    body = ctx.client.get(f"/nodes/{nid}").text
+    assert "Recent claims (15)" in body              # full total in heading
+    assert 'aria-label="Pagination"' in body
+    assert "Showing <strong>1</strong>–<strong>10</strong>" in body
+    assert "of <strong>15</strong>" in body
+
+
+def test_recent_claims_page_2_shows_the_next_slice(ctx):
+    now = int(time.time())
+    nid = _node(ctx.db, name="worker", last_seen=now,
+                 health={"last_anthropic_error": None})
+    _seed_claims(ctx.db, "worker", 15)
+    body = ctx.client.get(f"/nodes/{nid}",
+                           params={"claims_page": 2}).text
+    assert "Showing <strong>11</strong>–<strong>15</strong>" in body
+
+
+def test_recent_claims_size_options_are_10_25_50_100(ctx):
+    now = int(time.time())
+    nid = _node(ctx.db, name="worker", last_seen=now,
+                 health={"last_anthropic_error": None})
+    _seed_claims(ctx.db, "worker", 15)
+    body = ctx.client.get(f"/nodes/{nid}").text
+    for size in (10, 25, 50, 100):
+        assert f'value="{size}"' in body
+    # The default-10 option carries `selected>` in both the top and
+    # bottom size selectors. (Matching `selected>` specifically
+    # avoids the `selectedIndex` substring in the onchange handler.)
+    assert body.count("selected>") == 2
+
+
+def test_recent_claims_size_clamps_to_allowed_set(ctx):
+    """A bogus ?claims_size falls back to the default 10 — guards
+       against a hand-edited / attacker-supplied giant page size."""
+    now = int(time.time())
+    nid = _node(ctx.db, name="worker", last_seen=now,
+                 health={"last_anthropic_error": None})
+    _seed_claims(ctx.db, "worker", 15)
+    body = ctx.client.get(f"/nodes/{nid}",
+                           params={"claims_size": "999999"}).text
+    assert "Showing <strong>1</strong>–<strong>10</strong>" in body
+
+
+def test_recent_claims_no_paginator_when_one_page(ctx):
+    """Fewer claims than a page → no paginator nav, but the heading
+       still shows the count."""
+    now = int(time.time())
+    nid = _node(ctx.db, name="worker", last_seen=now,
+                 health={"last_anthropic_error": None})
+    _seed_claims(ctx.db, "worker", 3)
+    body = ctx.client.get(f"/nodes/{nid}").text
+    assert "Recent claims (3)" in body
+    assert 'aria-label="Pagination"' not in body
+
+
+def test_recent_claims_pagination_preserves_back(ctx):
+    """Paginating must keep the opener's ?back= so the ← Back button
+       still returns where the operator came from."""
+    now = int(time.time())
+    nid = _node(ctx.db, name="worker", last_seen=now,
+                 health={"last_anthropic_error": None})
+    _seed_claims(ctx.db, "worker", 15)
+    body = ctx.client.get(f"/nodes/{nid}",
+                           params={"back": "/nodes?tab=x"}).text
+    # The paginator's next-page link round-trips the back param.
+    assert "back=" in body

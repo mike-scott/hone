@@ -347,7 +347,7 @@ def test_queue_page_paginates_at_default_size(ctx):
     _seed_n_reviews(ctx.db, 40)
     body = ctx.client.get("/").text
     # paginator renders + indicates "Showing 1–25 of 40"
-    assert 'aria-label="Queue pagination"' in body
+    assert 'aria-label="Pagination"' in body
     assert "Showing <strong>1</strong>" in body
     assert "of <strong>40</strong>" in body
     # numbered links present: 1 (active) and 2
@@ -357,7 +357,7 @@ def test_queue_page_paginates_at_default_size(ctx):
 def test_queue_paginator_hidden_when_one_page(ctx):
     _seed_n_reviews(ctx.db, 3)
     body = ctx.client.get("/").text
-    assert 'aria-label="Queue pagination"' not in body
+    assert 'aria-label="Pagination"' not in body
 
 
 def test_queue_page_2_shows_the_next_slice(ctx):
@@ -417,7 +417,7 @@ def test_queue_paging_bar_mirrors_top_and_bottom(ctx):
     _seed_n_reviews(ctx.db, 75)
     body = ctx.client.get("/").text
     # both paginator <nav>s (the macro is invoked from each paging_bar)
-    assert body.count('aria-label="Queue pagination"') == 2
+    assert body.count('aria-label="Pagination"') == 2
     # Showing/total readout appears in both bars
     assert body.count("Showing <strong>1</strong>") == 2
     assert body.count("Per page:") == 2
@@ -431,7 +431,7 @@ def test_queue_paging_bar_renders_when_one_page(ctx):
        stays the same shape whether or not paging is needed."""
     _seed_n_reviews(ctx.db, 3)
     body = ctx.client.get("/").text
-    assert 'aria-label="Queue pagination"' not in body
+    assert 'aria-label="Pagination"' not in body
     # both bars still render
     assert body.count("Showing <strong>1</strong>") == 2
     assert body.count("Per page:") == 2

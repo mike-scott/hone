@@ -200,6 +200,13 @@ _TYPE_BADGE = {"prepare": "text-bg-secondary",
 _PAGE_SIZES = (25, 50, 100, 200)
 _DEFAULT_PAGE_SIZE = 25
 
+# Page-size options for the node-detail Recent-claims paginator. A
+# smaller default (10) than the queue — the claims list is a sidebar-
+# style history on a page that already has the live cards + reviews
+# above/below it, so a short slice keeps the page compact.
+_CLAIMS_PAGE_SIZES = (10, 25, 50, 100)
+_DEFAULT_CLAIMS_PAGE_SIZE = 10
+
 
 def _queue_url(*, type=None, state=None, page=None, size=None):
     """Build a `/?...` queue URL preserving the chosen axes + paging.
@@ -766,25 +773,59 @@ def _node_live_panel_view(db, node_id, runtime_cfg):
              "node_state_active": core_db.NODE_STATE_ACTIVE}
 
 
-def _node_detail_view(db, node_id, runtime_cfg):
+def _claims_url(node_id, *, page=None, size=None, back=None):
+    """Build a `/nodes/{id}?...` URL preserving the Recent-claims
+       paging params (and the opener's `back`, so the ← Back button
+       still works after paginating). Drops page when 1 and size
+       when default to keep the bookmark/URL clean."""
+    parts = []
+    if page and page > 1:
+        parts.append(f"claims_page={page}")
+    if size and size != _DEFAULT_CLAIMS_PAGE_SIZE:
+        parts.append(f"claims_size={size}")
+    if back:
+        parts.append(f"back={quote(back, safe='')}")
+    qs = ("?" + "&".join(parts)) if parts else ""
+    return f"/nodes/{node_id}{qs}"
+
+
+def _node_detail_view(db, node_id, runtime_cfg, *,
+                       claims_page=1, claims_size=_DEFAULT_CLAIMS_PAGE_SIZE,
+                       back=None):
     """Build the per-node detail render context — node row + health
-       snapshot + recent claims + recent reviews. Raises 404 when
-       the node is unknown (revoked tombstones are still resolvable;
-       only a hard-deleted node 404s).
+       snapshot + recent claims (paged) + recent reviews. Raises 404
+       when the node is unknown (revoked tombstones are still
+       resolvable; only a hard-deleted node 404s).
 
        The dynamic top region (Node + Health cards with bucket
        badge, running time, relative freshness) comes from
        _node_live_panel_view so the /nodes/{id}/live polling
-       endpoint and the initial page render share one source."""
+       endpoint and the initial page render share one source.
+
+       Recent claims paginate via ?claims_page / ?claims_size
+       (defaults 1 / 10). The paginator uses full-page navigation
+       — the claims history isn't live like the cards above it, so
+       there's no HTMX swap target to thread through."""
     panel = _node_live_panel_view(db, node_id, runtime_cfg)
     if panel is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND,
                             f"no node with id {node_id}")
     node = panel["node"]
-
+    worker = _node_claimed_by_label(node)
     node_back_qs = f"?back={quote(f'/nodes/{node_id}', safe='')}"
+
+    # Paginate Recent claims. Clamp size to the allowed set, page to
+    # [1, pages]. Mirrors _queue_view's paging math.
+    size = claims_size if claims_size in _CLAIMS_PAGE_SIZES \
+        else _DEFAULT_CLAIMS_PAGE_SIZE
+    total = core_db.count_work_items_for_node(db, worker)
+    pages = max(1, -(-total // size))
+    page = max(1, min(claims_page or 1, pages))
+    offset = (page - 1) * size
+
     claims = []
-    for w in core_db.work_items_for_node(db, _node_claimed_by_label(node)):
+    for w in core_db.work_items_for_node(db, worker, limit=size,
+                                           offset=offset):
         type_name  = _WORK_TYPE_DISPLAY.get(w["type"], "?")
         state_name = _WORK_STATE_DISPLAY.get(w["state"], "?")
         claims.append({
@@ -803,6 +844,31 @@ def _node_detail_view(db, node_id, runtime_cfg):
                                 + node_back_qs,
         })
 
+    def _u(p):
+        return _claims_url(node_id, page=p, size=size, back=back)
+    window = _page_window(page, pages)
+    claims_paging = {
+        "page":         page,
+        "pages":        pages,
+        "size":         size,
+        "total":        total,
+        "start":        offset + 1 if claims else 0,
+        "end":          offset + len(claims),
+        "size_options": [{"value": s,
+                           "url": _claims_url(node_id, size=s, back=back)}
+                          for s in _CLAIMS_PAGE_SIZES],
+        "first_url":    _u(1),
+        "prev_url":     _u(max(1, page - 1)),
+        "next_url":     _u(min(pages, page + 1)),
+        "last_url":     _u(pages),
+        "has_prev":     page > 1,
+        "has_next":     page < pages,
+        "window":       [{"page": p, "url": _u(p), "active": p == page}
+                         for p in window],
+        "show_first_ellipsis": bool(window) and window[0] != 1,
+        "show_last_ellipsis":  bool(window) and window[-1] != pages,
+    }
+
     reviews = []
     for r in core_db.ai_reviews_for_node(db, node_id):
         reviews.append({
@@ -819,6 +885,7 @@ def _node_detail_view(db, node_id, runtime_cfg):
     return {
         "node":    node,
         "claims":  claims,
+        "claims_paging": claims_paging,
         "reviews": reviews,
         "node_state_active": core_db.NODE_STATE_ACTIVE,
     }
@@ -826,14 +893,20 @@ def _node_detail_view(db, node_id, runtime_cfg):
 
 @router.get("/nodes/{node_id:int}", response_class=HTMLResponse)
 async def node_detail(request: Request, node_id: int,
-                       back: str | None = None):
+                       back: str | None = None,
+                       claims_page: int = 1,
+                       claims_size: int = _DEFAULT_CLAIMS_PAGE_SIZE):
     """The per-node detail page — drill down into a row from /nodes
        (or any other index that links here). `?back=` carries the URL
        the opener wants the ← Back button to return to; same-origin
-       paths only via _safe_back, default `/nodes`."""
+       paths only via _safe_back, default `/nodes`. `?claims_page` /
+       `?claims_size` page the Recent-claims table."""
+    safe_back = _safe_back(back) if back else None
     ctx = _node_detail_view(request.app.state.db, node_id,
-                             request.app.state.runtime_config)
-    ctx["back_url"] = _safe_back(back) if back else "/nodes"
+                             request.app.state.runtime_config,
+                             claims_page=claims_page, claims_size=claims_size,
+                             back=safe_back)
+    ctx["back_url"] = safe_back or "/nodes"
     return templates.TemplateResponse(request, "node_detail.html", ctx)
 
 

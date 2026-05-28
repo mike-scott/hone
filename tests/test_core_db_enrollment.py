@@ -183,6 +183,38 @@ def test_work_items_for_node_returns_recent_claims(db):
     assert core_db.work_items_for_node(db, "no-such-node") == []
 
 
+def test_work_items_for_node_paginates_with_offset(db):
+    """offset + limit slice the claim history for the node-detail
+       Recent-claims paginator; count_work_items_for_node gives the
+       total the paginator's page math needs."""
+    core_db.add_methodology_version(db, {"name": "test", "version": 1})
+    # Plant 5 patchsets, enqueue + claim a review for each as "n1".
+    for i in range(5):
+        root = f"<r{i}@x>"
+        core_db.upsert_patchset(db, root, subject=f"s{i}", n_patches=1)
+        core_db.upsert_patchset_metadata(
+            db, root, mode="heuristic", tree_state={},
+            subsystem={"primary": "n"}, patch_size={"bucket": "small"},
+            maintainer={}, patch_type={"primary": "bugfix"},
+            review_intensity={"bucket_overall": "light"},
+            preparation_notes={})
+        core_db.enqueue_review(db, root)
+        core_db.claim_work_item(db, "n1", methodology_version=1,
+                                 types=(core_db.WORK_ITEM_TYPE_REVIEW,))
+
+    assert core_db.count_work_items_for_node(db, "n1") == 5
+    assert core_db.count_work_items_for_node(db, "nobody") == 0
+    # First page of 2, then the next 2, then the last 1 — disjoint,
+    # covering all five.
+    p1 = core_db.work_items_for_node(db, "n1", limit=2, offset=0)
+    p2 = core_db.work_items_for_node(db, "n1", limit=2, offset=2)
+    p3 = core_db.work_items_for_node(db, "n1", limit=2, offset=4)
+    assert [len(p) for p in (p1, p2, p3)] == [2, 2, 1]
+    ids = {r["id"] for r in p1} | {r["id"] for r in p2} | {r["id"]
+                                                             for r in p3}
+    assert len(ids) == 5                              # no overlap
+
+
 def test_ai_reviews_for_node_returns_audited_reviews(db):
     """ai_reviews_for_node returns rows whose node_id matches, with
        concerns decoded from JSON to a list."""

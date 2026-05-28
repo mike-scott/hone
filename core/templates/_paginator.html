@@ -1,0 +1,99 @@
+{# Shared paging macros — used by the work-queue body and the
+   node-detail Recent claims section. The `paging` dict has the
+   same shape both times (built by core/ui.py); `hx_target`
+   parameterises whether clicks fire HTMX swaps or full-page
+   navigations.
+
+   `paging` shape:
+     page, pages, size, total, start, end
+     has_prev, has_next
+     first_url, prev_url, next_url, last_url
+     window: [{page, url, active}, ...]
+     show_first_ellipsis, show_last_ellipsis
+     size_options: [{value, url}, ...]
+#}
+
+{# The 3-column bar that frames a paged table on both sides — same
+   layout top and bottom: Showing X-Y of Z | paginator (centered) |
+   Per page selector. The middle col holds the paginator when there's
+   more than one page; otherwise it renders empty so the Showing
+   text and the size selector stay anchored to the left/right edges.
+   The size selector has no `id` so the bar can appear twice without
+   duplicating an id in the DOM. #}
+{% macro paging_bar(paging, hx_target=none, margin="") %}
+<div class="row align-items-center {{ margin }}">
+  <div class="col-4">
+    <span class="text-muted small">
+      Showing <strong>{{ paging.start }}</strong>–<strong>{{ paging.end }}</strong>
+      of <strong>{{ paging.total }}</strong>
+    </span>
+  </div>
+  <div class="col-4 text-center">
+    {% if paging.pages > 1 %}{{ paginator(paging, hx_target=hx_target) }}{% endif %}
+  </div>
+  <div class="col-4">
+    <div class="d-flex align-items-center gap-2 justify-content-end">
+      <label class="text-muted small mb-0">Per page:</label>
+      <select class="form-select form-select-sm" style="width: auto"
+              onchange="window.location.href = this.options[this.selectedIndex].dataset.url">
+        {% for opt in paging.size_options %}
+        <option value="{{ opt.value }}" data-url="{{ opt.url }}"
+                {% if opt.value == paging.size %}selected{% endif %}>
+          {{ opt.value }}
+        </option>
+        {% endfor %}
+      </select>
+    </div>
+  </div>
+</div>
+{% endmacro %}
+
+{# The pager nav itself. When `hx_target` is non-empty, page links
+   fire HTMX outer-HTML swaps against that target; otherwise the
+   browser does a full-page navigation. #}
+{% macro paginator(paging, hx_target=none, mb="mb-0") %}
+<nav aria-label="Pagination">
+  <ul class="pagination pagination-sm justify-content-center {{ mb }}">
+
+    {% macro pg_link(url, enabled, aria_label, icon_class=none, label=none) %}
+      <li class="page-item {% if not enabled %}disabled{% endif %}">
+        <a class="page-link" href="{{ url }}"
+           {% if enabled and hx_target %}
+             hx-get="{{ url }}"
+             hx-target="{{ hx_target }}" hx-swap="outerHTML"
+             hx-push-url="true"
+           {% endif %}
+           aria-label="{{ aria_label }}">
+          {%- if icon_class %}<i class="bi {{ icon_class }}"></i>
+          {%- else %}{{ label }}{% endif -%}
+        </a>
+      </li>
+    {% endmacro %}
+
+    {{ pg_link(paging.first_url, paging.has_prev, "First page",
+               icon_class="bi-chevron-double-left") }}
+    {{ pg_link(paging.prev_url,  paging.has_prev, "Previous page",
+               icon_class="bi-chevron-left") }}
+    {% if paging.show_first_ellipsis %}
+    <li class="page-item disabled"><span class="page-link">…</span></li>
+    {% endif %}
+    {% for w in paging.window %}
+    <li class="page-item {% if w.active %}active{% endif %}">
+      <a class="page-link" href="{{ w.url }}"
+         {% if not w.active and hx_target %}
+           hx-get="{{ w.url }}"
+           hx-target="{{ hx_target }}" hx-swap="outerHTML"
+           hx-push-url="true"
+         {% endif %}>{{ w.page }}</a>
+    </li>
+    {% endfor %}
+    {% if paging.show_last_ellipsis %}
+    <li class="page-item disabled"><span class="page-link">…</span></li>
+    {% endif %}
+    {{ pg_link(paging.next_url, paging.has_next, "Next page",
+               icon_class="bi-chevron-right") }}
+    {{ pg_link(paging.last_url, paging.has_next, "Last page",
+               icon_class="bi-chevron-double-right") }}
+  </ul>
+</nav>
+{% endmacro %}

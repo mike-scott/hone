@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_paginator.html" import paging_bar with context %}
 {% block title %}{{ node.name or "node " ~ node.id }} · hone-core{% endblock %}
 {% block content %}
 
@@ -19,8 +20,9 @@
    fresh without a reload. The history tables below don't poll. #}
 {% include "_node_live_panel.html" %}
 
-<h2 class="h5 mt-4">Recent claims ({{ claims|length }})</h2>
+<h2 class="h5 mt-4">Recent claims ({{ claims_paging.total }})</h2>
 {% if claims %}
+{{ paging_bar(claims_paging, margin="mb-2") }}
 <table class="table table-sm align-middle">
   <thead>
     <tr><th>Type</th><th>Work state</th><th>Patchset</th>
@@ -49,6 +51,7 @@
   {% endfor %}
   </tbody>
 </table>
+{{ paging_bar(claims_paging, margin="mt-2") }}
 {% else %}
 <p class="text-muted small">This node hasn't claimed any work yet.</p>
 {% endif %}

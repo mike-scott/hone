@@ -1556,11 +1556,12 @@ def queue_version(db, *, type=None, state=None):
     return f"{r['t']}-{r['n']}-{r['s']}"
 
 
-def work_items_for_node(db, claimed_by, *, limit=50):
+def work_items_for_node(db, claimed_by, *, limit=50, offset=0):
     """Recent work-items claimed by a node, most-recent-claim first.
        `claimed_by` is whatever the api layer wrote into the column
        — the node's name when set, str(node.id) otherwise (see
-       api.claim_task). Used by the node detail page to show
+       api.claim_task). `offset` skips that many rows for paging on
+       the node detail page. Used by the node detail page to show
        per-node activity history."""
     rows = db.execute(
         "SELECT w.id, w.type, w.state, w.root_message_id, w.message_id, "
@@ -1570,9 +1571,18 @@ def work_items_for_node(db, claimed_by, *, limit=50):
         "LEFT JOIN patchsets p ON p.root_message_id=w.root_message_id "
         "WHERE w.claimed_by=? "
         "ORDER BY COALESCE(w.completed_at, w.claimed_at, w.enqueued_at) "
-        "DESC, w.id DESC LIMIT ?",
-        (claimed_by, limit))
+        "DESC, w.id DESC LIMIT ? OFFSET ?",
+        (claimed_by, limit, offset))
     return [dict(r) for r in rows]
+
+
+def count_work_items_for_node(db, claimed_by):
+    """Total work-items claimed by a node — pairs with
+       work_items_for_node for the node-detail Recent-claims
+       paginator's total / page-count math."""
+    return db.execute(
+        "SELECT COUNT(*) FROM work_items WHERE claimed_by=?",
+        (claimed_by,)).fetchone()[0]
 
 
 def ai_reviews_for_node(db, node_id, *, limit=50):
