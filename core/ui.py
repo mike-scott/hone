@@ -364,10 +364,21 @@ async def queue(request: Request,
        renders — a real browser navigation isn't an idempotent poll."""
     db = request.app.state.db
     is_hx = request.headers.get("hx-request") == "true"
-    type_int  = _WORK_TYPE_BY_NAME.get(type)
-    state_int = _WORK_STATE_BY_NAME.get(state)
-    version = core_db.queue_version(db, type=type_int, state=state_int)
-    if is_hx and request.headers.get("x-queue-version") == version:
+    # `hx-headers` on the #queue-pane wrapper carries X-Queue-Version
+    # on EVERY request the wrapper fires, including descendant clicks
+    # (paginator, chips) that inherit it. The 204 short-circuit must
+    # only apply to the wrapper's own auto-poll, otherwise a
+    # pagination click with the current version would 204 and HTMX
+    # would skip the swap — page 2 never renders. HTMX sets
+    # HX-Trigger to the triggering element's id, which is
+    # "queue-pane" for the wrapper's `every 5s` poll and the link's
+    # id (typically absent) for clicks.
+    is_auto_poll = (is_hx
+                     and request.headers.get("hx-trigger") == "queue-pane")
+    version = core_db.queue_version(
+        db, type=_WORK_TYPE_BY_NAME.get(type),
+        state=_WORK_STATE_BY_NAME.get(state))
+    if is_auto_poll and request.headers.get("x-queue-version") == version:
         # Idle poll: the operator's open page already shows the
         # latest state. Logged at DEBUG so the per-operator,
         # per-5s tick doesn't fill the operator's container log

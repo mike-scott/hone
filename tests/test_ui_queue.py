@@ -157,13 +157,15 @@ def test_queue_version_is_filter_scoped(ctx):
 
 
 def test_hx_request_with_matching_version_returns_204(ctx):
-    """An HTMX poll whose X-Queue-Version matches the current version
-       gets a 204 — HTMX then skips the swap. This is the whole point of
-       the upgrade: no template render and no response body when nothing
-       has changed."""
+    """An HTMX auto-poll whose X-Queue-Version matches the current
+       version gets a 204 — HTMX then skips the swap. The auto-poll
+       fires on the #queue-pane wrapper itself, so HX-Trigger is the
+       wrapper's id; the handler keys the short-circuit on that to
+       avoid mis-204-ing descendant clicks."""
     _enqueue_review(ctx.db, "<r-1@x>", "p")
     version = core_db.queue_version(ctx.db)
     r = ctx.client.get("/", headers={"HX-Request": "true",
+                                       "HX-Trigger": "queue-pane",
                                        "X-Queue-Version": version})
     assert r.status_code == 204
     assert r.text == ""
@@ -177,9 +179,30 @@ def test_hx_request_with_stale_version_returns_200_with_new_version(ctx):
     _enqueue_review(ctx.db, "<r-1@x>", "p")
     fresh_version = core_db.queue_version(ctx.db)
     r = ctx.client.get("/", headers={"HX-Request": "true",
+                                       "HX-Trigger": "queue-pane",
                                        "X-Queue-Version": "stale-0"})
     assert r.status_code == 200
     assert fresh_version in r.text
+
+
+def test_pagination_click_with_matching_version_still_renders(ctx):
+    """REGRESSION: paginator links inside #queue-pane inherit the
+       wrapper's `hx-headers` (X-Queue-Version), so a click on page 2
+       sent the current version back. The handler used to 204 on that
+       — HTMX would then skip the swap and the operator would stay
+       on page 1. The short-circuit must only apply to the wrapper's
+       OWN auto-poll (HX-Trigger="queue-pane"), not to descendant
+       clicks (no HX-Trigger or a link's id)."""
+    _seed_n_reviews(ctx.db, 40)
+    version = core_db.queue_version(ctx.db)
+    # Pagination click: HX-Request true, X-Queue-Version current
+    # (inherited from wrapper), HX-Trigger absent because the link
+    # has no id. Must render page 2, not 204.
+    r = ctx.client.get("/", params={"page": 2},
+                       headers={"HX-Request": "true",
+                                "X-Queue-Version": version})
+    assert r.status_code == 200
+    assert "Showing <strong>26</strong>" in r.text
 
 
 def test_full_page_load_never_short_circuits(ctx):
