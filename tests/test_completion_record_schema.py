@@ -267,6 +267,30 @@ def test_prepare_rejects_unknown_base_resolution(schema):
     _reject(schema, record)
 
 
+def test_prepare_accepts_base_fallback_hint(schema):
+    """The no_base tip-at-submission fallback: a {tree, strategy, as_of}
+       object or null both validate."""
+    for fb in ({"tree": "net-next", "strategy": "tip-at-submission",
+                "as_of": 1773000000}, None):
+        record = _prepare(outcome="prepared", self_review_record=_SELF_REVIEW,
+                          **{**_PREPARE_METADATA,
+                             "tree_state": {**_PREPARE_METADATA["tree_state"],
+                                            "base_resolution": "no_base",
+                                            "base_fallback": fb}})
+        _validate(schema, record)
+
+
+def test_prepare_rejects_bad_base_fallback(schema):
+    # unknown strategy enum + a missing required key are both rejected
+    for fb in ({"tree": "net-next", "strategy": "guess", "as_of": 1},
+               {"tree": "net-next", "strategy": "tip-at-submission"}):
+        record = _prepare(outcome="prepared", self_review_record=_SELF_REVIEW,
+                          **{**_PREPARE_METADATA,
+                             "tree_state": {**_PREPARE_METADATA["tree_state"],
+                                            "base_fallback": fb}})
+        _reject(schema, record)
+
+
 # --- review ----------------------------------------------------------------
 
 def test_review_reviewed_with_concerns(schema):

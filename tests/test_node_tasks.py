@@ -346,6 +346,7 @@ def test_prepare_overlays_authoritative_deterministic_fields(monkeypatch):
     monkeypatch.setattr("node.ai.call_claude", stub)
     det = {
         "base_in_tree": True, "base_resolution": "found", "base_tree": "mainline",
+        "base_fallback": None,
         "base_commit_declared": "abc123", "base_commit_source": "trailer",
         "subsystem": {"primary": "EXT4 FILE SYSTEM", "primary_status": None,
                       "primary_tree": None, "secondary": [],
@@ -377,4 +378,23 @@ def test_prepare_overlays_authoritative_deterministic_fields(monkeypatch):
     # LLM-owned judgment fields are untouched
     assert record["patch_type"]["primary"] == "bugfix"
     assert record["review_intensity"]["bucket_overall"] == "none"
+    _validate_record(record)
+
+
+def test_prepare_records_no_base_fallback_from_subject(monkeypatch):
+    """No base trailer + a net-next subject prefix + a sent time → the
+       prepare record carries a tip-at-submission fallback hint the review
+       task can resolve. Threads patchset.subject/sent through to Tier-0;
+       no cgit probe happens (no declared base)."""
+    stub, _calls = _fake_call_claude(json.dumps(_STUB_PREPARE_BODY))
+    monkeypatch.setattr("node.ai.call_claude", stub)
+    claim = dict(_PREPARE_CLAIM)
+    claim["patchset"] = {**_PREPARE_CLAIM["patchset"],
+                         "subject": "[PATCH net-next v2] net: stmmac: shrink",
+                         "sent": 1773000000}
+    record = tasks.handle_prepare_task(_cfg(), None, claim)
+    assert record["tree_state"]["base_resolution"] == "no_base"
+    assert record["tree_state"]["base_fallback"] == {
+        "tree": "net-next", "strategy": "tip-at-submission",
+        "as_of": 1773000000}
     _validate_record(record)

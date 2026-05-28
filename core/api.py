@@ -480,6 +480,7 @@ def _build_prepare_payload(db, work_item, methodology_version, methodology):
                                                          "prepare"),
             "patchset": {"root_message_id":       patchset.get("root_message_id"),
                           "subject":               patchset.get("subject"),
+                          "sent":                  patchset.get("sent"),
                           "declared_base_commit":  patchset.get("base_commit"),
                           "submitter_email":       patchset.get("submitter_email"),
                           "n_patches":             patchset.get("n_patches")},

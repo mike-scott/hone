@@ -57,10 +57,12 @@ def _tree(name, path):
 # The remaining trees are subsystem integration trees, probed only when
 # next/mainline/stable miss — i.e. a base committed to a maintainer tree
 # that linux-next hasn't merged yet (the narrow window between commit and
-# next's daily pull). They're ordered for this corpus's skew (Qualcomm /
-# arm64 / DT / clk): the arm-soc aggregation (soc) and the Qualcomm tree
-# (qcom) first, then arm64 core, then the clk / pinctrl subsystems.
-# net-next and tip stay for networking / x86-core bases.
+# next's daily pull). net-next / net are the networking dev + fixes trees
+# (paired — netdev encodes the target in the subject prefix, which the
+# no_base tip-at-submission fallback maps to a tree name here); tip is
+# x86-core. The rest are ordered for this corpus's skew (Qualcomm /
+# arm64 / DT / clk): the arm-soc aggregation (soc), the Qualcomm tree
+# (qcom), arm64 core, then the clk / pinctrl subsystems.
 #
 # Adding a tree costs a probe per UNVERIFIABLE base (FOUND short-circuits
 # at linux-next) and a potential refrepo fetch source, so the set is kept
@@ -71,6 +73,7 @@ DEFAULT_TREES = (
     _tree("mainline",   "torvalds/linux.git"),
     _tree("stable",     "stable/linux.git"),
     _tree("net-next",   "netdev/net-next.git"),
+    _tree("net",        "netdev/net.git"),
     _tree("tip",        "tip/tip.git"),
     _tree("soc",        "soc/soc.git"),
     _tree("qcom",       "qcom/linux.git"),

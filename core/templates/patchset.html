@@ -218,6 +218,11 @@
         {% elif res == "absent" %}no <span class="text-muted">(not in probed trees)</span>
         {% elif res == "unknown" %}<span class="text-muted">unknown (tree unreachable)</span>
         {% elif res == "no_base" %}<span class="text-muted">— no base declared</span>
+          {% if metadata.tree_state.base_fallback %}
+          <div class="text-muted">fallback →
+            <code>{{ metadata.tree_state.base_fallback.tree }}</code>
+            @ tip-at-submission</div>
+          {% endif %}
         {% else %}{# pre-base_resolution record: fall back to the tri-state bool #}
           {% if metadata.tree_state.base_in_tree is none %}<span class="text-muted">unknown</span>
           {% elif metadata.tree_state.base_in_tree %}yes{% if metadata.tree_state.base_tree %}

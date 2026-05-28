@@ -87,11 +87,13 @@ def _run_deterministic(cfg: Config, claim: dict) -> dict:
        resolver, which degrades to heuristic (never raises) on any cgit /
        get_maintainer failure."""
     trees = cgit.KernelTrees.from_registry(cfg.cgit_trees)
+    ps = claim.get("patchset") or {}
     try:
         return tier0.resolve_deterministic(
             trees, _patch_text(claim),
             recipients=_recipients(claim),
-            series_length=len(claim.get("patches") or []) or None)
+            series_length=len(claim.get("patches") or []) or None,
+            subject=ps.get("subject"), sent=ps.get("sent"))
     finally:
         trees.close()
 
@@ -118,7 +120,7 @@ def _merge_deterministic(body: dict, det: dict) -> dict:
        isn't correctness-critical, since code already wins."""
     merged = dict(body)
     ts = dict(merged.get("tree_state") or {})
-    for f in ("base_in_tree", "base_resolution", "base_tree",
+    for f in ("base_in_tree", "base_resolution", "base_tree", "base_fallback",
               "base_commit_declared", "base_commit_source"):
         ts[f] = det[f]
     merged["tree_state"] = ts

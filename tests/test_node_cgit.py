@@ -144,7 +144,8 @@ def test_default_trees_lead_with_linux_next_and_carry_both_urls():
     names = [t.name for t in cgit.DEFAULT_TREES]
     # the integration trees lead in resolution priority; the subsystem
     # trees follow (probed only when those miss)
-    assert names[:5] == ["linux-next", "mainline", "stable", "net-next", "tip"]
+    assert names[:4] == ["linux-next", "mainline", "stable", "net-next"]
+    assert "net" in names and "tip" in names        # net pairs with net-next
     assert {"soc", "qcom", "arm64"} <= set(names)   # corpus-skew additions
     assert len(names) == len(set(names))            # no duplicate names
     ln = cgit.DEFAULT_TREES[0]

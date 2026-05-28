@@ -973,6 +973,26 @@ $defs:
           - type: "null"
           - type: string
             enum: [found, absent, unknown, no_base]
+      base_fallback:
+        description: >-
+          A best-effort base for the review task when none was declared
+          (base_resolution=no_base). `tree` is a registry tree name
+          derived from the subject prefix (e.g. netdev's net / net-next);
+          `as_of` is the submission unix time. The review task resolves
+          the tree's tip as of that time and applies against it,
+          recording the outcome in review_tree_state. Approximate — never
+          an authoritative base. null when no target tree could be
+          derived (or a base was declared). See
+          docs/ARCHITECTURE-PREPARE.md → Tier 0.
+        oneOf:
+          - type: "null"
+          - type: object
+            additionalProperties: false
+            required: [tree, strategy, as_of]
+            properties:
+              tree:     { type: string, minLength: 1 }
+              strategy: { type: string, enum: [tip-at-submission] }
+              as_of:    { type: integer, minimum: 0 }
       base_tree:
         description: >-
           Canonical name of the tree the base commit resolved in

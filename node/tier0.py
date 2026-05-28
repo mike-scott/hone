@@ -12,6 +12,7 @@ fields in their heuristic form (authoritative sets null, source
 never raises.
 """
 import logging
+import re
 from collections import Counter
 
 from node import cgit, maintainers, refrepo
@@ -23,7 +24,9 @@ log = logging.getLogger("hone.node.tier0")
 # independently of methodology_version (ARCHITECTURE-PREPARE.md → Dec 4).
 # tier0-2: added tree_state.base_resolution (explicit found/absent/
 # unknown/no_base outcome) + expanded the probed tree set.
-RESOLVER_VERSION = "tier0-2"
+# tier0-3: added tree_state.base_fallback — the no_base tip-at-submission
+# hint (target tree from the subject prefix + the submission time).
+RESOLVER_VERSION = "tier0-3"
 
 # get_maintainer roles → the methodology's person buckets.
 _MAINTAINER_ROLES = {"maintainer", "supporter"}
@@ -39,6 +42,30 @@ def base_commit_trailer(patch_text):
        so prepare and review agree on what counts as a declared base."""
     m = refrepo.BASE_RE.search(patch_text or "")
     return m.group(1) if m else None
+
+
+# Subject [PATCH …] prefix tokens that name a target tree, longest first
+# (net-next must be matched before net, which is its substring).
+_PREFIX_TREES = ("net-next", "net")
+_PATCH_BRACKET = re.compile(r"\[[^\]]*\bPATCH\b[^\]]*\]", re.I)
+
+
+def fallback_tree(subject, trees):
+    """The tree a no-base patch is aimed at, derived from its subject's
+       [PATCH …] prefix — netdev encodes net vs net-next there. Returns a
+       registry tree NAME (so review's refrepo can fetch it) or None when
+       no token matches or the named tree isn't in the registry. Kept
+       conservative on purpose: only the explicit prefix token is trusted
+       (a bare `[PATCH]` yields None rather than a guessed default), since
+       a wrong base is worse than none for the review apply."""
+    if not subject:
+        return None
+    m = _PATCH_BRACKET.search(subject)
+    tag = (m.group(0) if m else "").lower()
+    for name in _PREFIX_TREES:
+        if re.search(rf"\b{re.escape(name)}\b", tag) and trees.tree(name):
+            return name
+    return None
 
 
 def size_bucket(total_changed):
@@ -163,7 +190,8 @@ def bucket_maintainer_entries(entries, *, recipients=None):
 
 
 def resolve_deterministic(trees, patch_text, *, recipients=None,
-                           series_length=None, timeout=None):
+                           series_length=None, timeout=None,
+                           subject=None, sent=None):
     """Orchestrate the Tier-0 code phase. `trees` is a cgit.KernelTrees;
        `patch_text` is the patchset's combined content. Returns a dict of
        the deterministic metadata fields (base_*, subsystem, maintainer,
@@ -172,12 +200,18 @@ def resolve_deterministic(trees, patch_text, *, recipients=None,
        Resolution is authoritative (source "tree") only when the base
        resolves in some tree AND get_maintainer succeeds; otherwise the
        subsystem/maintainer blocks stay heuristic. patch_size and the
-       base trailer are always computed."""
+       base trailer are always computed.
+
+       `subject` + `sent` (the series subject and its submission unix
+       time) feed the no_base fallback: when no base is declared but the
+       subject prefix names a registry tree, record a tip-at-submission
+       hint for the review task to resolve + apply against."""
     declared = base_commit_trailer(patch_text)
     result = {
         "base_in_tree":         None,
         "base_resolution":      "no_base",
         "base_tree":            None,
+        "base_fallback":        None,
         "base_commit_declared": declared,
         "base_commit_source":   "trailer" if declared else "none",
         "subsystem":            _heuristic_subsystem(),
@@ -187,6 +221,11 @@ def resolve_deterministic(trees, patch_text, *, recipients=None,
         "resolver_version":     RESOLVER_VERSION,
     }
     if not declared:
+        target = fallback_tree(subject, trees)
+        if target and sent is not None:
+            result["base_fallback"] = {"tree": target,
+                                       "strategy": "tip-at-submission",
+                                       "as_of": sent}
         return result                       # base_resolution stays "no_base"
 
     lookup = trees.resolve_base(declared)

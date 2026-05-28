@@ -146,15 +146,20 @@ def test_bucket_was_cc_d_null_without_recipients():
 # --- resolve_deterministic (orchestration) ---------------------------------
 
 class _FakeTrees:
-    """Fake KernelTrees — resolve_base returns a programmed BaseLookup."""
+    """Fake KernelTrees — resolve_base returns a programmed BaseLookup;
+       tree(name) reports membership for the fallback's registry gate."""
 
-    def __init__(self, lookup):
+    def __init__(self, lookup, known=()):
         self._lookup = lookup
         self.resolved = []
+        self._known = set(known)
 
     def resolve_base(self, sha):
         self.resolved.append(sha)
         return self._lookup
+
+    def tree(self, name):
+        return name if name in self._known else None
 
 
 def _found_lookup(name="linux-next"):
@@ -227,3 +232,51 @@ def test_resolve_found_but_get_maintainer_fails_is_mixed(monkeypatch):
     assert r["base_in_tree"] is True
     assert r["maintainer"]["authoritative_set"] is None
     assert r["maintainer"]["source"] == "thread"
+
+
+# --- no_base fallback hint (tip-at-submission) -----------------------------
+
+_NO_TRAILER = "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"
+
+
+def test_fallback_tree_prefers_net_next_then_net():
+    trees = _FakeTrees(None, known={"net", "net-next"})
+    assert tier0.fallback_tree("[PATCH net-next v4] foo: bar", trees) == "net-next"
+    assert tier0.fallback_tree("[PATCH v2 net] foo: fix", trees) == "net"
+
+
+def test_fallback_tree_none_for_bare_patch_or_unregistered():
+    trees = _FakeTrees(None, known={"net", "net-next"})
+    assert tier0.fallback_tree("[PATCH] net: dsa: scope ...", trees) is None
+    assert tier0.fallback_tree(None, trees) is None
+    # token present but the named tree isn't in the registry → no hint
+    bare = _FakeTrees(None, known=set())
+    assert tier0.fallback_tree("[PATCH net-next] x", bare) is None
+
+
+def test_no_base_records_fallback_hint_from_subject():
+    trees = _FakeTrees(_found_lookup(), known={"net", "net-next"})
+    r = tier0.resolve_deterministic(
+        trees, _NO_TRAILER,
+        subject="[PATCH net-next v4] inet: add sysctl", sent=1773000000)
+    assert r["base_resolution"] == "no_base"
+    assert r["base_fallback"] == {"tree": "net-next",
+                                  "strategy": "tip-at-submission",
+                                  "as_of": 1773000000}
+    assert trees.resolved == []           # no cgit probe without a declared base
+
+
+def test_no_base_fallback_needs_a_submission_time():
+    trees = _FakeTrees(_found_lookup(), known={"net-next"})
+    r = tier0.resolve_deterministic(trees, _NO_TRAILER,
+                                    subject="[PATCH net-next] x", sent=None)
+    assert r["base_fallback"] is None
+
+
+def test_declared_base_carries_no_fallback(monkeypatch):
+    monkeypatch.setattr(maintainers, "resolve_maintainers", lambda *a, **k: None)
+    trees = _FakeTrees(_found_lookup(), known={"net-next"})
+    r = tier0.resolve_deterministic(trees, _PATCH,
+                                    subject="[PATCH net-next] x", sent=1773000000)
+    assert r["base_resolution"] == "found"
+    assert r["base_fallback"] is None
