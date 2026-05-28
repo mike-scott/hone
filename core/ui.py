@@ -664,6 +664,8 @@ def _nodes_view(db, runtime_cfg):
             "task_types_display": _types(n.get("task_types")),
             "state_display":      core_db.NODE_STATE_NAMES.get(
                                       n["state"], "?"),
+            "bucket_badge":       _NODE_BUCKET_BADGE.get(
+                                      status["bucket"], "text-bg-secondary"),
             "health_display":     _health_display(n.get("health")),
             "detail_url":         f"/nodes/{n['id']}{back_qs}",
         })

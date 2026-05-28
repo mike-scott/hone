@@ -46,6 +46,9 @@
                    class="link-body-emphasis text-decoration-none">
                   {{ n.name or "—" }}
                 </a>
+                <span class="badge {{ n.bucket_badge }} ms-2">
+                  {{ n.bucket_label }}
+                </span>
               </td>
               <td>{{ n.task_types_display }}</td>
 
