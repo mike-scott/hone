@@ -52,6 +52,78 @@ def _when(ts):
         ts, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
 
+# --- fleet pulse (top-nav chip) -------------------------------------------
+
+# Freshness cutoff multiplier — a node is `stale` if its last_seen is
+# older than (heartbeat_seconds × this). 3× is forgiving enough to
+# survive a single missed heartbeat without flipping the chip yellow.
+_FLEET_STALE_HEARTBEAT_MULT = 3
+
+
+def _fleet_pulse_view(db, runtime_cfg):
+    """View-model the fleet-pulse partial renders. Compresses
+       core_db.fleet_status into three render-ready fields:
+
+         tone:    `success` / `warning` / `danger` / `muted` — drives
+                  the badge colour. Bias is loudest-wins: any
+                  errored → danger, else any stale → warning,
+                  else (any healthy) → success, else no nodes →
+                  muted ("dim grey").
+         label:   short text shown in the chip itself. Kept compact
+                  so the nav bar stays uncluttered on narrow viewports
+                  and 30+ node fleets.
+         tooltip: longer hover-text with every count + last-activity
+                  timestamp."""
+    stale_after = (runtime_cfg.heartbeat_seconds
+                    * _FLEET_STALE_HEARTBEAT_MULT)
+    s = core_db.fleet_status(db, stale_after_seconds=stale_after)
+    total      = s["total"]
+    healthy    = s["healthy"]
+    errored    = s["errored"]
+    stale      = s["stale"]
+    in_flight  = s["in_flight"]
+    if total == 0:
+        tone  = "muted"
+        label = "no nodes"
+    elif errored:
+        tone  = "danger"
+        label = f"{errored} errored · {total} nodes"
+    elif stale:
+        tone  = "warning"
+        label = f"{stale} stale · {total} nodes"
+    elif in_flight:
+        tone  = "success"
+        label = (f"{total} node · {in_flight} in flight" if total == 1
+                  else f"{total} nodes · {in_flight} in flight")
+    else:
+        tone  = "success"
+        label = f"{total} node idle" if total == 1 else f"{total} nodes idle"
+    tooltip_parts = [f"{healthy} healthy"]
+    if errored:
+        tooltip_parts.append(f"{errored} errored")
+    if stale:
+        tooltip_parts.append(f"{stale} stale")
+    tooltip_parts.append(f"{in_flight} claim{'' if in_flight == 1 else 's'} "
+                          "in flight")
+    if s["last_activity_at"]:
+        tooltip_parts.append(f"last seen {_when(s['last_activity_at'])}")
+    tooltip = " · ".join(tooltip_parts)
+    return {"tone": tone, "label": label, "tooltip": tooltip}
+
+
+@router.get("/fleet-status", response_class=HTMLResponse)
+async def fleet_status_partial(request: Request):
+    """The fleet-pulse chip as an HTML partial — polled by HTMX every
+       10s from the top nav so the operator gets a live rollup
+       without reloading the page they're on. Tiny SQL footprint:
+       one COUNT-style scan over `nodes` plus one over claimed
+       work_items, regardless of fleet size."""
+    return templates.TemplateResponse(
+        request, "_fleet_pulse.html",
+        {"fleet": _fleet_pulse_view(request.app.state.db,
+                                      request.app.state.runtime_config)})
+
+
 # --- queue (home) ----------------------------------------------------------
 
 _WORK_TYPE_BY_NAME  = {v: k for k, v in core_db.WORK_ITEM_TYPE_NAMES.items()}

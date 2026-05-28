@@ -1,0 +1,24 @@
+{# Fleet-pulse chip — lives in the top nav, polled every 10s. The
+   colour follows the worst-state count: red if any errored, yellow
+   if any stale, green otherwise. `aria-live=polite` lets a screen
+   reader announce changes without interrupting the operator. #}
+{%- if fleet.tone == "danger" -%}
+{%- set badge_class = "text-bg-danger" -%}
+{%- elif fleet.tone == "warning" -%}
+{%- set badge_class = "text-bg-warning" -%}
+{%- elif fleet.tone == "muted" -%}
+{%- set badge_class = "text-bg-secondary" -%}
+{%- else -%}
+{%- set badge_class = "text-bg-success" -%}
+{%- endif -%}
+<a href="/nodes"
+   class="badge rounded-pill {{ badge_class }} text-decoration-none"
+   id="fleet-pulse"
+   title="{{ fleet.tooltip }}"
+   aria-label="{{ fleet.tooltip }}"
+   aria-live="polite"
+   hx-get="/fleet-status"
+   hx-trigger="every 10s"
+   hx-swap="outerHTML">
+  {{ fleet.label }}
+</a>

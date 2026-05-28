@@ -2426,6 +2426,64 @@ def list_nodes(db):
             for r in db.execute("SELECT * FROM nodes ORDER BY id")]
 
 
+def fleet_status(db, stale_after_seconds):
+    """The rollup view of the node fleet — for the operator UI's
+       always-visible fleet-pulse chip and any future status-page
+       widgets. One query, O(nodes) at the SQL level, returns a tiny
+       dict regardless of fleet size:
+
+         {
+           "total":            7,   # NODE_STATE_ACTIVE rows only
+           "healthy":          5,   # fresh + no anthropic error
+           "errored":          1,   # last health snapshot carries
+                                    # a non-null last_anthropic_error
+           "stale":            1,   # last_seen older than the cutoff
+           "in_flight":        3,   # work_items in CLAIMED state
+           "last_activity_at": <unix>  # max(nodes.last_seen) or None
+         }
+
+       Revoked nodes are excluded. `stale_after_seconds` is the
+       freshness cutoff — typically a small multiple of the heartbeat
+       interval (e.g. 3× heartbeat_seconds). A node counted as
+       `errored` is NOT also counted as `stale` even if both apply;
+       errored is the louder signal and the rollup is exclusive."""
+    now = int(time.time())
+    cutoff = now - max(stale_after_seconds, 1)
+    rows = db.execute(
+        "SELECT id, last_seen, health FROM nodes WHERE state=?",
+        (NODE_STATE_ACTIVE,)).fetchall()
+    healthy = errored = stale = 0
+    last_activity_at = None
+    for row in rows:
+        seen = row["last_seen"] or 0
+        if last_activity_at is None or seen > last_activity_at:
+            last_activity_at = seen
+        # Errored wins over stale — operator wants the anthropic-error
+        # count surfaced even on a node that's also gone quiet.
+        snapshot = row["health"]
+        anth_err = None
+        if snapshot:
+            try:
+                anth_err = json.loads(snapshot).get("last_anthropic_error")
+            except (ValueError, TypeError):
+                anth_err = None
+        if anth_err:
+            errored += 1
+        elif seen < cutoff:
+            stale += 1
+        else:
+            healthy += 1
+    in_flight = db.execute(
+        "SELECT COUNT(*) FROM work_items WHERE state=?",
+        (WORK_ITEM_STATE_CLAIMED,)).fetchone()[0]
+    return {"total":            len(rows),
+             "healthy":          healthy,
+             "errored":          errored,
+             "stale":            stale,
+             "in_flight":        in_flight,
+             "last_activity_at": last_activity_at or None}
+
+
 def update_node_health(db, node_id, snapshot):
     """Stamp the latest health snapshot on a node row. `snapshot` is a
        JSON-serializable dict — the node's choice of fields; today
