@@ -8,7 +8,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from core import core_db, ui
+from core import core_db, runtime_config, ui
 
 
 @pytest.fixture
@@ -18,6 +18,11 @@ def ctx(tmp_path):
     app = FastAPI()
     app.include_router(ui.router)
     app.state.db = db
+    # /nodes/{id} now consults runtime_config for the freshness
+    # threshold (via _node_status_fields). Tests that touch the
+    # node-detail page need it populated.
+    app.state.runtime_config = runtime_config.load(
+        str(tmp_path / "config.yaml"))
     return SimpleNamespace(client=TestClient(app), db=db)
 
 

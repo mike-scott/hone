@@ -561,6 +561,60 @@ _NODE_BUCKETS = (("errored",   "Errored"),
                   ("idle",      "Idle"))
 
 
+def _node_status_fields(node, claim, runtime_cfg, *, now=None, back_qs=""):
+    """Compute the live-status fields shared by the /nodes bucketed
+       table and the /nodes/{id} detail page — bucket assignment,
+       relative freshness, running time, and the claim-link triple.
+       Centralised so the two surfaces can't drift (an operator who
+       sees `In flight` on the index expects the same label on the
+       drill-down)."""
+    now = int(time.time()) if now is None else now
+    stale_after = (runtime_cfg.heartbeat_seconds
+                    * _FLEET_STALE_HEARTBEAT_MULT)
+    health = node.get("health") or {}
+    anth_err = (health.get("last_anthropic_error")
+                 if isinstance(health, dict) else None)
+    last_seen = node.get("last_seen") or 0
+    health_at = node.get("health_at") or 0
+    if anth_err:
+        bucket = "errored"
+    elif last_seen and (now - last_seen) > stale_after:
+        bucket = "stale"
+    elif claim:
+        bucket = "in_flight"
+    else:
+        bucket = "idle"
+    freshness = (now - last_seen) if last_seen else None
+    health_age = (now - health_at) if health_at else None
+    running = (now - claim["claimed_at"]
+                if claim and claim["claimed_at"] else None)
+    return {
+        "bucket":               bucket,
+        "bucket_label":         dict(_NODE_BUCKETS).get(bucket, bucket),
+        "freshness_display":    _relative_duration(freshness),
+        "last_seen_tooltip":    _when(last_seen) if last_seen else "",
+        "health_age_display":   _relative_duration(health_age),
+        "running_time_display": _relative_duration(running),
+        "claim":                claim,
+        "claim_subject":        (claim["subject"] or claim["root_message_id"]
+                                  if claim else None),
+        "claim_type":           (core_db.WORK_ITEM_TYPE_NAMES.get(
+                                       claim["type"], "?")
+                                  if claim else None),
+        "claim_url":            (f"/work-items/{claim['id']}{back_qs}"
+                                  if claim else None),
+    }
+
+
+# Bucket → Bootstrap badge class. Shared by the /nodes index and the
+# /nodes/{id} detail card so the loud signal looks the same in both
+# places.
+_NODE_BUCKET_BADGE = {"errored":   "text-bg-danger",
+                       "stale":     "text-bg-warning",
+                       "in_flight": "text-bg-success",
+                       "idle":      "text-bg-secondary"}
+
+
 def _nodes_view(db, runtime_cfg):
     """The view-model the /nodes table partial renders. Sorts each
        enrolled node into one of four buckets — errored / stale /
@@ -591,45 +645,18 @@ def _nodes_view(db, runtime_cfg):
         n = dict(n)
         if n["state"] != core_db.NODE_STATE_ACTIVE:
             continue                                  # revoked → hidden
-        health = n.get("health") or {}
-        anth_err = (health.get("last_anthropic_error")
-                     if isinstance(health, dict) else None)
-        last_seen = n.get("last_seen") or 0
         claim = claim_by_worker.get(n.get("name"))
-
-        # Loudest-wins bucket assignment.
-        if anth_err:
-            bucket = "errored"
-        elif last_seen and (now - last_seen) > stale_after:
-            bucket = "stale"
-        elif claim:
-            bucket = "in_flight"
-        else:
-            bucket = "idle"
-
-        freshness = (now - last_seen) if last_seen else None
-        running   = (now - claim["claimed_at"]
-                      if claim and claim["claimed_at"] else None)
+        status = _node_status_fields(n, claim, runtime_cfg,
+                                       now=now, back_qs=back_qs)
+        n.update(status)
         n.update({
-            "task_types_display":  _types(n.get("task_types")),
-            "state_display":       core_db.NODE_STATE_NAMES.get(
-                                       n["state"], "?"),
-            "freshness_display":   _relative_duration(freshness),
-            "last_seen_tooltip":   _when(last_seen) if last_seen else "",
-            "running_time_display":_relative_duration(running),
-            "claim":               claim,
-            "claim_subject":       (claim["subject"]
-                                     or claim["root_message_id"]
-                                     if claim else None),
-            "claim_type":          (core_db.WORK_ITEM_TYPE_NAMES.get(
-                                         claim["type"], "?")
-                                     if claim else None),
-            "claim_url":           (f"/work-items/{claim['id']}{back_qs}"
-                                     if claim else None),
-            "health_display":      _health_display(n.get("health")),
-            "detail_url":          f"/nodes/{n['id']}{back_qs}",
+            "task_types_display": _types(n.get("task_types")),
+            "state_display":      core_db.NODE_STATE_NAMES.get(
+                                      n["state"], "?"),
+            "health_display":     _health_display(n.get("health")),
+            "detail_url":         f"/nodes/{n['id']}{back_qs}",
         })
-        buckets[bucket].append(n)
+        buckets[status["bucket"]].append(n)
 
     # Sort within each bucket — most-recently-seen first.
     for key in buckets:
@@ -693,15 +720,26 @@ def _node_claimed_by_label(node):
     return node.get("name") or str(node["id"])
 
 
-def _node_detail_view(db, node_id):
-    """Build the per-node detail render context — node row + health
-       snapshot + recent claims + recent reviews. Raises 404 when
-       the node is unknown (revoked tombstones are still resolvable;
-       only a hard-deleted node 404s)."""
+def _node_live_panel_view(db, node_id, runtime_cfg):
+    """Live-status fields the detail page's Node + Health cards render.
+       Same bucket / running-time / freshness shape the /nodes table
+       uses (via _node_status_fields), plus the bucket badge class
+       and a pre-computed claim-link triple for the in-flight card.
+       Returns None when the node is gone — the polling endpoint
+       reads that as a 404."""
     node = core_db.get_node(db, node_id)
     if node is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND,
-                            f"no node with id {node_id}")
+        return None
+    node_back_qs = f"?back={quote(f'/nodes/{node_id}', safe='')}"
+    claim = None
+    if node.get("name"):
+        for w in core_db.work_items_for_node(db, node["name"], limit=10):
+            if w["state"] == core_db.WORK_ITEM_STATE_CLAIMED:
+                claim = w
+                break
+    status = _node_status_fields(node, claim, runtime_cfg,
+                                   back_qs=node_back_qs)
+    node.update(status)
     node["task_types_display"] = _types(node.get("task_types"))
     node["state_display"]      = core_db.NODE_STATE_NAMES.get(
                                      node["state"], "?")
@@ -709,6 +747,27 @@ def _node_detail_view(db, node_id):
     node["last_seen_display"]  = _when(node.get("last_seen"))
     node["health_display"]     = _health_display(node.get("health"))
     node["health_at_display"]  = _when(node.get("health_at"))
+    node["bucket_badge"]       = _NODE_BUCKET_BADGE.get(
+                                     status["bucket"], "text-bg-secondary")
+    return {"node":              node,
+             "node_state_active": core_db.NODE_STATE_ACTIVE}
+
+
+def _node_detail_view(db, node_id, runtime_cfg):
+    """Build the per-node detail render context — node row + health
+       snapshot + recent claims + recent reviews. Raises 404 when
+       the node is unknown (revoked tombstones are still resolvable;
+       only a hard-deleted node 404s).
+
+       The dynamic top region (Node + Health cards with bucket
+       badge, running time, relative freshness) comes from
+       _node_live_panel_view so the /nodes/{id}/live polling
+       endpoint and the initial page render share one source."""
+    panel = _node_live_panel_view(db, node_id, runtime_cfg)
+    if panel is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND,
+                            f"no node with id {node_id}")
+    node = panel["node"]
 
     node_back_qs = f"?back={quote(f'/nodes/{node_id}', safe='')}"
     claims = []
@@ -759,9 +818,27 @@ async def node_detail(request: Request, node_id: int,
        (or any other index that links here). `?back=` carries the URL
        the opener wants the ← Back button to return to; same-origin
        paths only via _safe_back, default `/nodes`."""
-    ctx = _node_detail_view(request.app.state.db, node_id)
+    ctx = _node_detail_view(request.app.state.db, node_id,
+                             request.app.state.runtime_config)
     ctx["back_url"] = _safe_back(back) if back else "/nodes"
     return templates.TemplateResponse(request, "node_detail.html", ctx)
+
+
+@router.get("/nodes/{node_id:int}/live", response_class=HTMLResponse)
+async def node_detail_live_panel(request: Request, node_id: int):
+    """The live status panel for the per-node detail page — Node +
+       Health cards with bucket badge, running time, and relative
+       freshness. Polled every 10s by HTMX so an operator can leave
+       the page open and watch the in-flight claim progress without
+       reloading. The recent-claims and reviews tables below don't
+       refresh on this poll — they're history, full reload is fine."""
+    panel = _node_live_panel_view(request.app.state.db, node_id,
+                                    request.app.state.runtime_config)
+    if panel is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND,
+                            f"no node with id {node_id}")
+    return templates.TemplateResponse(
+        request, "_node_live_panel.html", panel)
 
 
 # --- per-work-item detail ------------------------------------------------

@@ -14,72 +14,10 @@
   node id <code>{{ node.id }}</code>
 </div>
 
-<div class="row g-3 mb-4">
-  <div class="col-md-6">
-    <div class="card h-100">
-      <div class="card-header py-2"><strong>Node</strong></div>
-      <div class="card-body py-2">
-        <dl class="row mb-0 small">
-          <dt class="col-sm-4">Name</dt>
-          <dd class="col-sm-8">{{ node.name or "—" }}</dd>
-          <dt class="col-sm-4">Capabilities</dt>
-          <dd class="col-sm-8">{{ node.task_types_display }}</dd>
-          <dt class="col-sm-4">State</dt>
-          <dd class="col-sm-8">
-            {% if node.state == node_state_active %}
-            <span class="badge text-bg-success">{{ node.state_display }}</span>
-            {% else %}
-            <span class="badge text-bg-secondary">{{ node.state_display }}</span>
-            {% endif %}
-          </dd>
-          <dt class="col-sm-4">Enrolled</dt>
-          <dd class="col-sm-8">{{ node.enrolled_display }}</dd>
-          <dt class="col-sm-4">Last seen</dt>
-          <dd class="col-sm-8">{{ node.last_seen_display }}</dd>
-        </dl>
-      </div>
-    </div>
-  </div>
-
-  <div class="col-md-6">
-    <div class="card h-100">
-      <div class="card-header py-2">
-        <strong>Health</strong>
-        {% if node.health_at_display != "—" %}
-        <span class="text-muted small ms-2">
-          as of {{ node.health_at_display }}
-        </span>
-        {% endif %}
-      </div>
-      <div class="card-body py-2">
-        {% if node.health_display %}
-        <dl class="row mb-0 small">
-          <dt class="col-sm-5">Data volume free</dt>
-          <dd class="col-sm-7"><code>{{ node.health_display.free_disk }}</code></dd>
-          <dt class="col-sm-5">Reference repo</dt>
-          <dd class="col-sm-7"><code>{{ node.health_display.repo_size }}</code></dd>
-          <dt class="col-sm-5">Last Anthropic call</dt>
-          <dd class="col-sm-7">
-            {% if node.health_display.error %}
-            <span class="text-danger">
-              <i class="bi bi-exclamation-triangle-fill"></i>
-              {{ node.health_display.error }}
-            </span>
-            {% else %}
-            <span class="text-success">clean</span>
-            {% endif %}
-          </dd>
-        </dl>
-        {% else %}
-        <p class="text-muted mb-0 small">
-          This node hasn't reported its health yet — the snapshot
-          lands on the next claim-loop tick.
-        </p>
-        {% endif %}
-      </div>
-    </div>
-  </div>
-</div>
+{# Live status — Node + Health cards. Polls /nodes/{id}/live every
+   10s; running time + relative freshness + bucket badge stay
+   fresh without a reload. The history tables below don't poll. #}
+{% include "_node_live_panel.html" %}
 
 <h2 class="h5 mt-4">Recent claims ({{ claims|length }})</h2>
 {% if claims %}

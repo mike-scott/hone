@@ -188,3 +188,70 @@ def test_rows_within_bucket_sort_by_last_seen_desc(ctx):
     body = ctx.client.get("/nodes").text
     # All three are idle. Check the row order in the rendered HTML.
     assert (body.index("newest") < body.index("newer") < body.index("older"))
+
+
+# --- /nodes/{id} live panel ------------------------------------------------
+
+def test_node_detail_renders_live_panel_with_bucket_badge(ctx):
+    """The detail page now carries the same bucket badge the /nodes
+       index shows on the row — operators see the same loud signal
+       across both surfaces, not a different rendering per page."""
+    now = int(time.time())
+    nid = _node(ctx.db, name="loud", last_seen=now,
+                 health={"last_anthropic_error": "auth"})
+    body = ctx.client.get(f"/nodes/{nid}").text
+    # Bucket label + red badge from _NODE_BUCKET_BADGE.
+    assert "Errored" in body
+    assert "text-bg-danger" in body
+    # Live region wraps the cards so the 10s poll re-renders them.
+    assert 'id="node-live-panel"' in body
+    assert f'hx-get="/nodes/{nid}/live"' in body
+
+
+def test_node_detail_shows_running_time_for_in_flight_node(ctx):
+    """When the node has a CLAIMED work item, the Node card surfaces
+       a Running row with the elapsed time + a link to the active
+       claim — the operator can sit on the detail page and watch
+       the claim progress."""
+    now = int(time.time())
+    nid = _node(ctx.db, name="busy", last_seen=now,
+                 health={"last_anthropic_error": None})
+    _claim(ctx.db, claimed_by="busy", claimed_at=now - 47)
+    body = ctx.client.get(f"/nodes/{nid}").text
+    assert "Running" in body
+    assert "47s" in body                              # rendered duration
+    assert "In flight" in body                         # bucket label
+
+
+def test_node_detail_idle_node_omits_running_row(ctx):
+    """An idle node has no in-flight claim, so the Running row in
+       the Node card is omitted entirely — keeps the dense
+       definition list tight when there's nothing to show."""
+    now = int(time.time())
+    nid = _node(ctx.db, name="zzz", last_seen=now,
+                 health={"last_anthropic_error": None})
+    body = ctx.client.get(f"/nodes/{nid}").text
+    # The Idle bucket badge is present; the Running dt label is not.
+    assert "Idle" in body
+    assert "<dt class=\"col-sm-4\">Running</dt>" not in body
+
+
+def test_live_panel_endpoint_returns_self_replacing_partial(ctx):
+    """The /nodes/{id}/live partial includes itself as the swap
+       target — outer-HTML swap on each 10s poll re-installs the
+       polling handler with the cards' refreshed contents."""
+    now = int(time.time())
+    nid = _node(ctx.db, name="ok", last_seen=now,
+                 health={"last_anthropic_error": None})
+    r = ctx.client.get(f"/nodes/{nid}/live")
+    assert r.status_code == 200
+    assert 'id="node-live-panel"' in r.text
+    assert f'hx-get="/nodes/{nid}/live"' in r.text
+    assert 'hx-trigger="every 10s"' in r.text
+
+
+def test_live_panel_404_for_unknown_node(ctx):
+    """The polling endpoint returns 404 for an id that was deleted
+       between page-load and the next 10s tick — HTMX leaves the
+       prior panel state alone in that case."""
+    assert ctx.client.get("/nodes/99999/live").status_code == 404
