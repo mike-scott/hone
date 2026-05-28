@@ -320,13 +320,13 @@ def test_list_work_items_respects_offset(ctx):
 
 
 def test_queue_page_paginates_at_default_size(ctx):
-    """Default size is 50 — with 75 items the page shows 50 + a paginator."""
-    _seed_n_reviews(ctx.db, 75)
+    """Default size is 25 — with 40 items the page shows 25 + a paginator."""
+    _seed_n_reviews(ctx.db, 40)
     body = ctx.client.get("/").text
-    # paginator renders + indicates "Showing 1–50 of 75"
+    # paginator renders + indicates "Showing 1–25 of 40"
     assert 'aria-label="Queue pagination"' in body
     assert "Showing <strong>1</strong>" in body
-    assert "of <strong>75</strong>" in body
+    assert "of <strong>40</strong>" in body
     # numbered links present: 1 (active) and 2
     assert 'aria-label="Next page"' in body
 
@@ -338,33 +338,33 @@ def test_queue_paginator_hidden_when_one_page(ctx):
 
 
 def test_queue_page_2_shows_the_next_slice(ctx):
-    _seed_n_reviews(ctx.db, 75)
+    _seed_n_reviews(ctx.db, 40)
     body = ctx.client.get("/", params={"page": 2}).text
     # the latest (highest-numbered) subjects are on page 1; page 2 shows
     # the older subjects (smaller numbers).
-    assert "Showing <strong>51</strong>" in body
-    assert "of <strong>75</strong>" in body
+    assert "Showing <strong>26</strong>" in body
+    assert "of <strong>40</strong>" in body
 
 
 def test_queue_size_clamps_to_allowed_set(ctx):
     """`?size=` outside the allowed PAGE_SIZES set falls back to the
        default — guards against attacker-supplied giant page sizes."""
-    _seed_n_reviews(ctx.db, 75)
+    _seed_n_reviews(ctx.db, 40)
     body = ctx.client.get("/", params={"size": "999999"}).text
-    # default 50 applied; paginator shows 50/page
-    assert "Showing <strong>1</strong>–<strong>50</strong>" in body
+    # default 25 applied; paginator shows 25/page
+    assert "Showing <strong>1</strong>–<strong>25</strong>" in body
 
 
 def test_queue_partial_swap_for_htmx_requests(ctx):
     """An HTMX-driven page click sends `HX-Request: true`; the handler
        returns just the swap-target body partial, no base layout chrome."""
-    _seed_n_reviews(ctx.db, 75)
+    _seed_n_reviews(ctx.db, 40)
     r = ctx.client.get("/", params={"page": 2},
                        headers={"HX-Request": "true"})
     assert r.status_code == 200
     assert 'id="queue-body"' in r.text
     assert "<html" not in r.text          # no base layout
-    assert "Showing <strong>51</strong>" in r.text
+    assert "Showing <strong>26</strong>" in r.text
 
 
 def test_queue_filter_chips_reset_page(ctx):

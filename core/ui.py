@@ -194,11 +194,11 @@ _TYPE_BADGE = {"prepare": "text-bg-secondary",
                "train":   "text-bg-dark"}
 
 
-# Page-size options for the queue paginator (small dropdown). 50 is the
-# default — smaller than the framework's max list-limit of 200, more
-# "page"-like for an operator skimming the queue.
+# Page-size options for the queue paginator (small dropdown). 25 is
+# the default — small enough to scan on a single screen and consistent
+# with the eye-level fit operators expect from a skim view.
 _PAGE_SIZES = (25, 50, 100, 200)
-_DEFAULT_PAGE_SIZE = 50
+_DEFAULT_PAGE_SIZE = 25
 
 
 def _queue_url(*, type=None, state=None, page=None, size=None):
@@ -354,7 +354,7 @@ async def queue(request: Request,
        one work-item type (prepare / review / train); `?state=` filters to
        one state. Unknown axis values are ignored. `?page=` and `?size=`
        page the listing (page is 1-indexed; size is clamped to one of
-       _PAGE_SIZES — defaults to 50).
+       _PAGE_SIZES — defaults to 25).
 
        Auto-poll short-circuit: the #queue-pane wrapper echoes the
        last-known `X-Queue-Version` on every HTMX request. When it
