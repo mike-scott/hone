@@ -1,13 +1,83 @@
 {% extends "base.html" %}
 {% block title %}Settings · hone-core{% endblock %}
 {% block content %}
-<h1 class="h3 mb-4">Settings</h1>
+<h1 class="h3 mb-3">Settings</h1>
+
+{# Server-rendered tabs — the active tab comes from ?tab=... so the
+   URL is bookmarkable. POST handlers redirect back with the same
+   ?tab=... so a form submission stays on its own tab. The four
+   runtime-config groups each get their own tab + their own form so
+   an operator can save one section without touching the others. #}
+<ul class="nav nav-tabs mb-4" role="tablist">
+  {% for t in [
+    ("gather",      "Gather"),
+    ("work_queue",  "Work queue"),
+    ("enrollment",  "Enrollment"),
+    ("merge_gate",  "Merge gate"),
+    ("methodology", "Methodology"),
+    ("tags",        "List tags"),
+    ("deployment",  "Deployment")] %}
+  <li class="nav-item">
+    <a class="nav-link {% if tab == t[0] %}active{% endif %}"
+       href="/settings?tab={{ t[0] }}">{{ t[1] }}</a>
+  </li>
+  {% endfor %}
+</ul>
+
+{# Jinja macro for a per-group runtime-config form. Renders ONE
+   group's fields with a hidden _group field so the POST handler
+   knows which slice of FIELDS to validate (other groups keep their
+   current values via runtime_config.parse_form's merge). #}
+{% macro runtime_form(target_group, groups, saved_settings) %}
+  {% if saved_settings %}
+  <div class="alert alert-success" style="max-width: 40rem">Settings saved.</div>
+  {% endif %}
+  <form method="post" action="/settings" style="max-width: 40rem">
+    <input type="hidden" name="_group" value="{{ target_group }}">
+    {% for group, fields in groups %}
+      {% if group == target_group %}
+        {% for f in fields %}
+        <div class="mb-3">
+          <label class="form-label"
+                 {% if f.kind != "sources" %}for="{{ f.name }}"{% endif %}>{{ f.label }}</label>
+          {% if f.kind == "sources" %}
+            {% for opt in f.options %}
+            <div class="form-check form-switch">
+              <input class="form-check-input" type="checkbox" role="switch"
+                     name="{{ f.name }}" value="{{ opt.value }}"
+                     id="src-{{ opt.value }}"{% if opt.on %} checked{% endif %}>
+              <label class="form-check-label" for="src-{{ opt.value }}">{{ opt.value }}</label>
+            </div>
+            {% endfor %}
+            {% if not f.options %}
+            <p class="text-muted small mb-0">No gather modules are installed.</p>
+            {% endif %}
+            <div class="form-text">{{ f.unit }}</div>
+          {% else %}
+            <input class="form-control{% if f.error %} is-invalid{% endif %}"
+                   id="{{ f.name }}" name="{{ f.name }}" value="{{ f.value }}">
+            {% if f.error %}
+            <div class="invalid-feedback">{{ f.error }}</div>
+            {% else %}
+            <div class="form-text">{{ f.unit }}</div>
+            {% endif %}
+          {% endif %}
+        </div>
+        {% endfor %}
+      {% endif %}
+    {% endfor %}
+    <button class="btn btn-primary mt-2">Save</button>
+  </form>
+{% endmacro %}
+
+{% if tab == "gather" %}
+{# --- Gather tab ---------------------------------------------------- #}
 
 {% include "_lore_clone_panel.html" %}
 
-<h2 class="h5 mt-5">Gather</h2>
+<h2 class="h5 mt-4">Run a Gather</h2>
 <p class="text-muted small" style="max-width: 40rem">
-  GATHER runs every <em>cadence</em> seconds (set below). Use this to fire
+  Gather runs every <em>cadence</em> seconds (set below). Use this to fire
   a cycle immediately on every enabled source — handy after enabling a
   new list-tag or right after the lore archive lands. Sources already
   mid-cycle are unaffected.
@@ -19,50 +89,45 @@
 </form>
 {% if gather_triggered %}
 <div class="alert alert-success" style="max-width: 40rem">
-  GATHER triggered — every idle source will spawn within a second.
+  Gather triggered — every idle source will spawn within a second.
 </div>
 {% endif %}
 
-{% if saved_settings %}
-<div class="alert alert-success" style="max-width: 40rem">Settings saved.</div>
-{% endif %}
+{{ runtime_form("gather", groups, saved_settings) }}
 
-<form method="post" action="/settings" style="max-width: 40rem">
-  {% for group, fields in groups %}
-  <h2 class="h5 mt-4">{{ group.replace("_", " ").title() }}</h2>
-  {% for f in fields %}
-  <div class="mb-3">
-    <label class="form-label"
-           {% if f.kind != "sources" %}for="{{ f.name }}"{% endif %}>{{ f.label }}</label>
-    {% if f.kind == "sources" %}
-      {% for opt in f.options %}
-      <div class="form-check form-switch">
-        <input class="form-check-input" type="checkbox" role="switch"
-               name="{{ f.name }}" value="{{ opt.value }}"
-               id="src-{{ opt.value }}"{% if opt.on %} checked{% endif %}>
-        <label class="form-check-label" for="src-{{ opt.value }}">{{ opt.value }}</label>
-      </div>
-      {% endfor %}
-      {% if not f.options %}
-      <p class="text-muted small mb-0">No gather modules are installed.</p>
-      {% endif %}
-      <div class="form-text">{{ f.unit }}</div>
-    {% else %}
-      <input class="form-control{% if f.error %} is-invalid{% endif %}"
-             id="{{ f.name }}" name="{{ f.name }}" value="{{ f.value }}">
-      {% if f.error %}
-      <div class="invalid-feedback">{{ f.error }}</div>
-      {% else %}
-      <div class="form-text">{{ f.unit }}</div>
-      {% endif %}
-    {% endif %}
-  </div>
-  {% endfor %}
-  {% endfor %}
-  <button class="btn btn-primary mt-2">Save</button>
-</form>
+{% elif tab == "work_queue" %}
+{# --- Work queue tab ----------------------------------------------- #}
 
-<h2 class="h5 mt-5">Methodology</h2>
+<p class="text-muted small" style="max-width: 40rem">
+  How the work queue manages claims. <em>Lease</em> is how long a node holds a
+  claim before it's reclaimable by another. <em>Heartbeat</em> is how often a
+  working node touches the claim to keep it.
+</p>
+{{ runtime_form("work_queue", groups, saved_settings) }}
+
+{% elif tab == "enrollment" %}
+{# --- Enrollment tab ----------------------------------------------- #}
+
+<p class="text-muted small" style="max-width: 40rem">
+  Token lifetimes and device-code TTLs for the node-enrollment flow
+  (RFC 8628 device-authorization grant — see ARCHITECTURE.md → Auth,
+  enrollment &amp; transport).
+</p>
+{{ runtime_form("enrollment", groups, saved_settings) }}
+
+{% elif tab == "merge_gate" %}
+{# --- Merge gate tab ----------------------------------------------- #}
+
+<p class="text-muted small" style="max-width: 40rem">
+  Knobs for the methodology-evolution merge gate — proposal redraft cap,
+  draft-task batch size, and the defer-watermark growth fraction (see
+  ARCHITECTURE.md → Merge gate).
+</p>
+{{ runtime_form("merge_gate", groups, saved_settings) }}
+
+{% elif tab == "methodology" %}
+{# --- Methodology tab ---------------------------------------------- #}
+
 <p class="text-muted small" style="max-width: 40rem">
   The hone methodology drives every prepare / review / train / draft node
   response. Export the active version for off-line edits; import a YAML
@@ -116,9 +181,11 @@
     {{ methodology.upload_cap_kib }} KiB.</div>
 </form>
 
-<h2 class="h5 mt-5">List-tag filter</h2>
+{% elif tab == "tags" %}
+{# --- List-tag filter tab ------------------------------------------ #}
+
 <p class="text-muted small" style="max-width: 40rem">
-  GATHER only ingests patchsets carrying an enabled tag. With nothing enabled
+  Gather only ingests patchsets carrying an enabled tag. With nothing enabled
   the filter is off and everything is gathered (ARCHITECTURE.md &rarr; List-tag
   filter).
 </p>
@@ -157,13 +224,15 @@
 {% else %}
 <p class="text-muted">
   No list tags known yet — they appear after the lore manifest seeds them or
-  GATHER observes one on an ingested patchset.
+  Gather observes one on an ingested patchset.
 </p>
 {% endif %}
 
-<h2 class="h5 mt-5">Deployment configuration</h2>
+{% elif tab == "deployment" %}
+{# --- Deployment configuration tab --------------------------------- #}
+
 <p class="text-muted small">
-  Set at container start (`core/.env`); change these by redeploying
+  Set at container start (<code>core/.env</code>); change these by redeploying
   (ARCHITECTURE.md &rarr; Configuration &amp; the Settings page).
 </p>
 <table class="table table-sm" style="max-width: 40rem">
@@ -176,4 +245,6 @@
   {% endfor %}
   </tbody>
 </table>
+
+{% endif %}
 {% endblock %}

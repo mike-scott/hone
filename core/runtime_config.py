@@ -1,6 +1,6 @@
 """hone-core — the operator-tunable runtime configuration.
 
-The settings an operator may change on a running instance — GATHER cadence,
+The settings an operator may change on a running instance — Gather cadence,
 claim lease, token lifetimes, the merge-gate redraft cap. They live in a YAML
 file on the data volume (config.py's `config_path` / HONE_CONFIG, default
 /data/config.yaml); the operator web UI's Settings page edits them; they apply
@@ -69,9 +69,9 @@ _ENV_SEEDS = {
 # (>= 0), "float01" (a 0..1 ratio), "sources" (a toggle per installed
 # gather module).
 FIELDS = [
-    ("gather", "interval_seconds", "GATHER cadence", "seconds", "int"),
-    ("gather", "sources", "Enabled gather sources",
-     "tick the sources GATHER pulls from; untick all to pause gathering",
+    ("gather", "interval_seconds", "Cadence", "seconds", "int"),
+    ("gather", "sources", "Enabled sources",
+     "tick the sources Gather pulls from; untick all to pause gathering",
      "sources"),
     ("work_queue", "lease_seconds", "Claim lease", "seconds", "int"),
     ("work_queue", "heartbeat_seconds", "Heartbeat interval", "seconds", "int"),
@@ -215,15 +215,26 @@ def save(path, runtime_config):
     _write(path, runtime_config.as_dict())
 
 
-def parse_form(form, valid_sources=None):
+def parse_form(form, valid_sources=None, *, current=None, groups=None):
     """Validate a Settings-page submission. `form` maps each 'group.key' to its
        posted value. Returns (RuntimeConfig, {}) on success, or
        (None, {'group.key': message}) on failure — the caller writes
        config.yaml only on success. `valid_sources`, if given, constrains the
-       gather sources to the installed modules."""
-    data = copy.deepcopy(DEFAULTS)
+       gather sources to the installed modules.
+
+       For per-tab partial submissions, pass `current` (the live
+       RuntimeConfig) and `groups` (the set of group names submitted
+       — e.g. {'gather'}). Only those groups' fields are validated;
+       all other groups keep their existing values via the merge
+       against `current`. With `groups=None` (default), every field
+       is validated and the baseline is DEFAULTS — the legacy
+       "submit the whole form at once" behavior."""
+    base = current.as_dict() if current is not None else DEFAULTS
+    data = copy.deepcopy(base)
     errors = {}
     for group, key, label, _unit, kind in FIELDS:
+        if groups is not None and group not in groups:
+            continue
         name = f"{group}.{key}"
         if kind == "sources":
             # checkbox group — the posted values are the ticked sources;

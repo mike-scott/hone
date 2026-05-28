@@ -816,11 +816,36 @@ def _methodology_view(db):
              "export_url":     "/settings/methodology/export"}
 
 
+# Valid `?tab=...` values. Defined as a tuple so the order matches the
+# template's nav-tab order (Gather first — most-frequent operator
+# action). The four runtime-config groups (gather, work_queue,
+# enrollment, merge_gate) each get their own tab + their own form so
+# an operator can save one section without affecting the others.
+_SETTINGS_TABS = ("gather", "work_queue", "enrollment", "merge_gate",
+                   "methodology", "tags", "deployment")
+_DEFAULT_SETTINGS_TAB = "gather"
+
+# Tabs that render a runtime-config form. The form_group attribute on
+# each tab's form (hidden _group field) selects which subset of
+# runtime_config.FIELDS the POST handler validates.
+_RUNTIME_CONFIG_GROUPS = ("gather", "work_queue", "enrollment", "merge_gate")
+
+
+def _resolve_settings_tab(request):
+    """Pluck `?tab=...` from the query string, validate against the
+       known set, fall back to the default. Server-side validation
+       keeps a typo'd URL from rendering an empty page."""
+    t = request.query_params.get("tab") or _DEFAULT_SETTINGS_TAB
+    return t if t in _SETTINGS_TABS else _DEFAULT_SETTINGS_TAB
+
+
 @router.get("/settings", response_class=HTMLResponse)
 async def settings(request: Request):
     """View the deployment configuration and edit the operator-tunable
-       settings — runtime config + the list-tag gather filter
-       (ARCHITECTURE.md → Configuration & the Settings page)."""
+       settings. The page is organised into tabs (`?tab=gather` /
+       `methodology` / `tags` / `deployment`); each tab renders only
+       its own panel so the page isn't a wall of stacked sections.
+       See ARCHITECTURE.md → Configuration & the Settings page."""
     rc = request.app.state.runtime_config.as_dict()
     available = gather.gather_api.available()
     values = {f"{g}.{k}": rc[g][k] for g, k, *_ in runtime_config.FIELDS}
@@ -828,6 +853,7 @@ async def settings(request: Request):
     imported = request.query_params.get("methodology_imported")
     meth_error = request.query_params.get("methodology_error")
     return templates.TemplateResponse(request, "settings.html", {
+        "tab":        _resolve_settings_tab(request),
         "groups":     _settings_fields(values, available),
         "tags":       _tag_rows(request.app.state.db),
         "deployment": _deployment_view(request.app.state.config),
@@ -843,22 +869,49 @@ async def settings(request: Request):
 
 @router.post("/settings")
 async def save_settings(request: Request):
-    """Validate the runtime-config submission, persist it to config.yaml, and
+    """Validate a runtime-config submission, persist it to config.yaml, and
        update the live config — no restart needed. Invalid input re-renders
-       the form with the fields flagged; config.yaml is left untouched."""
+       the form with the fields flagged; config.yaml is left untouched.
+
+       Per-tab partial submission: each runtime-config tab posts a
+       hidden `_group` field naming which subset of FIELDS to
+       validate. The other groups keep their current values via the
+       merge in runtime_config.parse_form. With `_group` absent (or
+       unknown), every field is validated — preserved so callers
+       that posted the whole form continue to work."""
     form = await request.form()
     available = gather.gather_api.available()
-    rc, errors = runtime_config.parse_form(form, valid_sources=available)
+    submitted_group = form.get("_group", "")
+    groups_filter = ({submitted_group}
+                      if submitted_group in _RUNTIME_CONFIG_GROUPS
+                      else None)
+    # Tab to land on for redirects + re-renders. With no _group we
+    # fall back to gather (the legacy single-form behavior).
+    tab = submitted_group if groups_filter else "gather"
+    rc, errors = runtime_config.parse_form(
+        form, valid_sources=available,
+        current=request.app.state.runtime_config,
+        groups=groups_filter)
     if not errors:
         runtime_config.save(request.app.state.config.config_path, rc)
         request.app.state.runtime_config = rc
-        return RedirectResponse("/settings?saved=1", status_code=303)
+        return RedirectResponse(f"/settings?tab={tab}&saved=1",
+                                 status_code=303)
     submitted = {}
     for g, k, _label, _unit, kind in runtime_config.FIELDS:
         name = f"{g}.{k}"
         submitted[name] = (form.getlist(name) if kind == "sources"
                            else (form.get(name) or ""))
+    # If the submission was a legacy whole-form post and the error
+    # is in a non-default group, land the re-render on THAT tab so
+    # the operator sees their flagged field rather than an unrelated
+    # gather form. Per-tab submissions already pin `tab` correctly.
+    if groups_filter is None and errors:
+        first_errored_group = next(iter(errors)).split(".", 1)[0]
+        if first_errored_group in _RUNTIME_CONFIG_GROUPS:
+            tab = first_errored_group
     return templates.TemplateResponse(request, "settings.html", {
+        "tab":        tab,
         "groups":     _settings_fields(submitted, available, errors),
         "tags":       _tag_rows(request.app.state.db),
         "deployment": _deployment_view(request.app.state.config),
@@ -880,7 +933,8 @@ async def trigger_gather(request: Request):
     trigger = getattr(request.app.state, "gather_trigger", None)
     if trigger is not None:
         trigger.set()
-    return RedirectResponse("/settings?saved=triggered", status_code=303)
+    return RedirectResponse("/settings?tab=gather&saved=triggered",
+                             status_code=303)
 
 
 # --- methodology import / export ------------------------------------------
@@ -1006,16 +1060,16 @@ async def import_methodology(request: Request,
     raw = await file.read(_METHODOLOGY_UPLOAD_CAP_BYTES + 1)
     if len(raw) > _METHODOLOGY_UPLOAD_CAP_BYTES:
         return RedirectResponse(
-            "/settings?methodology_error=too_large", status_code=303)
+            "/settings?tab=methodology&methodology_error=too_large", status_code=303)
     try:
         document = yaml.safe_load(raw.decode("utf-8"))
     except (yaml.YAMLError, UnicodeDecodeError) as exc:
         log.warning("methodology import: parse failure: %s", exc)
         return RedirectResponse(
-            "/settings?methodology_error=parse", status_code=303)
+            "/settings?tab=methodology&methodology_error=parse", status_code=303)
     if not isinstance(document, dict):
         return RedirectResponse(
-            "/settings?methodology_error=shape", status_code=303)
+            "/settings?tab=methodology&methodology_error=shape", status_code=303)
     with open(_METHODOLOGY_SCHEMA_PATH, encoding="utf-8") as f:
         schema = yaml.safe_load(f)
     try:
@@ -1025,7 +1079,7 @@ async def import_methodology(request: Request,
         log.warning("methodology import: schema validation failed: %s",
                      exc.message)
         return RedirectResponse(
-            "/settings?methodology_error=schema", status_code=303)
+            "/settings?tab=methodology&methodology_error=schema", status_code=303)
     # Canonicalize prose fields BEFORE the content-identical
     # check, so an operator who re-uploads the export they edited
     # (with different whitespace / line breaks but the same
@@ -1047,7 +1101,7 @@ async def import_methodology(request: Request,
                       "v%d; refusing to create a duplicate row",
                       _active_db_version)
             return RedirectResponse(
-                "/settings?methodology_error=identical",
+                "/settings?tab=methodology&methodology_error=identical",
                 status_code=303)
         # Auto-bump doc.version: hone-core takes ownership of the
         # field rather than trusting the operator's value.
@@ -1060,7 +1114,7 @@ async def import_methodology(request: Request,
     log.info("methodology imported: db_version=%d doc_version=%d from=%s",
               version, document.get("version"), file.filename)
     return RedirectResponse(
-        f"/settings?methodology_imported={version}", status_code=303)
+        f"/settings?tab=methodology&methodology_imported={version}", status_code=303)
 
 
 @router.post("/settings/tags")
@@ -1073,4 +1127,5 @@ async def save_tag_filter(request: Request):
     posted = set(form.getlist("tag"))
     for row in core_db.list_tags(db):
         core_db.set_tag_enabled(db, row["tag"], row["tag"] in posted)
-    return RedirectResponse("/settings?saved=tags", status_code=303)
+    return RedirectResponse("/settings?tab=tags&saved=tags",
+                             status_code=303)

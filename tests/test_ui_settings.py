@@ -75,14 +75,17 @@ def _form(**overrides):
 # --- runtime-config form ---------------------------------------------------
 
 def test_settings_page_shows_values_and_masks_secrets(ctx):
+    # The Gather tab is the default landing — runtime-config form lives here.
     r = ctx.client.get("/settings")
     assert r.status_code == 200
-    assert "GATHER cadence" in r.text and 'value="600"' in r.text
-    assert "Enabled gather sources" in r.text and "form-switch" in r.text
+    assert "Cadence" in r.text and 'value="600"' in r.text
+    assert "Enabled sources" in r.text and "form-switch" in r.text
     assert "lore" in r.text                          # a per-source toggle
-    assert "Deployment configuration" in r.text and "core.example" in r.text
-    assert "FLEETSECRETVALUE" not in r.text          # secret is masked
-    assert "ADMINTOKENVALUE" not in r.text
+    # Deployment info moved to its own tab — fetch it.
+    r2 = ctx.client.get("/settings?tab=deployment")
+    assert "core.example" in r2.text
+    assert "FLEETSECRETVALUE" not in r2.text         # secret is masked
+    assert "ADMINTOKENVALUE" not in r2.text
 
 
 def test_save_settings_persists_and_applies_live(ctx):
@@ -132,8 +135,7 @@ def test_settings_page_lists_known_tags_with_switches(ctx):
         ("linux-arm-msm.vger.kernel.org", "linux-arm-msm"),
         ("linux-kernel.vger.kernel.org",  "LKML")])
     core_db.set_tag_enabled(ctx.db, "linux-arm-msm.vger.kernel.org", True)
-    body = ctx.client.get("/settings").text
-    assert "List-tag filter" in body
+    body = ctx.client.get("/settings?tab=tags").text
     assert "linux-arm-msm.vger.kernel.org" in body
     assert "linux-kernel.vger.kernel.org" in body
     # one input per tag (the manifest origin label appears for each)
@@ -144,7 +146,7 @@ def test_settings_page_lists_known_tags_with_switches(ctx):
 
 
 def test_settings_page_when_no_tags_known(ctx):
-    body = ctx.client.get("/settings").text
+    body = ctx.client.get("/settings?tab=tags").text
     assert "No list tags known yet" in body
 
 
@@ -258,7 +260,7 @@ def test_settings_page_renders_the_gather_now_button(ctx):
 def test_trigger_gather_sets_the_event_and_redirects(ctx):
     r = ctx.client.post("/settings/gather/trigger")
     assert r.status_code == 200                # TestClient follows the 303
-    assert "GATHER triggered" in r.text
+    assert "Gather triggered" in r.text
     assert ctx.app.state.gather_trigger.set_calls == 1
 
 
@@ -267,7 +269,7 @@ def test_trigger_gather_is_a_no_op_when_supervisor_isnt_running(ctx):
        still returns cleanly without raising."""
     ctx.app.state.gather_trigger = None
     r = ctx.client.post("/settings/gather/trigger")
-    assert r.status_code == 200 and "GATHER triggered" in r.text
+    assert r.status_code == 200 and "Gather triggered" in r.text
 
 
 # --- methodology import / export ------------------------------------------
@@ -292,14 +294,13 @@ def _seed_active_methodology(db):
 
 def test_settings_page_shows_methodology_panel_with_active_version(ctx):
     version, _doc = _seed_active_methodology(ctx.db)
-    body = ctx.client.get("/settings").text
-    assert "Methodology" in body
+    body = ctx.client.get("/settings?tab=methodology").text
     assert f"Export active (v{version})" in body
     assert 'action="/settings/methodology/import"' in body
 
 
 def test_settings_page_shows_no_methodology_when_unbootstrapped(ctx):
-    body = ctx.client.get("/settings").text
+    body = ctx.client.get("/settings?tab=methodology").text
     assert "No methodology bootstrapped yet" in body
 
 
