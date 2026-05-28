@@ -11,98 +11,22 @@
 </a>
 
 <h1 class="h4 mb-1">{{ patchset.subject or "(no subject)" }}</h1>
-<div class="text-muted small mb-3">
+<div class="text-muted small mb-2">
   <code>{{ patchset.root_message_id }}</code>
 </div>
 
-<div class="row g-3 mb-4">
-  <div class="col-md-6">
-    <div class="card h-100">
-      <div class="card-header py-2"><strong>Patchset</strong></div>
-      <div class="card-body py-2">
-        <dl class="row mb-0 small">
-          <dt class="col-sm-4">Submitter</dt>
-          <dd class="col-sm-8">{{ patchset.submitter_email or "—" }}</dd>
-          <dt class="col-sm-4">Sent</dt>
-          <dd class="col-sm-8">{{ patchset.sent_display }}</dd>
-          <dt class="col-sm-4">Gathered</dt>
-          <dd class="col-sm-8">{{ patchset.gathered_display }}</dd>
-          <dt class="col-sm-4">Patches</dt>
-          <dd class="col-sm-8">{{ patchset.n_patches or "—" }}</dd>
-          <dt class="col-sm-4">Series version</dt>
-          <dd class="col-sm-8">v{{ patchset.series_version }}</dd>
-          <dt class="col-sm-4">Base commit</dt>
-          <dd class="col-sm-8">
-            {% if patchset.base_commit %}<code>{{ patchset.base_commit }}</code>
-            {% else %}—{% endif %}
-          </dd>
-          <dt class="col-sm-4">Change-Id</dt>
-          <dd class="col-sm-8">
-            {% if patchset.change_id %}<code>{{ patchset.change_id }}</code>
-            {% else %}—{% endif %}
-          </dd>
-          <dt class="col-sm-4">Corpus state</dt>
-          <dd class="col-sm-8">
-            <span class="badge text-bg-secondary">{{ patchset.state_display }}</span>
-            {% if patchset.skip_reason %}
-            <span class="text-muted ms-1">({{ patchset.skip_reason }})</span>
-            {% endif %}
-          </dd>
-          {% if tags %}
-          <dt class="col-sm-4">List tags</dt>
-          <dd class="col-sm-8">
-            {% for t in tags %}
-            <span class="badge text-bg-light me-1">{{ t }}</span>
-            {% endfor %}
-          </dd>
-          {% endif %}
-        </dl>
-      </div>
-    </div>
-  </div>
+{% set mode_badge = {"authoritative": "text-bg-success",
+                     "mixed": "text-bg-warning",
+                     "heuristic": "text-bg-secondary"} %}
 
-  <div class="col-md-6">
-    <div class="card h-100">
-      <div class="card-header py-2">
-        <strong>Prepare-derived metadata</strong>
-      </div>
-      <div class="card-body py-2">
-        {% if metadata %}
-        <dl class="row mb-0 small">
-          <dt class="col-sm-4">Mode</dt>
-          <dd class="col-sm-8">{{ metadata.mode }}</dd>
-          <dt class="col-sm-4">Methodology v</dt>
-          <dd class="col-sm-8">{{ metadata.methodology_version or "—" }}</dd>
-          {% if metadata.subsystem %}
-          <dt class="col-sm-4">Subsystem</dt>
-          <dd class="col-sm-8"><code>{{ metadata.subsystem }}</code></dd>
-          {% endif %}
-          {% if metadata.patch_size %}
-          <dt class="col-sm-4">Size</dt>
-          <dd class="col-sm-8"><code>{{ metadata.patch_size }}</code></dd>
-          {% endif %}
-          {% if metadata.patch_type %}
-          <dt class="col-sm-4">Type</dt>
-          <dd class="col-sm-8"><code>{{ metadata.patch_type }}</code></dd>
-          {% endif %}
-          {% if metadata.maintainer %}
-          <dt class="col-sm-4">Maintainer</dt>
-          <dd class="col-sm-8"><code>{{ metadata.maintainer }}</code></dd>
-          {% endif %}
-          {% if metadata.review_intensity %}
-          <dt class="col-sm-4">Review intensity</dt>
-          <dd class="col-sm-8"><code>{{ metadata.review_intensity }}</code></dd>
-          {% endif %}
-        </dl>
-        {% else %}
-        <p class="text-muted mb-0 small">
-          No prepare task has completed for this patchset yet.
-        </p>
-        {% endif %}
-      </div>
-    </div>
-  </div>
-</div>
+{# Two-column layout: the main column (left, the majority) is for
+   browsing — AI review, work-item history, the thread. The metadata
+   lives in a permanent right rail. Sections with potentially-long
+   content (the maintainer list) are capped with a max-height and
+   scroll internally, so the rail stays compact. The rail sticks
+   while the main column scrolls; on narrow screens it stacks below. #}
+<div class="row g-4">
+  <div class="col-lg-8">
 
 <h2 class="h5">AI review</h2>
 {% if ai_review %}
@@ -213,5 +137,163 @@
 {% else %}
 <p class="text-muted small">No messages in the corpus for this patchset yet.</p>
 {% endif %}
+
+  </div>{# /col-lg-8 — the main browsing column #}
+
+  {# Permanent metadata rail (right). Sticks while the main column
+     scrolls; stacks below the main column on narrow screens. #}
+  <div class="col-lg-4">
+   <div style="position: sticky; top: 1rem;">
+
+    <div class="card mb-3">
+      <div class="card-header py-2"><strong>Patchset</strong></div>
+      <div class="card-body py-2 small">
+        <dl class="row mb-0">
+      <dt class="col-5">Submitter</dt>
+      <dd class="col-7 text-break">{{ patchset.submitter_email or "—" }}</dd>
+      <dt class="col-5">Sent</dt>
+      <dd class="col-7">{{ patchset.sent_display }}</dd>
+      <dt class="col-5">Gathered</dt>
+      <dd class="col-7">{{ patchset.gathered_display }}</dd>
+      <dt class="col-5">Patches</dt>
+      <dd class="col-7">{{ patchset.n_patches or "—" }}</dd>
+      <dt class="col-5">Series version</dt>
+      <dd class="col-7">v{{ patchset.series_version }}</dd>
+      <dt class="col-5">Base commit</dt>
+      <dd class="col-7">
+        {% if patchset.base_commit %}<code class="text-break">{{ patchset.base_commit }}</code>
+        {% else %}—{% endif %}
+      </dd>
+      <dt class="col-5">Change-Id</dt>
+      <dd class="col-7">
+        {% if patchset.change_id %}<code class="text-break">{{ patchset.change_id }}</code>
+        {% else %}—{% endif %}
+      </dd>
+      <dt class="col-5">Corpus state</dt>
+      <dd class="col-7">
+        <span class="badge text-bg-secondary">{{ patchset.state_display }}</span>
+        {% if patchset.skip_reason %}
+        <span class="text-muted ms-1">({{ patchset.skip_reason }})</span>
+        {% endif %}
+      </dd>
+      {% if tags %}
+      <dt class="col-5">List tags</dt>
+      <dd class="col-7">
+        {% for t in tags %}<span class="badge text-bg-light border me-1">{{ t }}</span>{% endfor %}
+      </dd>
+      {% endif %}
+        </dl>
+      </div>
+    </div>
+
+    {% if metadata %}
+    <div class="card mb-3">
+      <div class="card-header py-2"><strong>Characterization</strong></div>
+      <div class="card-body py-2 small">
+        <dl class="row mb-0">
+      <dt class="col-5">Mode</dt>
+      <dd class="col-7">
+        <span class="badge {{ mode_badge.get(metadata.mode, 'text-bg-secondary') }}">
+          {{ metadata.mode }}</span>
+      </dd>
+      <dt class="col-5">Methodology v</dt>
+      <dd class="col-7">{{ metadata.methodology_version or "—" }}</dd>
+      {% if metadata.tree_state %}
+      <dt class="col-5">Base in tree</dt>
+      <dd class="col-7">
+        {% if metadata.tree_state.base_in_tree is none %}<span class="text-muted">unknown</span>
+        {% elif metadata.tree_state.base_in_tree %}yes
+          {%- if metadata.tree_state.base_tree %} (<code>{{ metadata.tree_state.base_tree }}</code>){% endif %}
+        {% else %}no{% endif %}
+      </dd>
+      {% endif %}
+      {% if metadata.subsystem %}
+      <dt class="col-5">Subsystem</dt>
+      <dd class="col-7">
+        {{ metadata.subsystem.primary or "—" }}
+        {% if metadata.subsystem.secondary %}
+        <div class="text-muted">
+          {% for s in metadata.subsystem.secondary %}{{ s }}{% if not loop.last %}, {% endif %}{% endfor %}
+        </div>
+        {% endif %}
+      </dd>
+      {% endif %}
+      {% if metadata.patch_type %}
+      <dt class="col-5">Type</dt>
+      <dd class="col-7">
+        {{ metadata.patch_type.primary or "—" }}
+        {% if metadata.patch_type.secondary %}
+        <span class="text-muted">({{ metadata.patch_type.secondary|join(", ") }})</span>
+        {% endif %}
+      </dd>
+      {% endif %}
+      {% if metadata.patch_size %}
+      <dt class="col-5">Size</dt>
+      <dd class="col-7">
+        <span class="badge text-bg-light border">{{ metadata.patch_size.bucket or "—" }}</span>
+        <span class="text-muted">
+          +{{ metadata.patch_size.lines_added }}/−{{ metadata.patch_size.lines_removed }},
+          {{ metadata.patch_size.files_modified }} file(s)</span>
+      </dd>
+      {% endif %}
+      {% if metadata.review_intensity %}
+      <dt class="col-5">Review</dt>
+      <dd class="col-7">
+        {{ metadata.review_intensity.bucket_overall or "—" }}
+        <span class="text-muted">· {{ metadata.review_intensity.reply_count }} repl{{ 'y' if metadata.review_intensity.reply_count == 1 else 'ies' }}</span>
+      </dd>
+      {% endif %}
+        </dl>
+      </div>
+    </div>
+
+    {% if metadata.maintainer %}
+    <div class="card mb-3">
+      <div class="card-header py-2"><strong>Maintainers</strong></div>
+      {# scroll the list internally when it's long — keeps the rail compact #}
+      <div class="card-body py-2 small" style="max-height: 18rem; overflow-y: auto;">
+        {% set m = metadata.maintainer %}
+        {% if m.authoritative_set %}
+    <div class="mb-2">
+      {% for p in m.authoritative_set %}
+      <div><span class="badge text-bg-primary me-1">M</span>{{ p.name or p.email }}</div>
+      {% endfor %}
+    </div>
+    {% endif %}
+    {% if m.authoritative_reviewer_set %}
+    <div class="mb-2">
+      {% for p in m.authoritative_reviewer_set %}
+      <div><span class="badge text-bg-info me-1">R</span>{{ p.name or p.email }}</div>
+      {% endfor %}
+    </div>
+    {% endif %}
+    {% if m.mailing_lists %}
+    <div class="mb-2">
+      {% for l in m.mailing_lists %}
+      <div class="text-muted"><i class="bi bi-envelope me-1"></i>{{ l.address }}</div>
+      {% endfor %}
+    </div>
+    {% endif %}
+        {% if not m.authoritative_set and not m.authoritative_reviewer_set
+              and not m.mailing_lists %}
+        <p class="text-muted mb-0">No authoritative maintainer set
+          (heuristic mode).</p>
+        {% endif %}
+      </div>{# /card-body #}
+    </div>{# /Maintainers card #}
+    {% endif %}{# /metadata.maintainer #}
+
+    {% else %}
+    <div class="card mb-3">
+      <div class="card-body py-2 small text-muted">
+        No prepare task has completed for this patchset yet —
+        characterization appears once a node prepares it.
+      </div>
+    </div>
+    {% endif %}{# /metadata #}
+
+   </div>{# /sticky #}
+  </div>{# /col-lg-4 — the permanent metadata rail #}
+</div>{# /row #}
 
 {% endblock %}
