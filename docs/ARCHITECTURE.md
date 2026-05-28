@@ -112,7 +112,11 @@ AI work, and reports back. Four task types:
 - **prepare task** — characterise one patchset for the corpus. Produces
   the structured per-patchset metadata (subsystem, patch_size, maintainer,
   patch_type, review_intensity, tree_state) that drives stratification. See
-  *The patchset-metadata layer* below.
+  *The patchset-metadata layer* below, and
+  [`ARCHITECTURE-PREPARE.md`](ARCHITECTURE-PREPARE.md) for the target
+  tiered design that splits prepare into a deterministic code phase (cgit
+  lookups, no LLM, no tree) and an LLM-judgment phase, confining the
+  kernel tree to `review`.
 - **review task** — review one patchset, blind. Produces an `ai_reviews`
   row keyed on the patchset's root Message-ID.
 - **train task** — measure our review against *one* reviewer comment on
