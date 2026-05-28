@@ -26,7 +26,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from common.version import __version__ as VERSION
-from core import core_db, gather, methodology_format, runtime_config
+from core import core_db, gather, methodology_format, patchview, runtime_config
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 templates = Jinja2Templates(directory=os.path.join(_HERE, "templates"))
@@ -450,17 +450,18 @@ def _patchset_view(db, root):
 
     messages = []
     for m in core_db.messages_for_patchset(db, root):
+        type_name = core_db.MSG_TYPE_NAMES.get(m["type"], "?")
+        rendered = patchview.render(m["body"] or "", is_patch=type_name == "patch")
         messages.append({
             "message_id":   m["message_id"],
-            "type":         core_db.MSG_TYPE_NAMES.get(m["type"], "?"),
-            "type_badge":   _MSG_TYPE_BADGE.get(
-                                core_db.MSG_TYPE_NAMES.get(m["type"]),
-                                "text-bg-light"),
+            "type":         type_name,
+            "type_badge":   _MSG_TYPE_BADGE.get(type_name, "text-bg-light"),
             "part_index":   m["part_index"],
             "subject":      m["subject"],
             "author":       m["author_name"] or m["author_email"] or "—",
             "sent_display": _when(m["sent"]),
-            "body":         m["body"] or "",
+            "headers":      rendered.headers,
+            "body_html":    rendered.body_html,
         })
 
     work_item_back_qs = "?back=" + quote(f"/patchsets/{root}", safe="")

@@ -1,0 +1,13 @@
+/* hone-core app styles (non-vendored).
+   Patch/diff rendering for the thread viewer (templates/patchset.html).
+   Colours are built from Bootstrap theme variables so they track the
+   light/dark toggle; the washes are deliberately faint (~12% alpha). */
+
+.patch-body .pl   { display: block; }
+.patch-body .pl-add   { background: rgba(var(--bs-success-rgb), .14); }
+.patch-body .pl-del   { background: rgba(var(--bs-danger-rgb), .14); }
+.patch-body .pl-hunk,
+.patch-body .pl-file  { color: var(--bs-info-text-emphasis, var(--bs-info));
+                        background: rgba(var(--bs-info-rgb), .10); }
+.patch-body .pl-meta  { color: var(--bs-secondary-color); }
+.patch-body .pl-quote { color: var(--bs-secondary-color); font-style: italic; }

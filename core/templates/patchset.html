@@ -128,8 +128,19 @@
     </summary>
     <div class="mt-2">
       <div class="text-muted small mb-1"><code>{{ m.message_id }}</code></div>
-      <pre class="small bg-body-tertiary p-2 rounded"
-           style="max-height: 30rem; overflow: auto;">{{ m.body }}</pre>
+      {# The stored body is the full raw RFC822 message; the transport
+         headers (Received/ARC/DKIM/…) are stripped into a collapsed
+         toggle so the patch/prose leads. body_html is server-rendered,
+         per-line classified, pre-escaped markup (core/patchview.py). #}
+      {% if m.headers %}
+      <details class="mb-2">
+        <summary class="small text-muted">Raw headers</summary>
+        <pre class="small bg-body-tertiary p-2 rounded mt-1"
+             style="max-height: 20rem; overflow: auto;">{{ m.headers }}</pre>
+      </details>
+      {% endif %}
+      <pre class="patch-body small bg-body-tertiary p-2 rounded"
+           style="max-height: 30rem; overflow: auto;">{{ m.body_html|safe }}</pre>
     </div>
   </details>
 {% endfor %}
