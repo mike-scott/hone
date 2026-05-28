@@ -11,7 +11,7 @@ import jsonschema
 import pytest
 import yaml
 
-from node import tasks
+from node import cgit, tasks, tier0
 
 
 # --- schema-based record validator ----------------------------------------
@@ -186,7 +186,8 @@ def _fake_call_claude(response_text):
 
 def _cfg():
     return SimpleNamespace(node_name="fake-node",
-                            anthropic_api_key="sk-test")
+                            anthropic_api_key="sk-test",
+                            cgit_trees=cgit.DEFAULT_TREES)
 
 
 def test_prepare_handler_emits_a_schema_valid_prepared_record(monkeypatch):
@@ -307,3 +308,71 @@ def test_prepare_handler_strips_markdown_fences_around_json(monkeypatch):
     monkeypatch.setattr("node.ai.call_claude", stub)
     record = tasks.handle_prepare_task(_cfg(), None, _PREPARE_CLAIM)
     assert record["outcome"] == "prepared"
+
+
+# --- Tier-0 deterministic phase --------------------------------------------
+
+def test_prepare_runs_deterministic_phase_with_no_trailer_offline(monkeypatch):
+    """The default claim's patch carries no base-commit trailer, so the
+       deterministic phase resolves entirely offline (no cgit probe) and
+       stays heuristic — but it still runs: patch_size is code-counted
+       (overriding the LLM's), and the resolver version is stamped."""
+    stub, _calls = _fake_call_claude(json.dumps(_STUB_PREPARE_BODY))
+    monkeypatch.setattr("node.ai.call_claude", stub)
+    record = tasks.handle_prepare_task(_cfg(), None, _PREPARE_CLAIM)
+    assert record["outcome"] == "prepared"
+    # base trailer absent → base fields null / "none"; base_tree present.
+    assert record["tree_state"]["base_commit_source"] == "none"
+    assert record["tree_state"]["base_in_tree"] is None
+    assert record["tree_state"]["base_tree"] is None
+    # patch_size is code-counted, replacing the LLM's stub values. The
+    # claim's patch body has no diff, so everything is zero/trivial.
+    assert record["patch_size"]["lines_added"] == 0
+    assert record["patch_size"]["bucket"] == "trivial"
+    # heuristic subsystem (det source thread) → the LLM's block is kept.
+    assert record["subsystem"]["source"] == "thread"
+    assert record["meta"]["deterministic_resolver_version"] == \
+        tier0.RESOLVER_VERSION
+    _validate_record(record)
+
+
+def test_prepare_overlays_authoritative_deterministic_fields(monkeypatch):
+    """When the resolver returns an authoritative (source 'tree') result,
+       the merge replaces the LLM's subsystem + maintainer blocks and
+       overlays the base_* tree_state fields — code wins for the fields
+       it owns, the LLM keeps patch_type / review_intensity / notes."""
+    stub, _calls = _fake_call_claude(json.dumps(_STUB_PREPARE_BODY))
+    monkeypatch.setattr("node.ai.call_claude", stub)
+    det = {
+        "base_in_tree": True, "base_tree": "mainline",
+        "base_commit_declared": "abc123", "base_commit_source": "trailer",
+        "subsystem": {"primary": "EXT4 FILE SYSTEM", "primary_status": None,
+                      "primary_tree": None, "secondary": [],
+                      "cross_cutting": False, "uncertain_paths": [],
+                      "source": "tree"},
+        "maintainer": {"primary": "tytso@mit.edu", "primary_role": "maintainer",
+                       "authoritative_set": [{"email": "tytso@mit.edu",
+                                               "name": "Ted", "role": "maintainer"}],
+                       "authoritative_reviewer_set": [], "mailing_lists": [],
+                       "cc_coverage": None, "list_coverage": None,
+                       "engagement_rate": None, "out_of_scope_engaged": [],
+                       "all_engaged": [], "cc_list_size": None,
+                       "primary_uncertain_reason": None, "source": "tree"},
+        "patch_size": _STUB_PREPARE_BODY["patch_size"],
+        "resolver_version": tier0.RESOLVER_VERSION,
+    }
+    monkeypatch.setattr(tier0, "resolve_deterministic",
+                         lambda *a, **k: det)
+    record = tasks.handle_prepare_task(_cfg(), None, _PREPARE_CLAIM)
+    # code-owned fields come from the resolver, not the LLM stub
+    assert record["subsystem"]["primary"] == "EXT4 FILE SYSTEM"
+    assert record["subsystem"]["source"] == "tree"
+    assert record["maintainer"]["authoritative_set"][0]["email"] == \
+        "tytso@mit.edu"
+    assert record["tree_state"]["base_in_tree"] is True
+    assert record["tree_state"]["base_tree"] == "mainline"
+    assert record["tree_state"]["base_commit_declared"] == "abc123"
+    # LLM-owned judgment fields are untouched
+    assert record["patch_type"]["primary"] == "bugfix"
+    assert record["review_intensity"]["bucket_overall"] == "none"
+    _validate_record(record)

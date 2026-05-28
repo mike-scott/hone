@@ -19,11 +19,14 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1
 
-# git — the node builds its own reference kernel repo and checks out base
-# commits to review against. The only system package beyond the slim base:
-# the review is pure analysis, so there is NO kernel build toolchain.
+# git    — the node builds its own reference kernel repo and checks out
+#          base commits to review against.
+# perl    — runs the kernel's get_maintainer.pl during prepare's Tier-0
+#          deterministic phase (docs/ARCHITECTURE-PREPARE.md); the script
+#          needs only base perl, no CPAN modules.
+# No kernel build toolchain: the review is pure analysis.
 RUN apt-get update \
- && apt-get install --no-install-recommends -y git curl ca-certificates \
+ && apt-get install --no-install-recommends -y git curl ca-certificates perl \
  && rm -rf /var/lib/apt/lists/*
 
 # Optional: install the `claude` CLI for HONE_CLAUDE_BACKEND=cli. Defaults

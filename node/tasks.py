@@ -9,10 +9,12 @@ POST /v1/claims/{id}/result. The records are validated against
 Today: `prepare` is wired end-to-end through Claude; `review`, `train`, and
 `draft` still raise NotImplementedError pending their AI integration.
 """
+import email
+import email.utils
 import json
 import logging
 
-from node import ai
+from node import ai, cgit, tier0
 from node.client import HoneCoreClient
 from node.config import Config
 
@@ -40,6 +42,92 @@ def _worker_id(cfg: Config) -> str:
        Config doubles as the worker label — set by the operator at deploy,
        defaults to socket.gethostname()."""
     return cfg.node_name
+
+
+# --- prepare: Tier-0 deterministic phase -----------------------------------
+
+def _patch_text(claim: dict) -> str:
+    """The combined patchset text the deterministic resolver works on —
+       cover letter + every patch body. Carries the base-commit trailer,
+       all touched file paths (for get_maintainer), and the diff lines
+       (for patch_size)."""
+    parts = []
+    if claim.get("cover_letter_body"):
+        parts.append(claim["cover_letter_body"])
+    for p in (claim.get("patches") or []):
+        if p.get("body"):
+            parts.append(p["body"])
+    return "\n".join(parts)
+
+
+def _recipients(claim: dict):
+    """The To:/Cc: address set (lower-cased) parsed from the cover letter
+       — else the first patch — for the maintainer coverage ratios. None
+       when no headers are parseable, so coverage stays null rather than
+       falsely reporting nobody was Cc'd."""
+    raw = claim.get("cover_letter_body")
+    if not raw:
+        patches = claim.get("patches") or []
+        raw = patches[0].get("body") if patches else None
+    if not raw:
+        return None
+    try:
+        msg = email.message_from_string(raw)
+        pairs = email.utils.getaddresses(
+            msg.get_all("To", []) + msg.get_all("Cc", []))
+        addrs = {addr.lower() for _name, addr in pairs if addr}
+    except Exception:                                   # malformed headers
+        return None
+    return addrs or None
+
+
+def _run_deterministic(cfg: Config, claim: dict) -> dict:
+    """Tier-0 code phase: resolve base + maintainers + patch_size with no
+       LLM. Builds the cgit tree set from cfg and hands it to the
+       resolver, which degrades to heuristic (never raises) on any cgit /
+       get_maintainer failure."""
+    trees = cgit.KernelTrees.from_registry(cfg.cgit_trees)
+    try:
+        return tier0.resolve_deterministic(
+            trees, _patch_text(claim),
+            recipients=_recipients(claim),
+            series_length=len(claim.get("patches") or []) or None)
+    finally:
+        trees.close()
+
+
+def _merge_deterministic(body: dict, det: dict) -> dict:
+    """Overlay the Tier-0 deterministic fields onto the LLM body — code
+       wins for the fields it owns, the LLM keeps the judgment fields
+       (patch_type, review_intensity, preparation_notes,
+       self_review_record).
+
+       Granularity:
+         - tree_state: overlay the base_* fields (the LLM keeps
+           applies_cleanly / kernel_version_at_base / etc., which are
+           tree-only and computed at review).
+         - patch_size: always code-counted (exact beats the LLM's
+           estimate); churn_ratio stays null until review.
+         - subsystem / maintainer: the authoritative (source "tree")
+           code result replaces the LLM block; in heuristic mode the
+           LLM's block is kept (it did the heuristic work).
+
+       NOTE: the LLM is still *asked* for these fields today and we
+       discard its authoritative-field answers here. Stripping them from
+       the prompt is a later methodology change — it saves tokens but
+       isn't correctness-critical, since code already wins."""
+    merged = dict(body)
+    ts = dict(merged.get("tree_state") or {})
+    for f in ("base_in_tree", "base_tree",
+              "base_commit_declared", "base_commit_source"):
+        ts[f] = det[f]
+    merged["tree_state"] = ts
+    merged["patch_size"] = det["patch_size"]
+    if det["subsystem"]["source"] == "tree":
+        merged["subsystem"] = det["subsystem"]
+    if det["maintainer"]["source"] == "tree":
+        merged["maintainer"] = det["maintainer"]
+    return merged
 
 
 def _build_prepare_user_text(claim: dict) -> str:
@@ -109,12 +197,14 @@ def handle_prepare_task(cfg: Config, client: HoneCoreClient,
     reason — surfacing the failure to hone-core's corpus rather than
     crashing the node.
 
-    Tree access (resolving the declared base-commit against a local
-    kernel tree, deciding authoritative vs. heuristic mode) is
-    deferred: today the node operates in heuristic mode regardless,
-    and Claude infers the per-field metadata from the patches +
-    thread alone. See node/refrepo.py for the tree manager; wiring
-    it up here is a follow-up."""
+    The deterministic Tier-0 fields (base resolution, subsystem +
+    maintainer sets via get_maintainer.pl, patch_size counts) are
+    computed by code — no LLM, no kernel clone — and overlaid onto
+    Claude's response, with code winning for the fields it owns. The
+    LLM produces only the judgment fields (patch_type,
+    review_intensity, preparation_notes, self_review_record). See
+    docs/ARCHITECTURE-PREPARE.md → Tier 0 / Tier 1."""
+    det = _run_deterministic(cfg, claim)
     system = _build_prepare_system(claim)
     user_text = _build_prepare_user_text(claim)
     response = ai.call_claude(cfg, system, user_text)
@@ -122,6 +212,8 @@ def handle_prepare_task(cfg: Config, client: HoneCoreClient,
               "worker_id": _worker_id(cfg),
               "model":     response["model"],
               "usage":     response["usage"]}
+    resolver_meta = {"deterministic_resolver_version":
+                      det["resolver_version"]}
     try:
         body = ai.parse_json_response(response["text"])
     except ValueError as exc:
@@ -135,14 +227,17 @@ def handle_prepare_task(cfg: Config, client: HoneCoreClient,
         return {**header,
                 "outcome": "uncharacterisable",
                 "reason":  str(exc),
-                "meta":    {"raw_response":        raw[:_RAW_RESPONSE_CAP],
+                "meta":    {**resolver_meta,
+                            "raw_response":        raw[:_RAW_RESPONSE_CAP],
                             "raw_response_length": len(raw),
                             "raw_response_truncated":
                                 len(raw) > _RAW_RESPONSE_CAP}}
+    merged = _merge_deterministic(body, det)
     return {**header,
              "outcome": "prepared",
-             **{f: body.get(f) for f in _PREPARE_FIELDS},
-             "self_review_record": body.get("self_review_record")}
+             **{f: merged.get(f) for f in _PREPARE_FIELDS},
+             "self_review_record": merged.get("self_review_record"),
+             "meta": resolver_meta}
 
 
 def handle_review_task(cfg: Config, client: HoneCoreClient,

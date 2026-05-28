@@ -955,6 +955,17 @@ $defs:
         oneOf:
           - type: "null"
           - type: boolean
+      base_tree:
+        description: >-
+          Canonical name of the tree the base commit resolved in
+          (linux-next / mainline / stable / …), or null when not found
+          or not checked. Recorded by the Tier-0 deterministic phase
+          and used by the review task as a git-fetch hint — see
+          docs/ARCHITECTURE-PREPARE.md.
+        oneOf:
+          - type: "null"
+          - type: string
+            minLength: 1
       base_commit_timestamp:
         oneOf:
           - type: "null"
@@ -1203,8 +1214,13 @@ $defs:
         type: array
         items: { $ref: "#/$defs/prepare_person_entry" }
       cc_list_size:
-        type: integer
-        minimum: 0
+        # Null when the recipient list wasn't parsed (heuristic mode /
+        # deterministic phase without To:/Cc: headers) — an honest
+        # "unknown", not an asserted empty Cc list.
+        oneOf:
+          - type: "null"
+          - type: integer
+            minimum: 0
       primary_uncertain_reason:
         oneOf:
           - type: "null"
