@@ -227,9 +227,17 @@ def run():
     cfg: Config = app.state.config
     _, cert_file, key_file = tls.ensure_certs(cfg.cert_dir, [cfg.hostname])
     log.info("hone-core serving HTTPS on :%d", cfg.http_port)
+    # log_config=None: skip uvicorn's own logging dictConfig so its
+    # `uvicorn`, `uvicorn.access`, and `uvicorn.error` loggers use
+    # the root logger we configured at module top — same
+    # `%(asctime)s %(name)s %(levelname)s %(message)s` format as
+    # `hone.core` lines, instead of uvicorn's default that omits
+    # the timestamp entirely. The `_QuietIdlePollFilter` attached
+    # to `uvicorn.access` keeps working because the filter is on
+    # the logger, not the handler.
     uvicorn.run(app, host="0.0.0.0", port=cfg.http_port,
                 ssl_certfile=cert_file, ssl_keyfile=key_file,
-                timeout_graceful_shutdown=8)
+                timeout_graceful_shutdown=8, log_config=None)
 
 
 if __name__ == "__main__":
