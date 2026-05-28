@@ -6,6 +6,8 @@ import os
 import socket
 from dataclasses import dataclass
 
+from node import cgit
+
 # The supported Claude backends. `sdk` calls the Anthropic Python SDK and
 # requires ANTHROPIC_API_KEY (standard API-billing path). `cli`
 # subprocesses the `claude` CLI binary and uses whatever OAuth session
@@ -24,6 +26,9 @@ class Config:
     node_name:          str    # HONE_NODE_NAME — label shown to the operator
     data_dir:           str    # HONE_DATA — the mapped persistent volume
     repo_dir:           str    # HONE_REPO_DIR — the reference kernel repo
+    cgit_trees:         tuple  # HONE_CGIT_TREES — ordered (name,url) trees
+                                # prepare's deterministic phase probes for
+                                # a declared base commit
     scratch_dir:        str    # HONE_SCRATCH_DIR — in-flight work across outages
     identity_path:      str    # HONE_IDENTITY — persisted bearer tokens
     ca_cert_path:       str    # HONE_CORE_CA — hone-core's CA, got at enrollment
@@ -59,6 +64,8 @@ class Config:
                                                 socket.gethostname()),
             data_dir           = data,
             repo_dir           = os.environ.get("HONE_REPO_DIR", f"{data}/linux"),
+            cgit_trees         = tuple(cgit.parse_trees_env(
+                                          os.environ.get("HONE_CGIT_TREES"))),
             scratch_dir        = os.environ.get("HONE_SCRATCH_DIR", f"{data}/scratch"),
             identity_path      = os.environ.get("HONE_IDENTITY", f"{data}/identity.json"),
             ca_cert_path       = os.environ.get("HONE_CORE_CA", f"{data}/core-ca.crt"),
