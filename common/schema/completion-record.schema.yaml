@@ -1467,6 +1467,51 @@ $defs:
                         { required: [tree_state] },
                         { required: [self_review_record] } ] }
 
+  # The tree-dependent fields that, in the tiered model, are computed at
+  # review (where the tree is staged) rather than prepare (which has no
+  # tree). See docs/ARCHITECTURE-PREPARE.md → Tier 2. Forward-prep: these
+  # are wired into review_record below but not yet produced — the prepare
+  # side still carries them until the review task implements them, at
+  # which point they move atomically.
+  review_tree_state:
+    type: object
+    additionalProperties: false
+    description: >-
+      The apply result the review task computes against the staged base
+      tree. Optional; an `unappliable` review carries
+      applies_cleanly=false plus the reason.
+    properties:
+      applies_cleanly:
+        oneOf:
+          - type: "null"
+          - type: boolean
+      apply_failure_reason:
+        oneOf:
+          - type: "null"
+          - type: string
+            minLength: 1
+
+  review_enrichment:
+    type: object
+    additionalProperties: false
+    description: >-
+      Tree-derived patch metadata computed at review time: file churn,
+      file-activity history, and Fixes:-trailer verification. The
+      sub-shapes are shared with the prepare defs (same data; the
+      prepare_ prefix is historical). All optional / nullable.
+    properties:
+      churn_ratio:
+        oneOf:
+          - type: "null"
+          - $ref: "#/$defs/prepare_churn_ratio"
+      file_activity:
+        oneOf:
+          - type: "null"
+          - $ref: "#/$defs/prepare_file_activity"
+      fixes_verified:
+        type: array
+        items: { $ref: "#/$defs/prepare_fixes_verified_entry" }
+
   review_record:
     type: object
     additionalProperties: false
@@ -1495,6 +1540,8 @@ $defs:
           The review's structured findings (an empty array means a
           clean review — Stage 3 ran but produced no concerns).
       self_review_record:  { $ref: "#/$defs/self_review_record" }
+      tree_state:          { $ref: "#/$defs/review_tree_state" }
+      enrichment:          { $ref: "#/$defs/review_enrichment" }
     oneOf:
       - properties: { outcome: { const: reviewed } }
         required: [concerns, self_review_record]

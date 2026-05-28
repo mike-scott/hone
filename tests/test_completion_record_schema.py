@@ -291,6 +291,50 @@ def test_review_rejects_extra_top_level_keys(schema):
                             unknown_key=True))
 
 
+# --- review enrichment (Tier-2 fields moved from prepare) ------------------
+
+def test_review_reviewed_accepts_tree_state_and_enrichment(schema):
+    """The tree-dependent fields moved from prepare — apply result +
+       churn / file_activity / fixes_verified — validate on a reviewed
+       record (the review task will populate them once implemented)."""
+    _validate(schema, _review(
+        outcome="reviewed", concerns=[], self_review_record=_SELF_REVIEW,
+        tree_state={"applies_cleanly": True, "apply_failure_reason": None},
+        enrichment={
+            "churn_ratio": {"max": 0.4, "mean": 0.1,
+                             "high_churn_file_count": 0},
+            "file_activity": {"mean_commits_last_year": 3.0,
+                               "max_commits_last_year": 5,
+                               "oldest_last_touched_days": 400,
+                               "newest_last_touched_days": 10,
+                               "submitter_recently_touched_files_ratio": 0.5},
+            "fixes_verified": [{"hash": "abc1234", "exists": True,
+                                 "age_days": 90, "file_overlap_ratio": 0.8,
+                                 "suspicious_reason": None}]}))
+
+
+def test_review_enrichment_fields_are_optional(schema):
+    """A reviewed record without the tree_state / enrichment blocks is
+       still valid — they're forward-prep, not yet produced."""
+    _validate(schema, _review(outcome="reviewed", concerns=[],
+                              self_review_record=_SELF_REVIEW))
+
+
+def test_review_unappliable_carries_apply_failure(schema):
+    """An unappliable review reports applies_cleanly=false + the reason
+       in tree_state — exactly the case the moved fields are for."""
+    _validate(schema, _review(
+        outcome="unappliable", reason="patch 2/3 fails to apply",
+        tree_state={"applies_cleanly": False,
+                     "apply_failure_reason": "hunk #3 FAILED"}))
+
+
+def test_review_enrichment_rejects_unknown_subkey(schema):
+    _reject(schema, _review(outcome="reviewed", concerns=[],
+                            self_review_record=_SELF_REVIEW,
+                            enrichment={"not_a_field": 1}))
+
+
 def test_review_concern_must_carry_locations(schema):
     bad = {**_CONCERN, "locations": []}
     _reject(schema, _review(outcome="reviewed", concerns=[bad],

@@ -337,7 +337,14 @@ accepting weaker stratification.
    `base_tree` as a fetch hint (named remote first, serial-scan
    fallback). Add `base_tree` to `tree_state` in the methodology +
    completion-record schema.
-4. Move the enrichment quartet to the review record (Tier 2) and drop
-   `apply --check` from prepare.
+4. Move the enrichment quartet to the review record (Tier 2). Done in
+   two parts: (a) **forward-prep** — `review_record` now carries
+   optional `tree_state` (applies_cleanly / apply_failure_reason) +
+   `enrichment` (churn_ratio / file_activity / fixes_verified) blocks,
+   declared but not yet produced; (b) **teardown** — remove them from
+   the prepare schema + prompt and have the review task produce them,
+   done atomically when `handle_review_task` is implemented so there's
+   no unproduced window. `apply --check` is already absent from the
+   tiered prepare (it has no tree).
 5. Stop provisioning the kernel tree on prepare-only nodes — they need
    only perl + cgit reachability now.
