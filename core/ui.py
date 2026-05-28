@@ -124,6 +124,59 @@ async def fleet_status_partial(request: Request):
                                       request.app.state.runtime_config)})
 
 
+# --- fleet throughput sparkline (top-nav) ---------------------------------
+
+# Sparkline geometry. Viewbox is unitless — the SVG scales to the CSS
+# size on the placeholder span. Width = nbins-1 so points 0..nbins-1
+# span the full width; height = 10 with a 0.5 padding above/below so
+# the topmost / bottommost strokes aren't clipped.
+_SPARKLINE_HEIGHT  = 10
+_SPARKLINE_PAD     = 0.5
+_SPARKLINE_WINDOW_SECONDS = 3600
+_SPARKLINE_BIN_SECONDS    = 60
+
+
+def _fleet_sparkline_view(db):
+    """View-model the sparkline partial renders. Computes the
+       throughput bins, the peak (for vertical scaling), the total
+       claim count over the window (for the tooltip), and the SVG
+       polyline `points` string ready to drop into the template.
+
+       Empty / all-zero windows render as a flat baseline — the
+       operator still sees a stable, non-empty SVG so the layout
+       doesn't jump when the first claim lands."""
+    bins = core_db.fleet_throughput(
+        db, window_seconds=_SPARKLINE_WINDOW_SECONDS,
+        bin_seconds=_SPARKLINE_BIN_SECONDS)
+    total = sum(bins)
+    peak  = max(bins) or 1
+    span  = _SPARKLINE_HEIGHT - 2 * _SPARKLINE_PAD
+    # Invert Y so a higher count plots toward the top of the viewBox.
+    points = " ".join(
+        f"{i},{_SPARKLINE_PAD + span * (1 - v / peak):.2f}"
+        for i, v in enumerate(bins))
+    minutes = _SPARKLINE_WINDOW_SECONDS // 60
+    return {"points":      points,
+             "width":       max(1, len(bins) - 1),
+             "height":      _SPARKLINE_HEIGHT,
+             "total":       total,
+             "peak":        peak if max(bins) else 0,
+             "tooltip":     (f"{total} claim{'' if total == 1 else 's'} "
+                              f"completed in the last {minutes} min")}
+
+
+@router.get("/fleet-sparkline", response_class=HTMLResponse)
+async def fleet_sparkline_partial(request: Request):
+    """The fleet throughput sparkline as an HTML partial — polled
+       every 10s from the top nav. Tracks claims/min over a rolling
+       hour so the operator sees a confirmation that work is
+       actually moving, not just that the fleet is alive (which
+       the pulse chip already tells them)."""
+    return templates.TemplateResponse(
+        request, "_fleet_sparkline.html",
+        {"spark": _fleet_sparkline_view(request.app.state.db)})
+
+
 # --- queue (home) ----------------------------------------------------------
 
 _WORK_TYPE_BY_NAME  = {v: k for k, v in core_db.WORK_ITEM_TYPE_NAMES.items()}

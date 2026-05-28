@@ -42,6 +42,17 @@
         </li>
       </ul>
       <ul class="navbar-nav ms-auto align-items-center">
+        {# Fleet throughput sparkline — claims/min over the last
+           hour. Sits just left of the pulse chip so the operator
+           sees the activity trend next to the health rollup. #}
+        <li class="nav-item me-2">
+          <span hx-get="/fleet-sparkline"
+                hx-trigger="load, every 10s"
+                hx-swap="outerHTML"
+                class="d-inline-block align-middle"
+                style="width: 80px; height: 18px;"
+                title="Loading fleet throughput…"></span>
+        </li>
         {# Fleet-pulse chip — the placeholder fires hx-trigger="load"
            immediately and then polls every 10s. Lives between the
            page-level nav links and the theme/settings icons. #}

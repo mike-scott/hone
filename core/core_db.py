@@ -2484,6 +2484,38 @@ def fleet_status(db, stale_after_seconds):
              "last_activity_at": last_activity_at or None}
 
 
+def fleet_throughput(db, *, window_seconds=3600, bin_seconds=60):
+    """Per-minute count of work_items that reached a terminal state
+       (COMPLETED / UNAPPLIABLE / DEFERRED) within the last
+       `window_seconds`. Returns a list of N integer counts where
+       N = window_seconds // bin_seconds (60 by default), oldest
+       bin first / most-recent bin last — so the operator-UI
+       sparkline draws left-to-right with the latest minute at the
+       right edge.
+
+       Bins are anchored to "now minus k minutes", not to wall-clock
+       minute boundaries — keeps the rightmost bin stable across
+       polls and avoids a phantom spike when wall-clock minutes
+       roll over. Cheap regardless of fleet size: one indexed range
+       scan on completed_at."""
+    now = int(time.time())
+    cutoff = now - window_seconds
+    nbins = max(1, window_seconds // bin_seconds)
+    bins = [0] * nbins
+    rows = db.execute(
+        "SELECT completed_at FROM work_items "
+        "WHERE state IN (?,?,?) AND completed_at >= ?",
+        (WORK_ITEM_STATE_COMPLETED, WORK_ITEM_STATE_UNAPPLIABLE,
+         WORK_ITEM_STATE_DEFERRED, cutoff)).fetchall()
+    for r in rows:
+        ts = r[0] or 0
+        offset = now - ts
+        if 0 <= offset < window_seconds:
+            idx = nbins - 1 - (offset // bin_seconds)
+            bins[idx] += 1
+    return bins
+
+
 def update_node_health(db, node_id, snapshot):
     """Stamp the latest health snapshot on a node row. `snapshot` is a
        JSON-serializable dict — the node's choice of fields; today
