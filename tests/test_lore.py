@@ -3,8 +3,11 @@ message parsing, In-Reply-To threading, the base-commit trailer, and the
 operator-provisioning helper (`Lore.clone`). The full git-archive walk is
 exercised by smoke once the operator has a public-inbox clone."""
 import io
+import json
+import os
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -203,7 +206,7 @@ def test_clone_builds_a_shallow_partial_command(tmp_path, monkeypatch):
     --shallow-since=<since_date>, --no-tags, --single-branch, --progress
     (so non-TTY stderr still emits), with URL + target from defaults."""
     monkeypatch.setattr(lore.subprocess, "Popen", _FakePopen)
-    monkeypatch.delenv("HONE_LORE_URL", raising=False)
+    monkeypatch.setenv("HONE_LORE_URL", "https://lore.kernel.org/netdev/3")
     _FakePopen.captured_cmd = None
     target = str(tmp_path / "lore")
     assert lore.Lore.clone(target) is True
@@ -213,7 +216,16 @@ def test_clone_builds_a_shallow_partial_command(tmp_path, monkeypatch):
     assert "--filter=blob:none" in cmd
     assert f"--shallow-since={lore.Lore.since_date}" in cmd
     assert "--no-tags" in cmd and "--single-branch" in cmd
-    assert cmd[-2:] == [lore.DEFAULT_URL, target]
+    assert cmd[-2:] == ["https://lore.kernel.org/netdev/3", target]
+
+
+def test_clone_requires_a_url(tmp_path, monkeypatch):
+    """With neither a url arg nor $HONE_LORE_URL there's no built-in
+       default — clone raises rather than fetch the un-cloneable /all/0."""
+    monkeypatch.delenv("HONE_LORE_URL", raising=False)
+    monkeypatch.delenv("HONE_LORE_LISTS", raising=False)
+    with pytest.raises(ValueError, match="HONE_LORE"):
+        lore.Lore.clone(str(tmp_path / "lore"))
 
 
 def test_clone_is_a_no_op_when_target_already_a_repo(tmp_path, monkeypatch):
@@ -248,6 +260,7 @@ def test_clone_raises_on_git_failure(tmp_path, monkeypatch):
     class _Failing(_FakePopen):
         returncode_value = 128
     monkeypatch.setattr(lore.subprocess, "Popen", _Failing)
+    monkeypatch.setenv("HONE_LORE_URL", "https://lore.kernel.org/netdev/3")
     with pytest.raises(subprocess.CalledProcessError):
         lore.Lore.clone(str(tmp_path / "lore"))
 
@@ -279,9 +292,9 @@ def _drive(monkeypatch, tmp_path, sha_to_msg, *, cursor=None):
     monkeypatch.setattr(lore, "ARCHIVE", str(archive))
     shas = list(sha_to_msg.keys())
     monkeypatch.setattr(lore.Lore, "_new_commits",
-                        lambda self, _cursor: shas)
+                        lambda self, _cursor, _archive=None: shas)
     monkeypatch.setattr(lore.Lore, "_blob",
-                        lambda self, sha: sha_to_msg.get(sha))
+                        lambda self, sha, _archive=None: sha_to_msg.get(sha))
     state = GatherState(cursor=cursor) if cursor else None
     return list(lore.Lore().list(state=state))
 
@@ -472,6 +485,7 @@ def test_clone_progress_callback_receives_parsed_updates(tmp_path, monkeypatch):
             self.stderr = io.BytesIO(git_output)
 
     monkeypatch.setattr(lore.subprocess, "Popen", _GitProgress)
+    monkeypatch.setenv("HONE_LORE_URL", "https://lore.kernel.org/netdev/3")
     updates = []
     lore.Lore.clone(str(tmp_path / "lore"),
                      progress=lambda p, pct, line: updates.append((p, pct)))
@@ -479,3 +493,113 @@ def test_clone_progress_callback_receives_parsed_updates(tmp_path, monkeypatch):
     assert ("Receiving objects", 47) in updates
     assert ("Receiving objects", 100) in updates
     assert ("Resolving deltas", 100) in updates
+
+
+# --- multi-list mode ($HONE_LORE_LISTS) ------------------------------------
+
+def test_configured_lists_parses_env(monkeypatch):
+    monkeypatch.setenv("HONE_LORE_LISTS", " netdev, linux-mm ,dri-devel ")
+    assert lore.configured_lists() == ("netdev", "linux-mm", "dri-devel")
+    monkeypatch.delenv("HONE_LORE_LISTS", raising=False)
+    assert lore.configured_lists() == ()
+
+
+def _fake_lsremote(present):
+    """A subprocess.run stand-in for `git ls-remote <base>/<list>/<n>` that
+       reports the epochs in `present` as existing (rc 0 + a ref)."""
+    def run(cmd, capture_output=True, timeout=None, **kw):
+        n = int(cmd[-1].rsplit("/", 1)[1])
+        ok = n in present
+        return SimpleNamespace(
+            returncode=0 if ok else 2,
+            stdout=b"deadbeef\trefs/heads/master\n" if ok else b"")
+    return run
+
+
+def test_current_epoch_takes_top_of_present_run(monkeypatch):
+    monkeypatch.setattr(lore.subprocess, "run", _fake_lsremote({0, 1, 2, 3}))
+    assert lore.current_epoch("netdev", max_probe=8) == 3
+
+
+def test_current_epoch_handles_a_pruned_prefix(monkeypatch):
+    # big lists prune low epochs: 0-2 gone, 3-5 live
+    monkeypatch.setattr(lore.subprocess, "run", _fake_lsremote({3, 4, 5}))
+    assert lore.current_epoch("linux-kernel", max_probe=8) == 5
+
+
+def test_current_epoch_none_when_not_cloneable(monkeypatch):
+    monkeypatch.setattr(lore.subprocess, "run", _fake_lsremote(set()))
+    assert lore.current_epoch("all", max_probe=8) is None
+
+
+def test_current_epoch_treats_a_hang_as_absent(monkeypatch):
+    """A throttling/slow lore (probe times out) degrades to no-epoch, not
+       a raised exception that would abort the whole provisioning pass."""
+    def run(cmd, capture_output=True, timeout=None, **kw):
+        raise subprocess.TimeoutExpired(cmd, timeout)
+    monkeypatch.setattr(lore.subprocess, "run", run)
+    assert lore.current_epoch("netdev", max_probe=4) is None
+
+
+def test_multi_list_walks_each_archive_with_a_map_cursor(monkeypatch):
+    """Each configured list is walked from its own sub-cursor, and every
+       emitted ref carries the full {list: sha} map so the cycle resumes
+       each list correctly."""
+    monkeypatch.setenv("HONE_LORE_LISTS", "a,b")
+    monkeypatch.setattr(lore.os.path, "isdir", lambda p: True)
+
+    def fake_walk(self, archive, cursor, db, cap):
+        name = os.path.basename(archive)
+        yield lore.PatchsetRef(root_message_id=f"<r-{name}@x>",
+                               cursor=f"sha-{name}-1")
+        yield lore.MessageRef(message_id=f"m-{name}@x",
+                              root_message_id=f"<r-{name}@x>",
+                              type=lore._TYPE_PATCH, body="x",
+                              cursor=f"sha-{name}-2")
+
+    monkeypatch.setattr(lore.Lore, "_walk", fake_walk)
+    refs = list(lore.Lore().list(state=None, db=None))
+    assert len(refs) == 4                              # 2 lists x 2 refs
+    assert json.loads(refs[0].cursor) == {"a": "sha-a-1"}
+    assert json.loads(refs[-1].cursor) == {"a": "sha-a-2", "b": "sha-b-2"}
+
+
+def test_clone_all_discovers_epoch_and_clones_each(monkeypatch, tmp_path):
+    monkeypatch.setenv("HONE_LORE_LISTS", "netdev,linux-mm")
+    monkeypatch.setattr(lore, "ARCHIVE", str(tmp_path / "lore"))
+    monkeypatch.setattr(lore, "current_epoch",
+                        lambda name, **kw: {"netdev": 3, "linux-mm": 2}[name])
+    calls = []
+
+    def fake_clone(cls, target=None, *, url=None, since_date=None,
+                   progress=None):
+        calls.append((target, url))
+        return True
+
+    monkeypatch.setattr(lore.Lore, "clone", classmethod(fake_clone))
+    assert lore.Lore.clone_all() == 2
+    assert (str(tmp_path / "lore" / "netdev"),
+            "https://lore.kernel.org/netdev/3") in calls
+    assert (str(tmp_path / "lore" / "linux-mm"),
+            "https://lore.kernel.org/linux-mm/2") in calls
+
+
+def test_clone_all_is_a_no_op_when_unconfigured(monkeypatch):
+    """Neither HONE_LORE_LISTS nor HONE_LORE_URL → gather disabled: clone_all
+       provisions nothing (and never tries the un-cloneable /all/0)."""
+    monkeypatch.delenv("HONE_LORE_LISTS", raising=False)
+    monkeypatch.delenv("HONE_LORE_URL", raising=False)
+    called = []
+    monkeypatch.setattr(lore.Lore, "clone",
+                        classmethod(lambda cls, *a, **k: called.append(1)))
+    assert lore.Lore.clone_all() == 0
+    assert called == []
+
+
+def test_is_provisioned_requires_every_configured_list(monkeypatch, tmp_path):
+    monkeypatch.setenv("HONE_LORE_LISTS", "a,b")
+    monkeypatch.setattr(lore, "ARCHIVE", str(tmp_path / "lore"))
+    (tmp_path / "lore" / "a" / ".git").mkdir(parents=True)
+    assert lore.Lore.is_provisioned() is False          # b not cloned yet
+    (tmp_path / "lore" / "b" / ".git").mkdir(parents=True)
+    assert lore.Lore.is_provisioned() is True

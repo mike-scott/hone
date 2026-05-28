@@ -14,10 +14,14 @@ from this module so there's one canonical place for the cutoff:
     python3 core/gather-modules/lore.py clone
 
 That runs a `--shallow-since=<since_date> --filter=blob:none` partial clone
-of `HONE_LORE_URL` (default `https://lore.kernel.org/all/0`) into
-`HONE_ARCHIVE_DIR/lore`. `--shallow-since` bounds the download to messages
-posted on or after the floor — a few hundred MB for a recent floor,
-instead of multi-GB for the full archive history.
+into `HONE_ARCHIVE_DIR/lore`. The source is chosen by precedence:
+`HONE_LORE_LISTS` (many subsystem lists, auto-discovered epochs) wins; else
+`HONE_LORE_URL` (one list or a private mirror); with neither set, lore
+gather is disabled (nothing is cloned and `list()` is a no-op). There is no
+built-in default URL — lore.kernel.org doesn't git-serve the /all/ firehose,
+so a blanket default would only fail. `--shallow-since` bounds the download
+to messages posted on or after the floor — a few hundred MB for a recent
+floor, instead of multi-GB for the full archive history.
 
 Set `HONE_LORE_AUTOCLONE=1` to have hone-core kick off the same clone in
 the background on first start (the service comes up clean and the lore
@@ -28,6 +32,7 @@ Lowering `since_date` later means re-cloning (or
 boundary, like the gather cursor, is forward-only.
 """
 import email
+import json
 import logging
 import os
 import re
@@ -49,9 +54,59 @@ _ARCHIVE_DIR = (os.environ.get("HONE_ARCHIVE_DIR")
                     "..", "..", "archive")))
 ARCHIVE = os.path.join(_ARCHIVE_DIR, "lore")
 
-# Upstream archive URL — overridable so a deployment can point at a single
-# list (e.g. https://lore.kernel.org/linux-arm-msm/0) instead of all-of-lore.
-DEFAULT_URL = "https://lore.kernel.org/all/0"
+# Source selection (no built-in default URL — see the module docstring):
+# lore.kernel.org doesn't git-serve the /all/ firehose (or LKML), only the
+# individual subsystem lists — so wide coverage is assembled from many of
+# them. $HONE_LORE_LISTS (comma-separated list names, e.g.
+# "netdev,linux-mm,dri-devel,linux-pci") turns on multi-list mode: one
+# per-list clone under ARCHIVE/<list> and a per-list resume cursor, all
+# walked in one source cycle. Unset → single-list mode (one clone at
+# ARCHIVE from $HONE_LORE_URL), unchanged.
+_LORE_BASE = "https://lore.kernel.org"
+# How far to probe for a list's current epoch. Big lists prune their low
+# epochs and roll into higher ones, so the live epoch isn't always 0.
+_MAX_EPOCH_PROBE = 25
+
+
+def configured_lists():
+    """The lore list names to gather (from $HONE_LORE_LISTS), or () for
+       single-list mode."""
+    raw = os.environ.get("HONE_LORE_LISTS", "")
+    return tuple(s.strip() for s in raw.split(",") if s.strip())
+
+
+def _archive_for(name):
+    """The per-list archive dir in multi-list mode."""
+    return os.path.join(ARCHIVE, name)
+
+
+def current_epoch(list_name, *, base=_LORE_BASE, max_probe=_MAX_EPOCH_PROBE,
+                   timeout=30):
+    """The highest existing epoch of a lore list, via `git ls-remote` — the
+       protocol works through lore's anti-bot proxy where the HTTP manifest
+       is blocked. Epochs are contiguous once present (a pruned prefix may
+       precede them), so we scan 0..max_probe and take the top of the
+       present run. Returns None when nothing is cloneable (e.g. the /all/
+       firehose, or LKML, which lore doesn't git-serve).
+
+       A probe that errors or times out is treated as absent rather than
+       raised, so a slow/throttling lore degrades to "no epoch found"
+       (autoclone skips the list and retries next start) instead of
+       aborting the whole provisioning pass."""
+    found = None
+    for n in range(max_probe + 1):
+        try:
+            r = subprocess.run(
+                ["git", "ls-remote", "--heads", f"{base}/{list_name}/{n}"],
+                capture_output=True, timeout=timeout)
+            present = r.returncode == 0 and bool(r.stdout.strip())
+        except (subprocess.TimeoutExpired, OSError):
+            present = False
+        if present:
+            found = n
+        elif found is not None:
+            break                          # the present run ended
+    return found
 
 # Per-cycle patchset cap. A cold-start cycle could otherwise be months of
 # all-of-lore in one pass — blocking the source's slot for hours, brushing
@@ -268,10 +323,11 @@ class Lore(GatherModule):
         """Clone the lore archive into `target` — a `--shallow-since` +
            `--filter=blob:none` partial clone bounded by `since_date`
            (default `cls.since_date`, the cold-start floor). `url` defaults
-           to `$HONE_LORE_URL` then `DEFAULT_URL`. Idempotent: a no-op if
-           `target` already looks like a git checkout (returns False);
-           returns True on a real clone. Raises subprocess.CalledProcessError
-           if git fails.
+           to `$HONE_LORE_URL`; with neither set it raises ValueError
+           (there's no built-in default — see the module docstring).
+           Idempotent: a no-op if `target` already looks like a git checkout
+           (returns False); returns True on a real clone. Raises
+           subprocess.CalledProcessError if git fails.
 
            `--progress` is forced so git emits its dynamic progress lines
            even when stderr isn't a TTY — for the background autoclone path
@@ -288,7 +344,10 @@ class Lore(GatherModule):
                 or os.path.isdir(os.path.join(target, "objects")):
             log.info("archive already present at %s - clone skipped", target)
             return False
-        url = url or os.environ.get("HONE_LORE_URL") or DEFAULT_URL
+        url = url or os.environ.get("HONE_LORE_URL")
+        if not url:
+            raise ValueError(
+                "lore: no clone URL — set HONE_LORE_LISTS or HONE_LORE_URL")
         since = since_date or cls.since_date
         parent = os.path.dirname(target)
         if parent:
@@ -313,19 +372,95 @@ class Lore(GatherModule):
         log.info("clone complete at %s", target)
         return True
 
+    @classmethod
+    def clone_all(cls, *, progress=None):
+        """Provision every configured archive, returning the count cloned.
+           Single-list mode → clone() into ARCHIVE. Multi-list
+           ($HONE_LORE_LISTS) → discover each list's current epoch and
+           clone into ARCHIVE/<list>; an already-present list is skipped
+           and a non-cloneable / failing one is logged and skipped (the
+           rest still provision)."""
+        lists = configured_lists()
+        if not lists:
+            if not os.environ.get("HONE_LORE_URL"):
+                log.info("lore: neither HONE_LORE_LISTS nor HONE_LORE_URL "
+                         "set — gather disabled, nothing to clone")
+                return 0
+            return 1 if cls.clone(progress=progress) else 0
+        cloned = 0
+        for name in lists:
+            target = _archive_for(name)
+            if os.path.isdir(os.path.join(target, ".git")) \
+                    or os.path.isdir(os.path.join(target, "objects")):
+                continue
+            epoch = current_epoch(name)
+            if epoch is None:
+                log.warning("lore list %r has no cloneable epoch — skipping",
+                            name)
+                continue
+            try:
+                if cls.clone(target=target,
+                             url=f"{_LORE_BASE}/{name}/{epoch}",
+                             progress=progress):
+                    cloned += 1
+            except subprocess.CalledProcessError:
+                log.exception("lore list %r clone failed — skipping", name)
+        return cloned
+
+    @classmethod
+    def is_provisioned(cls):
+        """True when the configured archive(s) exist on disk — single-list
+           checks ARCHIVE, multi-list requires every configured list (so
+           the autoclone keeps completing a partially-cloned set)."""
+        lists = configured_lists()
+        if not lists:
+            return os.path.isdir(os.path.join(ARCHIVE, ".git"))
+        return all(os.path.isdir(os.path.join(_archive_for(n), ".git"))
+                   for n in lists)
+
     def list(self, state=None, db=None):
+        """One gather cycle. In single-list mode the cursor is a bare SHA
+           and the one ARCHIVE is walked. In multi-list mode ($HONE_LORE_LISTS)
+           the cursor is a JSON {list: sha} map: each configured list's
+           per-list archive is walked from its own sub-cursor (capped so one
+           list can't eat the cycle), and every emitted ref carries the full
+           updated map so a cut-short cycle resumes each list correctly."""
+        lists = configured_lists()
+        if not lists:
+            if not os.path.isdir(ARCHIVE):
+                log.warning("archive missing at %s - clone it first "
+                            "(see SOURCES.md); gather is a no-op for lore "
+                            "until the archive exists", ARCHIVE)
+                return
+            yield from self._walk(ARCHIVE, state.cursor if state else None,
+                                  db, MAX_PATCHSETS_PER_CYCLE)
+            return
+        try:
+            cursors = json.loads(state.cursor) if state and state.cursor else {}
+            if not isinstance(cursors, dict):
+                cursors = {}
+        except (ValueError, TypeError):
+            cursors = {}
+        cap = max(1, MAX_PATCHSETS_PER_CYCLE // len(lists))
+        for name in lists:
+            archive = _archive_for(name)
+            if not os.path.isdir(archive):
+                log.warning("lore list %r archive missing at %s — skipping "
+                            "(clone pending)", name, archive)
+                continue
+            for ref in self._walk(archive, cursors.get(name), db, cap):
+                cursors[name] = ref.cursor           # the per-archive SHA
+                ref.cursor = json.dumps(cursors, sort_keys=True)
+                yield ref
+
+    def _walk(self, archive, cursor, db, cap):
         # The archive is operator-provisioned (clone-it-first; see SOURCES.md).
         # When it's missing — first-run, or this hone-core deployment doesn't
         # use lore — degrade to a clean no-op cycle: log it and yield nothing
         # so the rest of hone-core (the web UI, the other sources) keeps
         # running. The operator clones the archive in and the next tick picks
         # it up without a restart.
-        if not os.path.isdir(ARCHIVE):
-            log.warning("archive missing at %s - clone it first "
-                        "(see SOURCES.md); gather is a no-op for lore "
-                        "until the archive exists", ARCHIVE)
-            return
-        commits = self._new_commits(state.cursor if state else None)
+        commits = self._new_commits(cursor, archive)
         thread_cache = {}                  # message_id -> root_message_id
         patchsets_emitted = 0
         # Cold-start boundary skip: when the cursor is empty AND the
@@ -336,10 +471,10 @@ class Lore(GatherModule):
         # of the real series would scatter into more ghosts. Skip forward
         # to the first commit that clearly introduces a patchset (a cover
         # or a standalone single-patch) so the cycle starts clean.
-        awaiting_boundary = not (state and state.cursor)
+        awaiting_boundary = not cursor
         skipped = 0
         for sha in commits:
-            blob = self._blob(sha)
+            blob = self._blob(sha, archive)
             if not blob:
                 continue
             msg = parse_message(blob)
@@ -370,9 +505,9 @@ class Lore(GatherModule):
             introduces_patchset = (mtype != _TYPE_COMMENT
                                    and root == msg["message_id"])
             if introduces_patchset:
-                if patchsets_emitted >= MAX_PATCHSETS_PER_CYCLE:
+                if patchsets_emitted >= cap:
                     log.info("gathered %d patchsets this cycle (cap), the "
-                             "rest on later cycles", MAX_PATCHSETS_PER_CYCLE)
+                             "rest on later cycles", cap)
                     return
                 patchsets_emitted += 1
             # Only cache messages we're committing to emit AND ingest —
@@ -429,25 +564,25 @@ class Lore(GatherModule):
             body=msg["raw"].decode("utf-8", "replace"),
             cursor=sha)
 
-    def _new_commits(self, cursor):
-        """Git commits to process, oldest-first. `cursor` (a SHA) bounds
-           the left; without it, falls back to --since=`since_date`. The
-           per-cycle cap is applied in `list()` on PATCHSET boundaries, not
-           here on commits — see MAX_PATCHSETS_PER_CYCLE."""
+    def _new_commits(self, cursor, archive=ARCHIVE):
+        """Git commits to process in `archive`, oldest-first. `cursor` (a
+           SHA) bounds the left; without it, falls back to
+           --since=`since_date`. The per-cycle cap is applied in `_walk` on
+           PATCHSET boundaries, not here on commits."""
         args = ["log", "--reverse", "--format=%H"]
         if cursor and cursor.strip():
             args.append(f"{cursor.strip()}..HEAD")
         elif self.since_date:
             args.append(f"--since={self.since_date}")
-        result = subprocess.run(["git", "-C", ARCHIVE, *args],
+        result = subprocess.run(["git", "-C", archive, *args],
                                 capture_output=True, check=False)
         return result.stdout.decode().split() if result.returncode == 0 else []
 
-    def _blob(self, sha):
-        """The message blob at path `m` in commit `sha`. public-inbox stores
-           one raw RFC-822 message per commit at that path."""
+    def _blob(self, sha, archive=ARCHIVE):
+        """The message blob at path `m` in commit `sha` of `archive`.
+           public-inbox stores one raw RFC-822 message per commit there."""
         result = subprocess.run(
-            ["git", "-C", ARCHIVE, "show", f"{sha}:m"],
+            ["git", "-C", archive, "show", f"{sha}:m"],
             capture_output=True, check=False)
         return result.stdout if result.returncode == 0 else None
 
@@ -457,6 +592,6 @@ if __name__ == "__main__":
     # to keep URL + since_date in one place.
     if len(sys.argv) >= 2 and sys.argv[1] == "clone":
         logging.basicConfig(level=logging.INFO, format="%(message)s")
-        Lore.clone()
+        Lore.clone_all()                   # provisions the configured set
     else:
         run_cli(Lore())

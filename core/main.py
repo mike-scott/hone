@@ -120,7 +120,7 @@ def _initial_lore_status() -> dict:
        work runs. `phase` is the single source of truth for which Settings
        panel branch renders; the rest is informational."""
     Lore = gather.gather_api.load("lore").__class__
-    present = os.path.isdir(os.path.join(Lore.archive_dir, ".git"))
+    present = Lore.is_provisioned()
     return {"phase":         "ready" if present else "absent",
             "percent":       100 if present else 0,
             "git_phase":     None,
@@ -172,7 +172,7 @@ async def _autoclone_lore(app: FastAPI):
 
     hb = asyncio.create_task(heartbeat(), name="lore-autoclone-heartbeat")
     try:
-        cloned = await asyncio.to_thread(Lore.clone, progress=on_progress)
+        cloned = await asyncio.to_thread(Lore.clone_all, progress=on_progress)
     except asyncio.CancelledError:
         raise
     except Exception as e:
