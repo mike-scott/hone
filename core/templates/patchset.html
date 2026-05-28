@@ -210,12 +210,20 @@
       <dt class="col-5">Methodology v</dt>
       <dd class="col-7">{{ metadata.methodology_version or "—" }}</dd>
       {% if metadata.tree_state %}
+      {% set res = metadata.tree_state.base_resolution %}
       <dt class="col-5">Base in tree</dt>
       <dd class="col-7">
-        {% if metadata.tree_state.base_in_tree is none %}<span class="text-muted">unknown</span>
-        {% elif metadata.tree_state.base_in_tree %}yes
-          {%- if metadata.tree_state.base_tree %} (<code>{{ metadata.tree_state.base_tree }}</code>){% endif %}
-        {% else %}no{% endif %}
+        {% if res == "found" %}yes{% if metadata.tree_state.base_tree %}
+          (<code>{{ metadata.tree_state.base_tree }}</code>){% endif %}
+        {% elif res == "absent" %}no <span class="text-muted">(not in probed trees)</span>
+        {% elif res == "unknown" %}<span class="text-muted">unknown (tree unreachable)</span>
+        {% elif res == "no_base" %}<span class="text-muted">— no base declared</span>
+        {% else %}{# pre-base_resolution record: fall back to the tri-state bool #}
+          {% if metadata.tree_state.base_in_tree is none %}<span class="text-muted">unknown</span>
+          {% elif metadata.tree_state.base_in_tree %}yes{% if metadata.tree_state.base_tree %}
+            (<code>{{ metadata.tree_state.base_tree }}</code>){% endif %}
+          {% else %}no{% endif %}
+        {% endif %}
       </dd>
       {% endif %}
       {% if metadata.subsystem %}

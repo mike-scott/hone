@@ -118,7 +118,7 @@ def _merge_deterministic(body: dict, det: dict) -> dict:
        isn't correctness-critical, since code already wins."""
     merged = dict(body)
     ts = dict(merged.get("tree_state") or {})
-    for f in ("base_in_tree", "base_tree",
+    for f in ("base_in_tree", "base_resolution", "base_tree",
               "base_commit_declared", "base_commit_source"):
         ts[f] = det[f]
     merged["tree_state"] = ts

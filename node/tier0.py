@@ -21,7 +21,9 @@ log = logging.getLogger("hone.node.tier0")
 # Bump when the deterministic resolution logic changes — stamped into
 # the prepare record's meta so a resolver change is auditable
 # independently of methodology_version (ARCHITECTURE-PREPARE.md → Dec 4).
-RESOLVER_VERSION = "tier0-1"
+# tier0-2: added tree_state.base_resolution (explicit found/absent/
+# unknown/no_base outcome) + expanded the probed tree set.
+RESOLVER_VERSION = "tier0-2"
 
 # get_maintainer roles → the methodology's person buckets.
 _MAINTAINER_ROLES = {"maintainer", "supporter"}
@@ -174,6 +176,7 @@ def resolve_deterministic(trees, patch_text, *, recipients=None,
     declared = base_commit_trailer(patch_text)
     result = {
         "base_in_tree":         None,
+        "base_resolution":      "no_base",
         "base_tree":            None,
         "base_commit_declared": declared,
         "base_commit_source":   "trailer" if declared else "none",
@@ -184,11 +187,12 @@ def resolve_deterministic(trees, patch_text, *, recipients=None,
         "resolver_version":     RESOLVER_VERSION,
     }
     if not declared:
-        return result
+        return result                       # base_resolution stays "no_base"
 
     lookup = trees.resolve_base(declared)
     if lookup.state == cgit.BASE_FOUND:
         result["base_in_tree"] = True
+        result["base_resolution"] = "found"
         result["base_tree"] = lookup.tree.name
         kw = {"timeout": timeout} if timeout is not None else {}
         entries = maintainers.resolve_maintainers(
@@ -204,5 +208,7 @@ def resolve_deterministic(trees, patch_text, *, recipients=None,
                       lookup.tree.name)
     elif lookup.state == cgit.BASE_ABSENT:
         result["base_in_tree"] = False
-    # BASE_UNKNOWN → base_in_tree stays None (couldn't determine)
+        result["base_resolution"] = "absent"
+    else:                                   # BASE_UNKNOWN — couldn't determine
+        result["base_resolution"] = "unknown"
     return result

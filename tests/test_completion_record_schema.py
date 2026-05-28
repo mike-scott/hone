@@ -247,6 +247,26 @@ def test_prepare_accepts_null_for_tree_only_subobjects(schema):
     _validate(schema, record)
 
 
+def test_prepare_accepts_base_resolution_outcomes(schema):
+    """tree_state.base_resolution records the Tier-0 outcome that
+       disambiguates the three reasons base_in_tree is null. Each enum
+       value validates; null validates (records predating the field)."""
+    for outcome in ("found", "absent", "unknown", "no_base", None):
+        record = _prepare(outcome="prepared", self_review_record=_SELF_REVIEW,
+                          **{**_PREPARE_METADATA,
+                             "tree_state": {**_PREPARE_METADATA["tree_state"],
+                                            "base_resolution": outcome}})
+        _validate(schema, record)
+
+
+def test_prepare_rejects_unknown_base_resolution(schema):
+    record = _prepare(outcome="prepared", self_review_record=_SELF_REVIEW,
+                      **{**_PREPARE_METADATA,
+                         "tree_state": {**_PREPARE_METADATA["tree_state"],
+                                        "base_resolution": "maybe"}})
+    _reject(schema, record)
+
+
 # --- review ----------------------------------------------------------------
 
 def test_review_reviewed_with_concerns(schema):

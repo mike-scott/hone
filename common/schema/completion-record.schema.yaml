@@ -955,6 +955,24 @@ $defs:
         oneOf:
           - type: "null"
           - type: boolean
+      base_resolution:
+        description: >-
+          The Tier-0 base-commit resolution outcome, disambiguating the
+          three reasons base_in_tree is null (and confirming the one
+          reason it is true/false):
+            found    base resolved in base_tree (base_in_tree=true)
+            absent   every probed tree returned a definite 404
+                     (base_in_tree=false)
+            unknown  probed, but a tree was unreachable, so existence
+                     couldn't be determined (base_in_tree=null)
+            no_base  no base-commit trailer declared, nothing probed
+                     (base_in_tree=null)
+          Null on prepare records produced before this field existed.
+          See docs/ARCHITECTURE-PREPARE.md → Tier 0.
+        oneOf:
+          - type: "null"
+          - type: string
+            enum: [found, absent, unknown, no_base]
       base_tree:
         description: >-
           Canonical name of the tree the base commit resolved in

@@ -174,6 +174,7 @@ def test_resolve_authoritative_when_found_and_get_maintainer_ok(monkeypatch):
     trees = _FakeTrees(_found_lookup("mainline"))
     r = tier0.resolve_deterministic(trees, _PATCH)
     assert r["base_in_tree"] is True
+    assert r["base_resolution"] == "found"
     assert r["base_tree"] == "mainline"
     assert r["base_commit_source"] == "trailer"
     assert r["subsystem"]["primary"] == "EXT4"
@@ -190,6 +191,7 @@ def test_resolve_heuristic_when_base_absent(monkeypatch):
     trees = _FakeTrees(cgit.BaseLookup(cgit.BASE_ABSENT, None, None))
     r = tier0.resolve_deterministic(trees, _PATCH)
     assert r["base_in_tree"] is False
+    assert r["base_resolution"] == "absent"
     assert r["maintainer"]["authoritative_set"] is None   # heuristic = null
     assert r["subsystem"]["primary"] is None
     assert r["subsystem"]["source"] == "thread"
@@ -201,6 +203,7 @@ def test_resolve_unknown_leaves_base_in_tree_null(monkeypatch):
     trees = _FakeTrees(cgit.BaseLookup(cgit.BASE_UNKNOWN, None, None))
     r = tier0.resolve_deterministic(trees, _PATCH)
     assert r["base_in_tree"] is None
+    assert r["base_resolution"] == "unknown"
 
 
 def test_resolve_no_trailer_skips_probe(monkeypatch):
@@ -208,6 +211,7 @@ def test_resolve_no_trailer_skips_probe(monkeypatch):
     r = tier0.resolve_deterministic(trees, "diff --git a/x b/x\n+y\n")
     assert r["base_commit_source"] == "none"
     assert r["base_in_tree"] is None
+    assert r["base_resolution"] == "no_base"
     assert trees.resolved == []              # never probed without a base
     # patch_size still computed
     assert r["patch_size"]["lines_added"] == 1

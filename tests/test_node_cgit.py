@@ -142,7 +142,11 @@ def test_base_url_trailing_slash_is_stripped():
 
 def test_default_trees_lead_with_linux_next_and_carry_both_urls():
     names = [t.name for t in cgit.DEFAULT_TREES]
-    assert names == ["linux-next", "mainline", "stable", "net-next", "tip"]
+    # the integration trees lead in resolution priority; the subsystem
+    # trees follow (probed only when those miss)
+    assert names[:5] == ["linux-next", "mainline", "stable", "net-next", "tip"]
+    assert {"soc", "qcom", "arm64"} <= set(names)   # corpus-skew additions
+    assert len(names) == len(set(names))            # no duplicate names
     ln = cgit.DEFAULT_TREES[0]
     assert "linux-next.git" in ln.cgit_url
     assert ln.cgit_url.startswith("https://")

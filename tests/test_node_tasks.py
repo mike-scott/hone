@@ -324,6 +324,7 @@ def test_prepare_runs_deterministic_phase_with_no_trailer_offline(monkeypatch):
     # base trailer absent → base fields null / "none"; base_tree present.
     assert record["tree_state"]["base_commit_source"] == "none"
     assert record["tree_state"]["base_in_tree"] is None
+    assert record["tree_state"]["base_resolution"] == "no_base"
     assert record["tree_state"]["base_tree"] is None
     # patch_size is code-counted, replacing the LLM's stub values. The
     # claim's patch body has no diff, so everything is zero/trivial.
@@ -344,7 +345,7 @@ def test_prepare_overlays_authoritative_deterministic_fields(monkeypatch):
     stub, _calls = _fake_call_claude(json.dumps(_STUB_PREPARE_BODY))
     monkeypatch.setattr("node.ai.call_claude", stub)
     det = {
-        "base_in_tree": True, "base_tree": "mainline",
+        "base_in_tree": True, "base_resolution": "found", "base_tree": "mainline",
         "base_commit_declared": "abc123", "base_commit_source": "trailer",
         "subsystem": {"primary": "EXT4 FILE SYSTEM", "primary_status": None,
                       "primary_tree": None, "secondary": [],
@@ -370,6 +371,7 @@ def test_prepare_overlays_authoritative_deterministic_fields(monkeypatch):
     assert record["maintainer"]["authoritative_set"][0]["email"] == \
         "tytso@mit.edu"
     assert record["tree_state"]["base_in_tree"] is True
+    assert record["tree_state"]["base_resolution"] == "found"
     assert record["tree_state"]["base_tree"] == "mainline"
     assert record["tree_state"]["base_commit_declared"] == "abc123"
     # LLM-owned judgment fields are untouched

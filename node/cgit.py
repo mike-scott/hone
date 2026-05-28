@@ -52,17 +52,31 @@ def _tree(name, path):
 # commit wins, the rest are skipped. linux-next leads deliberately: it
 # merges the subsystem trees daily, so a base really in (say) net-next
 # is usually also in linux-next, hitting on probe #1. mainline catches
-# release / -rc-based patches, stable catches backports; net-next / tip
-# still get probed so a base that's ONLY in a subsystem tree (not yet
-# merged to next) resolves rather than reporting absent. Shared with
-# review's refrepo remote list so the two can't drift. Override via
-# HONE_CGIT_TREES.
+# release / -rc-based patches, stable catches backports.
+#
+# The remaining trees are subsystem integration trees, probed only when
+# next/mainline/stable miss — i.e. a base committed to a maintainer tree
+# that linux-next hasn't merged yet (the narrow window between commit and
+# next's daily pull). They're ordered for this corpus's skew (Qualcomm /
+# arm64 / DT / clk): the arm-soc aggregation (soc) and the Qualcomm tree
+# (qcom) first, then arm64 core, then the clk / pinctrl subsystems.
+# net-next and tip stay for networking / x86-core bases.
+#
+# Adding a tree costs a probe per UNVERIFIABLE base (FOUND short-circuits
+# at linux-next) and a potential refrepo fetch source, so the set is kept
+# to high-yield trees; deployments tune it with HONE_CGIT_TREES. Shared
+# with review's refrepo remote list so the two can't drift.
 DEFAULT_TREES = (
     _tree("linux-next", "next/linux-next.git"),
     _tree("mainline",   "torvalds/linux.git"),
     _tree("stable",     "stable/linux.git"),
     _tree("net-next",   "netdev/net-next.git"),
     _tree("tip",        "tip/tip.git"),
+    _tree("soc",        "soc/soc.git"),
+    _tree("qcom",       "qcom/linux.git"),
+    _tree("arm64",      "arm64/linux.git"),
+    _tree("clk",        "clk/linux.git"),
+    _tree("pinctrl",    "linusw/linux-pinctrl.git"),
 )
 
 
