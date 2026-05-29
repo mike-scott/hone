@@ -15,6 +15,15 @@ from node import cgit
 # have API billing set up. See docs/DEPLOYMENT.md → Backends.
 CLAUDE_BACKENDS = ("sdk", "cli")
 
+# How the node validates hone-core's TLS certificate (HONE_CORE_TLS):
+#   adopt  — trust-on-first-use: adopt + pin the self-signed CA hone-core
+#            hands out at enrollment. The default; works against hone-core
+#            serving HTTPS directly (a dev box, no proxy).
+#   system — validate against the OS trust store. For hone-core behind a
+#            reverse proxy (Caddy/nginx) terminating TLS with a publicly
+#            trusted cert (Let's Encrypt); no CA is adopted or pinned.
+CORE_TLS_MODES = ("adopt", "system")
+
 
 @dataclass(frozen=True)
 class Config:
@@ -32,6 +41,9 @@ class Config:
     scratch_dir:        str    # HONE_SCRATCH_DIR — in-flight work across outages
     identity_path:      str    # HONE_IDENTITY — persisted bearer tokens
     ca_cert_path:       str    # HONE_CORE_CA — hone-core's CA, got at enrollment
+                                # (adopt mode only)
+    tls_mode:           str    # HONE_CORE_TLS — 'adopt' (pin self-signed CA)
+                                # | 'system' (OS trust store, for a proxy)
     poll_interval:      int    # seconds to wait after an empty claim (204)
     backoff_initial:    float  # initial transient-failure backoff, seconds
     backoff_max:        float  # maximum transient-failure backoff, seconds
@@ -53,6 +65,11 @@ class Config:
         if missing:
             raise RuntimeError(
                 "missing required environment: " + ", ".join(missing))
+        tls_mode = os.environ.get("HONE_CORE_TLS", "adopt").lower()
+        if tls_mode not in CORE_TLS_MODES:
+            raise RuntimeError(
+                f"HONE_CORE_TLS={tls_mode!r} unsupported; "
+                f"expected one of {CORE_TLS_MODES}")
         data = os.environ.get("HONE_DATA", "/data")
         return cls(
             core_url           = os.environ["HONE_CORE_URL"].rstrip("/"),
@@ -69,6 +86,7 @@ class Config:
             scratch_dir        = os.environ.get("HONE_SCRATCH_DIR", f"{data}/scratch"),
             identity_path      = os.environ.get("HONE_IDENTITY", f"{data}/identity.json"),
             ca_cert_path       = os.environ.get("HONE_CORE_CA", f"{data}/core-ca.crt"),
+            tls_mode           = tls_mode,
             poll_interval      = int(os.environ.get("HONE_POLL_INTERVAL", "60")),
             backoff_initial    = float(os.environ.get("HONE_BACKOFF_INITIAL", "1")),
             backoff_max        = float(os.environ.get("HONE_BACKOFF_MAX", "300")),

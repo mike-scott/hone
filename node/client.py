@@ -73,12 +73,29 @@ class HoneCoreClient:
         self._refresh: str | None = None
         self._http: httpx.Client | None = None     # main-API client, once enrolled
         self._load_identity()
-        if self._access and os.path.exists(cfg.ca_cert_path):
+        # Rebuild the main client on restart when already enrolled. In system
+        # TLS mode there's no pinned CA on disk (the OS trust store is used),
+        # so don't gate on the CA file existing.
+        if self._access and (cfg.tls_mode == "system"
+                             or os.path.exists(cfg.ca_cert_path)):
             self._build_main_client()
 
     def close(self) -> None:
         if self._http is not None:
             self._http.close()
+
+    def _verify(self, *, first_contact=False):
+        """The httpx `verify` for a hone-core connection. In `system` TLS mode
+           it's the OS trust store (hone-core behind a proxy with a publicly
+           trusted cert). In `adopt` mode it's the pinned self-signed CA;
+           `first_contact` (the enrollment exchange, before the CA is adopted)
+           trusts on first use — the fleet secret authenticates that step —
+           and pins on every call thereafter."""
+        if self._cfg.tls_mode == "system":
+            return True
+        if first_contact and not os.path.exists(self._cfg.ca_cert_path):
+            return False
+        return self._cfg.ca_cert_path
 
     # --- identity persistence (survives a restart) --------------------------
 
@@ -110,14 +127,12 @@ class HoneCoreClient:
     # --- the OAuth / enrollment channel (fleet-secret gated) ----------------
 
     def _oauth_request(self, path: str, body: dict) -> httpx.Response:
-        """POST to an /v1/oauth/* endpoint. TLS is validated against
-           hone-core's CA once the node holds it; the very first contact, made
-           before the CA is known, is trusted on first use (the fleet secret
-           authenticates the exchange)."""
-        verify = (self._cfg.ca_cert_path
-                  if os.path.exists(self._cfg.ca_cert_path) else False)
+        """POST to an /v1/oauth/* endpoint. TLS validation follows the node's
+           TLS mode (see _verify): the OS trust store under `system`, or
+           hone-core's CA under `adopt` — trusted on first use before the CA
+           is adopted, pinned thereafter."""
         with httpx.Client(base_url=self._cfg.core_url, timeout=30.0,
-                          verify=verify) as c:
+                          verify=self._verify(first_contact=True)) as c:
             return c.post(path, json=body,
                           headers={"X-HONE-Fleet-Secret":
                                    self._cfg.fleet_secret})
@@ -216,8 +231,11 @@ class HoneCoreClient:
            rebuild the main-API client."""
         self._access = payload["access_token"]
         self._refresh = payload["refresh_token"]
+        # Pin hone-core's self-signed CA only in adopt mode; in system mode the
+        # OS trust store validates the proxy's public cert and the handed CA is
+        # irrelevant.
         ca = payload.get("ca_cert")
-        if ca:
+        if ca and self._cfg.tls_mode != "system":
             os.makedirs(self._cfg.data_dir, exist_ok=True)
             with open(self._cfg.ca_cert_path, "w", encoding="utf-8") as f:
                 f.write(ca)
@@ -231,7 +249,7 @@ class HoneCoreClient:
             self._http.close()
         self._http = httpx.Client(
             base_url=self._cfg.core_url, timeout=30.0,
-            verify=self._cfg.ca_cert_path,
+            verify=self._verify(),
             headers={"Authorization": f"Bearer {self._access}"})
 
     def _request(self, method: str, path: str, **kw) -> httpx.Response:

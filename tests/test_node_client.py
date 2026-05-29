@@ -99,6 +99,76 @@ def test_adopt_tokens_persists_the_ca_and_builds_the_client(cfg, tmp_path):
         c.close()
 
 
+# --- TLS modes (adopt = pin self-signed CA, system = OS trust store) -------
+
+@pytest.fixture
+def cfg_system(tmp_path, monkeypatch):
+    monkeypatch.setenv("HONE_CORE_URL", "https://core.example")
+    monkeypatch.setenv("HONE_FLEET_SECRET", "fleet")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setenv("HONE_DATA", str(tmp_path))
+    monkeypatch.setenv("HONE_CORE_TLS", "system")
+    return Config.from_env()
+
+
+def test_tls_mode_defaults_to_adopt(cfg):
+    assert cfg.tls_mode == "adopt"
+
+
+def test_bad_tls_mode_is_rejected(tmp_path, monkeypatch):
+    monkeypatch.setenv("HONE_CORE_URL", "https://core.example")
+    monkeypatch.setenv("HONE_FLEET_SECRET", "fleet")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setenv("HONE_CORE_TLS", "bogus")
+    with pytest.raises(RuntimeError, match="HONE_CORE_TLS"):
+        Config.from_env()
+
+
+def test_verify_adopt_mode_tofu_then_pinned(cfg):
+    """adopt: first contact trusts on first use (no CA yet → verify=False),
+       then pins the CA path once it's on disk; the main API always pins."""
+    c = HoneCoreClient(cfg)
+    assert c._verify(first_contact=True) is False         # no CA yet → TOFU
+    assert c._verify() == cfg.ca_cert_path                # main API pins
+    with open(cfg.ca_cert_path, "w", encoding="utf-8") as f:
+        f.write("ca")                                     # CA now adopted
+    assert c._verify(first_contact=True) == cfg.ca_cert_path
+
+
+def test_verify_system_mode_uses_os_trust_store(cfg_system):
+    """system: always the OS trust store (True), even on first contact —
+       hone-core is behind a proxy with a publicly trusted cert."""
+    c = HoneCoreClient(cfg_system)
+    assert c._verify(first_contact=True) is True
+    assert c._verify() is True
+
+
+def test_system_mode_does_not_pin_the_handed_ca(cfg_system):
+    """system mode ignores the CA hone-core hands at enrollment — nothing is
+       written to disk — but the main client is still built (verify=True)."""
+    c = HoneCoreClient(cfg_system)
+    c._adopt_tokens({"access_token": "a", "refresh_token": "r",
+                     "ca_cert": "-----BEGIN CERTIFICATE-----\nx\n"})
+    try:
+        assert not os.path.exists(cfg_system.ca_cert_path)
+        assert c._http is not None
+    finally:
+        c.close()
+
+
+def test_system_mode_rebuilds_client_on_restart_without_a_ca_file(cfg_system):
+    """An enrolled node in system mode has no CA file; a restart must still
+       rebuild the main client (gated on tls_mode, not the CA's presence)."""
+    c = HoneCoreClient(cfg_system)
+    c._access, c._refresh = "a", "r"
+    c._save_identity()
+    restarted = HoneCoreClient(cfg_system)
+    try:
+        assert restarted._http is not None
+    finally:
+        restarted.close()
+
+
 @pytest.mark.parametrize("body, expected", [
     ({"error": {"code": "slow_down"}}, "slow_down"),
     ({"error": {"code": "authorization_pending"}}, "authorization_pending"),
