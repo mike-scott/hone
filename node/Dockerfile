@@ -100,10 +100,21 @@ USER hone
 # HOME is set so the `claude` CLI finds its OAuth credentials at
 # $HOME/.claude (the operator bind-mounts ${HOME}/.claude from the host
 # in docker-compose when running HONE_CLAUDE_BACKEND=cli).
+#
+# CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC disables Claude Code's non-essential
+# outbound calls — telemetry (Statsig), error reporting (Sentry), the
+# auto-updater, and the bug-report command (umbrella flag for DISABLE_TELEMETRY
+# / DISABLE_ERROR_REPORTING / DISABLE_AUTOUPDATER / DISABLE_BUG_COMMAND). An
+# unattended review worker has no use for any of it, and crucially this traffic
+# does NOT honour ANTHROPIC_BASE_URL — it dials Anthropic's own domains, so
+# behind a corporate SSL-inspecting proxy it fails the TLS handshake with a
+# "self-signed certificate" error. Baked in; override via compose `environment`
+# if a deployment ever needs it on.
 ENV HOME=/home/hone \
     HONE_DATA=/data \
     HONE_REPO_DIR=/data/linux \
-    HONE_SCRATCH_DIR=/data/scratch
+    HONE_SCRATCH_DIR=/data/scratch \
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 VOLUME ["/data"]
 
 # No EXPOSE and no HEALTHCHECK: the node serves nothing and only dials out.
