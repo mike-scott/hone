@@ -257,19 +257,40 @@ _CLI_STDERR_CATEGORY = (
     ("auth",        ("credentials", "not logged in", "unauthor",
                       "auth required", "please run `claude` to log in")),
     ("rate_limit",  ("rate limit", "too many requests", "429")),
-    ("connection",  ("network", "connect", "timeout", "unreachable")),
+    # TLS-trust failures (an intercepting/corporate proxy presents a cert
+    # the CLI's bundled runtime doesn't trust) report "self-signed
+    # certificate" / "unable to connect to api" — a connection problem,
+    # not a model one.
+    ("connection",  ("network", "connect", "timeout", "unreachable",
+                      "self-signed", "self signed", "certificate",
+                      "econnrefused", "enotfound", "etimedout")),
 )
 
 
-def _classify_cli_stderr(stderr):
-    """Pick a node.ai._LAST_ERROR category from a `claude` CLI stderr
-       message. Returns one of "auth" / "rate_limit" / "connection"
-       / "other"."""
-    lower = (stderr or "").lower()
+def _classify_cli_message(text):
+    """Pick a node.ai._LAST_ERROR category from `claude` CLI failure text.
+       Returns one of "auth" / "rate_limit" / "connection" / "other"."""
+    lower = (text or "").lower()
     for category, markers in _CLI_STDERR_CATEGORY:
         if any(m in lower for m in markers):
             return category
     return "other"
+
+
+def _cli_failure_text(stderr, result_event, trace):
+    """Everything a failed CLI turn produced — stderr, the result event's
+       text, and the assistant messages in the trace — joined for
+       classification. A transport/API error (e.g. a TLS 'self-signed
+       certificate' from an intercepting proxy) surfaces in the *stream*
+       (an assistant 'API Error: …' message, echoed in the result), not on
+       stderr, so classifying stderr alone misreads it as 'other'."""
+    parts = [stderr or ""]
+    if isinstance(result_event, dict):
+        parts.append(str(result_event.get("result") or ""))
+    for step in trace or []:
+        if isinstance(step, dict) and step.get("step") == "assistant_text":
+            parts.append(step.get("text") or "")
+    return " ".join(parts)
 
 
 # claude CLI invocation timeout in seconds. Long enough to swallow a
@@ -462,7 +483,8 @@ def _call_claude_cli(cfg, system, user_text, *, model, tools=None):
             duration_ms=duration_ms, model=model_used) from None
     stderr = "".join(stderr_chunks)
     if rc != 0:
-        category = _classify_cli_stderr(stderr)
+        category = _classify_cli_message(
+            _cli_failure_text(stderr, result_event, trace))
         log.warning("claude CLI ← exit=%d category=%s in %.1fs: %s",
                      rc, category, duration_ms / 1000,
                      stderr.strip()[:200])
@@ -479,22 +501,46 @@ def _call_claude_cli(cfg, system, user_text, *, model, tools=None):
             f"`claude` CLI failed ({rc}): {stderr.strip()[:500]}",
             category=category, returncode=rc, stderr=stderr,
             trace=trace, duration_ms=duration_ms, model=model_used)
+    # A clean exit can still be a failure: the stream may carry no result
+    # event, or a result that's an API/transport error (the CLI reports a
+    # TLS 'self-signed certificate' as an assistant 'API Error: …' message
+    # and a non-success result, NOT a non-zero exit). Classify both off the
+    # stream text so the operator's health page sees the real cause.
     if result_event is None:
-        _record_outcome("other")
+        category = _classify_cli_message(
+            _cli_failure_text(stderr, None, trace))
+        _record_outcome(category)
         raise CallClaudeError(
             "`claude` CLI stream ended without a result event",
-            category="other", returncode=rc, stderr=stderr,
+            category=category, returncode=rc, stderr=stderr,
             trace=trace, duration_ms=duration_ms, model=model_used)
     if result_event.get("is_error") or result_event.get("subtype") != "success":
-        _record_outcome("other")
+        category = _classify_cli_message(
+            _cli_failure_text(stderr, result_event, trace))
+        _record_outcome(category)
         raise CallClaudeError(
             f"`claude` CLI returned an error result: {result_event!r}",
-            category="other", returncode=rc, stderr=stderr,
+            category=category, returncode=rc, stderr=stderr,
+            trace=trace, duration_ms=duration_ms, model=model_used)
+
+    result_text = _strip_fences(result_event.get("result", ""))
+    # Defensive: some CLI versions report an API/transport failure as a
+    # *successful* result whose text is an "API Error: …" message rather
+    # than setting is_error. prepare's JSON parse would reject that as
+    # uncharacterisable later, but mislabel the cause — so detect the CLI's
+    # error prefix here and raise the right category (connection for a
+    # self-signed cert, rate_limit for a 429, …) instead.
+    if result_text.lstrip().lower().startswith("api error"):
+        category = _classify_cli_message(
+            _cli_failure_text(stderr, result_event, trace))
+        _record_outcome(category)
+        raise CallClaudeError(
+            f"`claude` CLI returned an API error: {result_text.strip()[:300]}",
+            category=category, returncode=rc, stderr=stderr,
             trace=trace, duration_ms=duration_ms, model=model_used)
 
     _record_outcome(None)
     usage = result_event.get("usage") or {}
-    result_text = _strip_fences(result_event.get("result", ""))
     # The CLI's `input_tokens` is the *non-cached* portion only; cached
     # portions are reported separately. Sum all three so `input_tokens`
     # downstream reflects what Claude actually processed (otherwise a

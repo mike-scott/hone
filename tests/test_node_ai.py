@@ -543,6 +543,38 @@ def test_cli_backend_handles_error_result(monkeypatch):
     assert ai.get_last_error() == "other"
 
 
+def test_cli_backend_classifies_self_signed_cert_as_connection(monkeypatch):
+    """A TLS 'self-signed certificate' failure surfaces as an assistant
+       'API Error: …' message + a non-success result on a *clean* exit, not
+       on stderr. It must classify as `connection` so the operator's health
+       page points at the network/proxy cause, not the catch-all `other`."""
+    msg = ("API Error: Unable to connect to API: Self-signed certificate "
+           "detected. Check your proxy or corporate SSL certificates")
+    _patch_popen(monkeypatch, returncode=0,
+                 events=[_init_event(),
+                         _assistant_text_event(text=msg),
+                         _envelope(text=msg, is_error=True)])
+    with pytest.raises(ai.CallClaudeError) as ei:
+        ai.call_claude(_CliCfg(), "s", "u")
+    assert ei.value.category == "connection"
+    assert ai.get_last_error() == "connection"
+
+
+def test_cli_backend_classifies_api_error_success_result(monkeypatch):
+    """Defensive: even when the CLI marks the turn a *success* but its result
+       text is an 'API Error: …' transport failure (no is_error flag), the
+       call raises CallClaudeError with the real category rather than
+       returning the error string as if it were the model's answer."""
+    msg = "API Error: Unable to connect to API: Self-signed certificate detected"
+    _patch_popen(monkeypatch, returncode=0,
+                 events=[_init_event(), _envelope(text=msg, is_error=False)])
+    with pytest.raises(ai.CallClaudeError) as ei:
+        ai.call_claude(_CliCfg(), "s", "u")
+    assert ei.value.category == "connection"
+    assert "api error" in str(ei.value).lower()
+    assert ai.get_last_error() == "connection"
+
+
 def test_cli_backend_failure_preserves_partial_trace(monkeypatch):
     """A non-zero CLI exit carries everything the turn produced before it
        failed — the partial trace (assistant text + tool_use + tool_result),
