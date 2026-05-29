@@ -20,23 +20,32 @@ def ctx(tmp_path):
     return SimpleNamespace(client=TestClient(app), db=db)
 
 
-def _plant(db, root, *, subject, author, sent, n_patches=1, comments=0,
+def _plant(db, root, *, subject, author, sent, n_patches=1, parts=1, comments=0,
            skipped=False, prepared=False, reviewed=False, training=False,
            tags=None, patch_type="bugfix"):
     """Plant a patchset + its root message (carrying the author name) +
-       `comments` comment messages, so the listing's author/comment-count
-       columns have something to read. The lifecycle flags create the
-       backing rows the State column reads: prepared → patchset_metadata,
-       reviewed → ai_reviews, training → patchset_session_history."""
+       `parts` patch messages + `comments` comment messages, so the listing's
+       author / Parts / comment-count columns have something to read.
+       `n_patches` sets the patchset's `[PATCH N/M]` metadata total (which the
+       Parts column deliberately does NOT use); `parts` is how many patch
+       messages are actually attached. The lifecycle flags create the backing
+       rows the State column reads: prepared → patchset_metadata, reviewed →
+       ai_reviews, training → patchset_session_history."""
     core_db.upsert_patchset(db, root, subject=subject,
                             submitter_email=f"{author.split()[0].lower()}@e.x",
                             sent=sent, n_patches=n_patches)
-    # The root message (message_id == root) supplies the author name the
-    # listing joins on.
+    # The root message (message_id == root) is part 1 and supplies the author
+    # name the listing joins on; parts 2..N are the rest of the attached series.
     core_db.upsert_message(db, root, root_message_id=root,
                            type=core_db.MSG_TYPE_PATCH, part_index=1,
                            author_name=author, author_email="a@e.x",
                            subject=subject, sent=sent, body="diff")
+    for i in range(2, parts + 1):
+        core_db.upsert_message(db, f"<p{i}-{root.strip('<>')}>",
+                               root_message_id=root,
+                               type=core_db.MSG_TYPE_PATCH, part_index=i,
+                               author_name=author, author_email="a@e.x",
+                               subject=f"[PATCH {i}] part", sent=sent, body="diff")
     for i in range(comments):
         core_db.upsert_message(db, f"<c{i}-{root.strip('<>')}>",
                                root_message_id=root,
@@ -71,12 +80,26 @@ def test_home_page_is_the_patchset_list_with_search_box(ctx):
 
 def test_lists_patchset_columns(ctx):
     _plant(ctx.db, "<r1@x>", subject="net: fix a leak", author="Alice Smith",
-           sent=2000, n_patches=3, comments=2)
+           sent=2000, parts=3, comments=2)
     body = ctx.client.get("/").text
     assert "net: fix a leak" in body
     assert "Alice Smith" in body
-    assert ">3<" in body               # n_patches cell
+    assert "Parts" in body             # column header (renamed from "Patches")
+    assert ">3<" in body               # Parts cell — 3 attached patch messages
     assert ">2<" in body               # n_comments cell
+
+
+def test_parts_counts_attached_patches_not_metadata(ctx):
+    """The Parts column reflects the patch messages actually attached to the
+       patchset, NOT the `[PATCH N/M]` series total in n_patches — so a
+       partial series (cover/some patches missing) shows what the corpus
+       really holds."""
+    # metadata claims a 10-patch series, but only 3 patch messages are present
+    _plant(ctx.db, "<r1@x>", subject="partial series", author="A", sent=1,
+           n_patches=10, parts=3)
+    row = ctx.client.get("/").text
+    assert ">3<" in row
+    assert ">10<" not in row           # the metadata total is not shown
 
 
 def test_state_column_shows_lifecycle_flags(ctx):

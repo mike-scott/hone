@@ -209,7 +209,7 @@ _PATCHSET_COLUMNS = (("subject",  "Patchset", True),
                      ("author",   "Author",   True),
                      ("date",     "Date",     True),
                      ("state",    "State",    False),
-                     ("patches",  "Patches",  True),
+                     ("parts",    "Parts",    True),
                      ("comments", "Comments", True))
 
 
@@ -463,7 +463,7 @@ def _patchsets_view(db, q, state, comments, list_tag, patch_type,
             # P/R/T flags actually set on this patchset, in display order.
             "flags":        [{"abbr": ab, "title": ti, "badge": bg}
                              for key, ab, ti, bg in _PATCHSET_FLAGS if p[key]],
-            "n_patches":    p["n_patches"] if p["n_patches"] is not None else "—",
+            "n_parts":      p["n_parts"],
             "n_comments":   p["n_comments"],
             "detail_url":   f"/patchsets/{quote(p['root_message_id'])}{back_qs}",
         })

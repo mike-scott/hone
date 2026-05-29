@@ -832,7 +832,7 @@ PATCHSET_SORT_COLUMNS = {
     "date":     "p.sent",
     "subject":  "p.subject",
     "author":   "author",
-    "patches":  "p.n_patches",
+    "parts":    "n_parts",
     "comments": "n_comments",
 }
 
@@ -933,8 +933,10 @@ def list_patchsets_page(db, *, q=None, state=None, comments=None,
     """One page of the web-UI patchset listing. Each row carries the table's
        display fields: `author` (the root message's name, falling back to its
        email then the patchset's submitter_email), `n_comments` (the thread's
-       comment messages), and the lifecycle flags `is_prepared` / `is_reviewed`
-       / `is_training` (0/1); `n_patches` + `state` ride on the patchset row.
+       comment messages), `n_parts` (the patch messages actually attached —
+       what the corpus holds, not the `[PATCH N/M]` series total in
+       `n_patches`), and the lifecycle flags `is_prepared` / `is_reviewed` /
+       `is_training` (0/1); `n_patches` + `state` ride on the patchset row.
 
        `sort` is one of PATCHSET_SORT_COLUMNS (anything else → date);
        `direction` is asc/desc. Results are stably tie-broken by sent DESC
@@ -949,6 +951,9 @@ def list_patchsets_page(db, *, q=None, state=None, comments=None,
         "(SELECT count(*) FROM messages c "
         "   WHERE c.root_message_id = p.root_message_id AND c.type = ?) "
         "  AS n_comments, "
+        "(SELECT count(*) FROM messages mp "
+        "   WHERE mp.root_message_id = p.root_message_id AND mp.type = ?) "
+        "  AS n_parts, "
         f"{_PATCHSET_PREPARED} AS is_prepared, "
         f"{_PATCHSET_REVIEWED} AS is_reviewed, "
         f"{_PATCHSET_TRAINING} AS is_training "
@@ -956,7 +961,7 @@ def list_patchsets_page(db, *, q=None, state=None, comments=None,
         "LEFT JOIN messages rm ON rm.message_id = p.root_message_id" + where +
         f" ORDER BY {col} {direction}, p.sent DESC, p.root_message_id "
         "LIMIT ? OFFSET ?",
-        [MSG_TYPE_COMMENT, *params, limit, offset])
+        [MSG_TYPE_COMMENT, MSG_TYPE_PATCH, *params, limit, offset])
     return [dict(r) for r in rows]
 
 

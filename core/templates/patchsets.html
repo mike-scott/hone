@@ -71,7 +71,7 @@
     <thead>
       <tr>
         {% for col in columns %}
-        <th scope="col" class="{% if col.key in ('patches', 'comments') %}text-end{% endif %}">
+        <th scope="col" class="{% if col.key in ('parts', 'comments') %}text-end{% endif %}">
           {% if col.sortable %}
           <a href="{{ col.url }}" class="link-body-emphasis text-decoration-none">
             {{ col.label }}
@@ -105,7 +105,7 @@
           {%- endfor %}
           {%- else %}<span class="text-muted">—</span>{% endif %}
         </td>
-        <td class="text-end">{{ row.n_patches }}</td>
+        <td class="text-end">{{ row.n_parts }}</td>
         <td class="text-end">{{ row.n_comments }}</td>
       </tr>
       {% else %}
