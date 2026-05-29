@@ -168,6 +168,7 @@ def test_list_is_a_clean_no_op_when_the_archive_is_missing(
     logs a warning and yields nothing, the gather cycle ends with an empty
     tally, and the next tick picks up the moment the operator clones it in."""
     monkeypatch.setattr(lore, "ARCHIVE", str(tmp_path / "not-cloned-yet"))
+    monkeypatch.setattr(lore, "configured_lists", lambda: ())   # single-list
     with caplog.at_level("WARNING", logger="hone.gather.lore"):
         refs = list(lore.Lore().list(db=db))
     assert refs == []
@@ -290,6 +291,7 @@ def _drive(monkeypatch, tmp_path, sha_to_msg, *, cursor=None):
     archive = tmp_path / "archive"
     archive.mkdir(exist_ok=True)
     monkeypatch.setattr(lore, "ARCHIVE", str(archive))
+    monkeypatch.setattr(lore, "configured_lists", lambda: ())   # single-list
     shas = list(sha_to_msg.keys())
     monkeypatch.setattr(lore.Lore, "_new_commits",
                         lambda self, _cursor, _archive=None: shas)
@@ -499,9 +501,22 @@ def test_clone_progress_callback_receives_parsed_updates(tmp_path, monkeypatch):
 
 def test_configured_lists_parses_env(monkeypatch):
     monkeypatch.setenv("HONE_LORE_LISTS", " netdev, linux-mm ,dri-devel ")
+    monkeypatch.delenv("HONE_LORE_URL", raising=False)
     assert lore.configured_lists() == ("netdev", "linux-mm", "dri-devel")
+
+
+def test_configured_lists_precedence(monkeypatch):
+    """Unset → the wide default; a HONE_LORE_URL override → () (single-list);
+       an explicit HONE_LORE_LISTS wins over both."""
     monkeypatch.delenv("HONE_LORE_LISTS", raising=False)
-    assert lore.configured_lists() == ()
+    monkeypatch.delenv("HONE_LORE_URL", raising=False)
+    assert lore.configured_lists() == lore.DEFAULT_LISTS    # default
+
+    monkeypatch.setenv("HONE_LORE_URL", "https://lore.kernel.org/netdev/3")
+    assert lore.configured_lists() == ()                    # URL → single-list
+
+    monkeypatch.setenv("HONE_LORE_LISTS", "linux-mm")
+    assert lore.configured_lists() == ("linux-mm",)         # LISTS wins
 
 
 def _fake_lsremote(present):
@@ -584,16 +599,24 @@ def test_clone_all_discovers_epoch_and_clones_each(monkeypatch, tmp_path):
             "https://lore.kernel.org/linux-mm/2") in calls
 
 
-def test_clone_all_is_a_no_op_when_unconfigured(monkeypatch):
-    """Neither HONE_LORE_LISTS nor HONE_LORE_URL → gather disabled: clone_all
-       provisions nothing (and never tries the un-cloneable /all/0)."""
+def test_clone_all_uses_default_lists_when_unconfigured(monkeypatch, tmp_path):
+    """Neither HONE_LORE_LISTS nor HONE_LORE_URL → clone_all provisions the
+       built-in default set (epoch + clone stubbed, so no network)."""
     monkeypatch.delenv("HONE_LORE_LISTS", raising=False)
     monkeypatch.delenv("HONE_LORE_URL", raising=False)
-    called = []
-    monkeypatch.setattr(lore.Lore, "clone",
-                        classmethod(lambda cls, *a, **k: called.append(1)))
-    assert lore.Lore.clone_all() == 0
-    assert called == []
+    monkeypatch.setattr(lore, "ARCHIVE", str(tmp_path / "lore"))
+    monkeypatch.setattr(lore, "current_epoch", lambda name, **kw: 0)
+    cloned = []
+
+    def fake_clone(cls, target=None, *, url=None, since_date=None,
+                   progress=None):
+        cloned.append(url)
+        return True
+
+    monkeypatch.setattr(lore.Lore, "clone", classmethod(fake_clone))
+    assert lore.Lore.clone_all() == len(lore.DEFAULT_LISTS)
+    assert cloned == [f"https://lore.kernel.org/{n}/0"
+                      for n in lore.DEFAULT_LISTS]
 
 
 def test_is_provisioned_requires_every_configured_list(monkeypatch, tmp_path):

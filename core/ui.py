@@ -1140,17 +1140,22 @@ _LORE_CLONE_HELP = (
 
 def _lore_clone_view(state):
     """The view-model the lore-clone Settings panel renders. Reads the
-       in-memory `app.state.lore_clone` snapshot the autoclone task
-       publishes (see core/main.py `_autoclone_lore`) and re-stats the
+       in-memory `app.state.lore_clone` snapshot the provision task
+       publishes (see core/main.py `_run_lore_clone`) and re-stats the
        archive each call so an out-of-band clone is also picked up."""
     state = dict(state)                           # snapshot — never mutate
     archive_path = state.get("archive_path") or ""
-    # re-stat: an operator may have cloned the archive out-of-band; flip
-    # the panel to "ready" the next time they refresh.
-    if archive_path and os.path.isdir(os.path.join(archive_path, ".git")):
-        if state["phase"] != "cloning":
-            state["phase"] = "ready"
-            state["archive_present"] = True
+    Lore = gather.gather_api.load("lore").__class__
+    # re-stat (multi-list aware): an operator may have cloned out-of-band;
+    # flip the panel to "ready" the next time they refresh. is_provisioned()
+    # covers the configured set; the archive_path/.git check also catches a
+    # clone dropped straight into the recorded path.
+    present = (Lore.is_provisioned()
+               or bool(archive_path
+                       and os.path.isdir(os.path.join(archive_path, ".git"))))
+    if state["phase"] != "cloning" and present:
+        state["phase"] = "ready"
+        state["archive_present"] = True
 
     now = time.time()
     started, completed = state.get("started_at"), state.get("completed_at")
@@ -1178,6 +1183,18 @@ async def lore_clone_status(request: Request):
     """The lore-clone panel partial — rendered standalone for the
        Settings page's `hx-get` poll (every 5 s). Returns just the panel
        HTML so HTMX swaps it in place."""
+    return templates.TemplateResponse(
+        request, "_lore_clone_panel.html",
+        {"lore_clone": _lore_clone_view(request.app.state.lore_clone)})
+
+
+@router.post("/settings/lore-clone", response_class=HTMLResponse)
+async def lore_clone_trigger(request: Request):
+    """Operator-triggered lore provision (the Settings 'Provision now'
+       button). Kicks off a background clone unless one is already running,
+       then returns the panel partial — now showing 'cloning', which starts
+       the 5 s poll that tracks it to ready/error."""
+    request.app.state.trigger_lore_clone()
     return templates.TemplateResponse(
         request, "_lore_clone_panel.html",
         {"lore_clone": _lore_clone_view(request.app.state.lore_clone)})

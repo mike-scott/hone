@@ -32,6 +32,16 @@ def ctx(tmp_path):
         "error": None, "archive_present": False,
         "archive_path": str(tmp_path / "archive" / "lore"),
         "autoclone_enabled": False}
+    # The "Provision now" button (POST /settings/lore-clone) calls this; the
+    # real one (core.main.trigger_lore_clone) spawns a background task, which
+    # needs a running loop, so the fixture uses a stand-in that just flips the
+    # phase the way the real coroutine does on start.
+    app.state.lore_clone_task = None
+
+    def _trigger():
+        app.state.lore_clone.update(phase="cloning", percent=0, error=None)
+        return True
+    app.state.trigger_lore_clone = _trigger
     # The gather supervisor publishes its trigger event here at startup;
     # the "Gather now" button (POST /settings/gather/trigger) `set()`s it.
     # An asyncio.Event needs a running loop to instantiate — TestClient
@@ -247,6 +257,42 @@ def test_lore_clone_panel_picks_up_an_out_of_band_clone(ctx, tmp_path):
     ctx.app.state.lore_clone["archive_path"] = str(archive)
     body = ctx.client.get("/settings/lore-clone-status").text
     assert "Ready" in body
+
+
+def test_lore_clone_panel_offers_provision_button_when_absent(ctx):
+    """Absent → the panel offers a 'Provision now' button that POSTs the
+       trigger, regardless of whether a source is configured yet (an
+       unconfigured click surfaces the 'set HONE_LORE_*' error)."""
+    body = ctx.client.get("/settings/lore-clone-status").text
+    assert "Not present" in body and "Provision now" in body
+    assert 'hx-post="/settings/lore-clone"' in body
+
+
+def test_lore_clone_panel_shows_button_even_when_unconfigured(ctx, monkeypatch):
+    """The button is gated on archive-absent, not on config — so it's
+       discoverable even before HONE_LORE_LISTS / HONE_LORE_URL is set."""
+    monkeypatch.delenv("HONE_LORE_URL", raising=False)
+    monkeypatch.delenv("HONE_LORE_LISTS", raising=False)
+    body = ctx.client.get("/settings/lore-clone-status").text
+    assert "Not present" in body and "Provision now" in body
+
+
+def test_provision_button_triggers_clone_and_starts_polling(ctx):
+    """POST /settings/lore-clone fires the trigger and returns the panel now
+       in the 'cloning' phase, which carries the 5 s poll attributes."""
+    r = ctx.client.post("/settings/lore-clone")
+    assert r.status_code == 200
+    assert "Cloning" in r.text
+    assert 'hx-get="/settings/lore-clone-status"' in r.text
+    assert ctx.app.state.lore_clone["phase"] == "cloning"
+
+
+def test_trigger_lore_clone_is_a_no_op_while_one_is_running():
+    """The real trigger guards against a double clone — a press while one is
+       in flight doesn't start another (and doesn't need a running loop)."""
+    from core import main
+    app = SimpleNamespace(state=SimpleNamespace(lore_clone={"phase": "cloning"}))
+    assert main.trigger_lore_clone(app) is False
 
 
 # --- "Gather now" trigger --------------------------------------------------

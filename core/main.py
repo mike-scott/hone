@@ -86,6 +86,11 @@ async def lifespan(app: FastAPI):
     # it as the clone runs. In-memory: a restart starts fresh (and re-runs
     # autoclone if the env var is still set).
     app.state.lore_clone = _initial_lore_status()
+    # The Settings "Provision now" button calls this to kick off a clone
+    # without a restart (ui.py POST /settings/lore-clone). Stored on
+    # app.state so the router needn't import main (avoids a cycle).
+    app.state.lore_clone_task = None
+    app.state.trigger_lore_clone = lambda: trigger_lore_clone(app)
     autoclone_task = None
     if os.environ.get("HONE_LORE_AUTOCLONE"):
         autoclone_task = asyncio.create_task(
@@ -96,6 +101,9 @@ async def lifespan(app: FastAPI):
     finally:
         if autoclone_task and not autoclone_task.done():
             autoclone_task.cancel()
+        manual_task = getattr(app.state, "lore_clone_task", None)
+        if manual_task and not manual_task.done():
+            manual_task.cancel()
         gather_task.cancel()
         try:
             await gather_task          # let the supervisor stop its tasks
@@ -133,31 +141,25 @@ def _initial_lore_status() -> dict:
             "autoclone_enabled": bool(os.environ.get("HONE_LORE_AUTOCLONE"))}
 
 
-async def _autoclone_lore(app: FastAPI):
-    """Run the lore `clone` helper in a worker thread; publish progress to
-       `app.state.lore_clone` for the Settings page, and log a periodic
-       heartbeat so the operator tailing `docker logs` knows it's alive
-       (git's own dynamic progress lines flow through too, via lore's
-       Popen reader + `--progress`). Log + swallow any failure so a
-       transient clone error never crashes hone-core; the service stays
-       up; the gather supervisor finds the archive on a later tick once
-       the operator (or a retry) fixes whatever failed."""
+async def _run_lore_clone(app: FastAPI):
+    """Run `clone_all` in a worker thread, publishing progress to
+       `app.state.lore_clone` for the Settings page and a periodic heartbeat
+       to the log (git's own progress lines flow through via lore's Popen
+       reader + `--progress`). Shared by the startup autoclone and the
+       Settings 'Provision now' button. On completion the phase is decided
+       by what's actually on disk (`is_provisioned`): a no-op run — e.g.
+       nothing configured — surfaces as an error, not a false 'ready'.
+       Failures are logged + swallowed so a transient clone error never
+       crashes hone-core."""
     Lore = gather.gather_api.load("lore").__class__
     state = app.state.lore_clone
-
-    # Idempotent: skip if the archive is already present.
-    if state["archive_present"]:
-        log.info("HONE_LORE_AUTOCLONE: archive already present, skipping")
-        return
-
-    state.update(phase="cloning", percent=0, git_phase=None,
-                 last_line=None, started_at=time.time(),
-                 completed_at=None, error=None)
-    log.info("HONE_LORE_AUTOCLONE: starting background lore clone")
+    state.update(phase="cloning", percent=0, git_phase=None, last_line=None,
+                 started_at=time.time(), completed_at=None, error=None)
+    log.info("lore provision: starting clone")
 
     def on_progress(phase, percent, line):
-        # Called from the worker thread; writes to `state` are single dict
-        # ops (atomic in CPython) and the UI reads a snapshot.
+        # Called from the worker thread; single dict writes are atomic in
+        # CPython and the UI reads a snapshot.
         state["git_phase"] = phase
         state["percent"]   = percent
         state["last_line"] = line
@@ -166,28 +168,55 @@ async def _autoclone_lore(app: FastAPI):
         while True:
             await asyncio.sleep(_HEARTBEAT_SECONDS)
             elapsed = int(time.time() - (state["started_at"] or time.time()))
-            log.info("HONE_LORE_AUTOCLONE: clone still running "
-                     "(%ds elapsed, phase=%s percent=%d)",
+            log.info("lore provision: still running (%ds elapsed, "
+                     "phase=%s percent=%d)",
                      elapsed, state["git_phase"] or "?", state["percent"])
 
-    hb = asyncio.create_task(heartbeat(), name="lore-autoclone-heartbeat")
+    hb = asyncio.create_task(heartbeat(), name="lore-clone-heartbeat")
     try:
-        cloned = await asyncio.to_thread(Lore.clone_all, progress=on_progress)
+        await asyncio.to_thread(Lore.clone_all, progress=on_progress)
     except asyncio.CancelledError:
         raise
     except Exception as e:
-        log.exception("HONE_LORE_AUTOCLONE: clone failed; lore gather "
-                      "stays paused until the archive is provisioned")
-        state.update(phase="error", error=str(e),
-                     completed_at=time.time())
+        log.exception("lore provision: clone failed")
+        state.update(phase="error", error=str(e), completed_at=time.time())
         return
     finally:
         hb.cancel()
-    state.update(phase="ready", percent=100, completed_at=time.time(),
-                 archive_present=True)
-    log.info("HONE_LORE_AUTOCLONE: %s — lore gather will resume on the "
-             "next supervisor tick",
-             "clone complete" if cloned else "archive already present")
+    if Lore.is_provisioned():
+        state.update(phase="ready", percent=100, completed_at=time.time(),
+                     archive_present=True)
+        log.info("lore provision: complete — gather resumes next tick")
+    else:
+        state.update(phase="error", completed_at=time.time(),
+                     error="no archive provisioned — set HONE_LORE_LISTS or "
+                           "HONE_LORE_URL (see core/.env.example)")
+        log.warning("lore provision: nothing was provisioned (unconfigured?)")
+
+
+async def _autoclone_lore(app: FastAPI):
+    """Startup autoclone (HONE_LORE_AUTOCLONE): provision unless the archive
+       is already present."""
+    Lore = gather.gather_api.load("lore").__class__
+    if Lore.is_provisioned():
+        log.info("HONE_LORE_AUTOCLONE: archive already present, skipping")
+        return
+    await _run_lore_clone(app)
+
+
+def trigger_lore_clone(app: FastAPI) -> bool:
+    """Start a background lore provision unless one is already in flight —
+       backs the Settings 'Provision now' button. Returns True if it started
+       a run, False if a clone was already running (phase=cloning covers both
+       the autoclone and a prior button press). Sets phase synchronously so
+       the panel returned to the operator shows in-flight + starts polling."""
+    if app.state.lore_clone.get("phase") == "cloning":
+        return False
+    app.state.lore_clone.update(phase="cloning", percent=0, error=None,
+                                started_at=time.time(), completed_at=None)
+    app.state.lore_clone_task = asyncio.create_task(
+        _run_lore_clone(app), name="lore-clone-manual")
+    return True
 
 
 def create_app() -> FastAPI:

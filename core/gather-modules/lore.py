@@ -16,12 +16,14 @@ from this module so there's one canonical place for the cutoff:
 That runs a `--shallow-since=<since_date> --filter=blob:none` partial clone
 into `HONE_ARCHIVE_DIR/lore`. The source is chosen by precedence:
 `HONE_LORE_LISTS` (many subsystem lists, auto-discovered epochs) wins; else
-`HONE_LORE_URL` (one list or a private mirror); with neither set, lore
-gather is disabled (nothing is cloned and `list()` is a no-op). There is no
-built-in default URL — lore.kernel.org doesn't git-serve the /all/ firehose,
-so a blanket default would only fail. `--shallow-since` bounds the download
-to messages posted on or after the floor — a few hundred MB for a recent
-floor, instead of multi-GB for the full archive history.
+`HONE_LORE_URL` (one list or a private mirror); with neither set, a built-in
+wide default list set (`DEFAULT_LISTS`) is used so a fresh deploy gathers a
+diverse corpus without configuration. There is no built-in default URL —
+lore.kernel.org doesn't git-serve the /all/ firehose, so a blanket default
+URL would only fail; the default is a *list set* (individually cloneable)
+instead. `--shallow-since` bounds the download to messages posted on or
+after the floor — a few hundred MB for a recent floor, instead of multi-GB
+for the full archive history.
 
 Set `HONE_LORE_AUTOCLONE=1` to have hone-core kick off the same clone in
 the background on first start (the service comes up clean and the lore
@@ -57,22 +59,36 @@ ARCHIVE = os.path.join(_ARCHIVE_DIR, "lore")
 # Source selection (no built-in default URL — see the module docstring):
 # lore.kernel.org doesn't git-serve the /all/ firehose (or LKML), only the
 # individual subsystem lists — so wide coverage is assembled from many of
-# them. $HONE_LORE_LISTS (comma-separated list names, e.g.
-# "netdev,linux-mm,dri-devel,linux-pci") turns on multi-list mode: one
-# per-list clone under ARCHIVE/<list> and a per-list resume cursor, all
-# walked in one source cycle. Unset → single-list mode (one clone at
-# ARCHIVE from $HONE_LORE_URL), unchanged.
+# them. $HONE_LORE_LISTS (comma-separated list names) drives multi-list
+# mode: one per-list clone under ARCHIVE/<list> and a per-list resume
+# cursor, all walked in one source cycle. $HONE_LORE_URL points at a single
+# list / private mirror (no list set). With neither set, DEFAULT_LISTS
+# below is used — a sensible wide default so a fresh deploy gathers a
+# diverse corpus without configuration. (The default only chooses WHICH
+# lists to provision; nothing is cloned until autoclone or the Settings
+# "Provision now" button runs.)
 _LORE_BASE = "https://lore.kernel.org"
 # How far to probe for a list's current epoch. Big lists prune their low
 # epochs and roll into higher ones, so the live epoch isn't always 0.
 _MAX_EPOCH_PROBE = 25
 
+# Default list set when neither $HONE_LORE_LISTS nor $HONE_LORE_URL is set —
+# a high-traffic spread across networking / MM / GPU / PCI / filesystems /
+# arm-soc that exercises a wide range of subsystems.
+DEFAULT_LISTS = ("netdev", "linux-mm", "dri-devel", "linux-pci",
+                 "linux-fsdevel", "linux-arm-msm")
+
 
 def configured_lists():
-    """The lore list names to gather (from $HONE_LORE_LISTS), or () for
-       single-list mode."""
-    raw = os.environ.get("HONE_LORE_LISTS", "")
-    return tuple(s.strip() for s in raw.split(",") if s.strip())
+    """The lore list names to gather. Precedence: an explicit
+       $HONE_LORE_LISTS; else () when $HONE_LORE_URL selects a single list /
+       mirror; else DEFAULT_LISTS (the out-of-the-box wide default)."""
+    raw = os.environ.get("HONE_LORE_LISTS", "").strip()
+    if raw:
+        return tuple(s.strip() for s in raw.split(",") if s.strip())
+    if os.environ.get("HONE_LORE_URL"):
+        return ()                          # single-list via the URL override
+    return DEFAULT_LISTS
 
 
 def _archive_for(name):
@@ -381,11 +397,7 @@ class Lore(GatherModule):
            and a non-cloneable / failing one is logged and skipped (the
            rest still provision)."""
         lists = configured_lists()
-        if not lists:
-            if not os.environ.get("HONE_LORE_URL"):
-                log.info("lore: neither HONE_LORE_LISTS nor HONE_LORE_URL "
-                         "set — gather disabled, nothing to clone")
-                return 0
+        if not lists:                      # single-list via HONE_LORE_URL
             return 1 if cls.clone(progress=progress) else 0
         cloned = 0
         for name in lists:
