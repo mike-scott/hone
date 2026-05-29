@@ -236,12 +236,20 @@ def parse_message(raw):
     }
 
 
-def resolve_root(db, msg, thread_cache):
+def resolve_root(db, msg, thread_cache, *, series_patch=False):
     """Find a message's (parent_message_id, root_message_id) by walking its
        In-Reply-To / References chain — the in-cycle thread_cache first, then
-       the corpus's `messages` table for cross-cycle threading. Returns
-       (None, msgid) if no known parent exists (the message starts a new
-       thread)."""
+       the corpus's `messages` table for cross-cycle threading.
+
+       When no *already-known* parent is found, a series patch ([PATCH N/M],
+       N>=1; `series_patch=True`) still names its cover in its own headers, so
+       we root it there — the thread root (oldest Reference, else In-Reply-To)
+       — rather than at itself. This keeps grouping independent of the order
+       the archive delivers the messages: a patch whose commit lands before
+       its cover's still joins the cover instead of becoming a standalone
+       ghost patchset. `parent` is None in that case (the parent message
+       hasn't been seen; only comments need a resolved parent). Anything
+       else with no known parent starts a new thread → (None, its own id)."""
     candidates = []
     if msg["in_reply_to"]:
         candidates.append(msg["in_reply_to"])
@@ -255,6 +263,11 @@ def resolve_root(db, msg, thread_cache):
                 (parent,)).fetchone()
             if row:
                 return parent, row["root_message_id"]
+    if series_patch:
+        if msg["references"]:
+            return None, msg["references"][0]          # oldest ref = thread root
+        if msg["in_reply_to"]:
+            return None, msg["in_reply_to"]
     return None, msg["message_id"]
 
 
@@ -474,7 +487,22 @@ class Lore(GatherModule):
         # it up without a restart.
         commits = self._new_commits(cursor, archive)
         thread_cache = {}                  # message_id -> root_message_id
+        introduced = set()                 # roots we've emitted a PatchsetRef
+                                           # for this cycle
         patchsets_emitted = 0
+
+        def _is_patchset(root):
+            """Whether `root` already has a patchset — emitted this cycle or
+               sitting in the corpus. Lets an early-arriving series patch
+               introduce its cover's patchset once, with later members (and
+               the cover itself) folding into it rather than re-introducing."""
+            if root in introduced:
+                return True
+            if db is not None:
+                return db.execute("SELECT 1 FROM patchsets WHERE "
+                                  "root_message_id=?", (root,)).fetchone() \
+                    is not None
+            return False
         # Cold-start boundary skip: when the cursor is empty AND the
         # since_date floor lands mid-series (cover predates the floor), the
         # first commits in the slice would otherwise be patches whose root
@@ -493,7 +521,9 @@ class Lore(GatherModule):
             if msg is None:
                 continue
             mtype, part_index = classify(msg["subject"])
-            parent, root = resolve_root(db, msg, thread_cache)
+            series_patch = mtype == _TYPE_PATCH and part_index is not None
+            parent, root = resolve_root(db, msg, thread_cache,
+                                        series_patch=series_patch)
             clean_boundary = (mtype == _TYPE_COVER or
                               (mtype == _TYPE_PATCH and part_index is None))
             if awaiting_boundary:
@@ -513,15 +543,20 @@ class Lore(GatherModule):
                              "on a clean patchset boundary", skipped)
             # Count patchset *introductions* against the cap; stop BEFORE
             # the (cap+1)th so patchsets 1..cap land whole and the next
-            # cycle picks up the next introduction.
+            # cycle picks up the next introduction. A message introduces a
+            # patchset when its root has no patchset yet — the cover, a
+            # standalone patch, OR (now) the first-seen member of a series
+            # whose cover hasn't been processed; later members and the cover
+            # itself fold in rather than introducing again.
             introduces_patchset = (mtype != _TYPE_COMMENT
-                                   and root == msg["message_id"])
+                                   and not _is_patchset(root))
             if introduces_patchset:
                 if patchsets_emitted >= cap:
                     log.info("gathered %d patchsets this cycle (cap), the "
                              "rest on later cycles", cap)
                     return
                 patchsets_emitted += 1
+                introduced.add(root)
             # Only cache messages we're committing to emit AND ingest —
             # otherwise a later reply could resolve to a parent that was
             # never written to `messages`, tripping the FK. This covers
@@ -533,14 +568,15 @@ class Lore(GatherModule):
             if will_emit:
                 thread_cache[msg["message_id"]] = root
                 yield from self._build_refs(msg, sha, mtype, part_index,
-                                            parent, root)
+                                            parent, root, introduces_patchset)
 
-    def _build_refs(self, msg, sha, mtype, part_index, parent, root):
-        """Yield the PatchsetRef (when this message introduces the patchset)
-           and the MessageRef for the message itself. Comments yield only
-           the MessageRef and are skipped when no parent can be resolved
-           (orphan list mail). The classification + threading happens in
-           `list()` because the patchset-boundary check needs them too."""
+    def _build_refs(self, msg, sha, mtype, part_index, parent, root, introduce):
+        """Yield the PatchsetRef (when this message introduces the patchset,
+           or is the cover refreshing it) and the MessageRef for the message
+           itself. Comments yield only the MessageRef and are skipped when no
+           parent can be resolved (orphan list mail). The classification +
+           threading happens in `list()` because the patchset-boundary check
+           needs them too."""
         if mtype == _TYPE_COMMENT:
             if parent is None:
                 return                              # orphan — skip
@@ -553,9 +589,13 @@ class Lore(GatherModule):
                 body=msg["raw"].decode("utf-8", "replace"),
                 cursor=sha)
             return
-        # Patch or cover. If this message is its own root, it introduces a
-        # patchset — emit a PatchsetRef first.
-        if root == msg["message_id"]:
+        # Patch or cover. Emit a PatchsetRef when this message introduces the
+        # patchset (`introduce`), OR when it's the cover of an already-
+        # introduced one — so a series whose patches arrived first gets its
+        # name/metadata refreshed from the cover (upsert is idempotent). An
+        # early-arriving patch introduces the patchset rooted at the cover it
+        # names; the row is a placeholder until the cover lands.
+        if introduce or mtype == _TYPE_COVER:
             yield PatchsetRef(
                 root_message_id=root,
                 subject=msg["subject"],

@@ -154,6 +154,27 @@ def test_resolve_root_walks_references_when_in_reply_to_is_missing(db):
     assert (parent, root) == ("cover@x", "cover@x")
 
 
+def test_resolve_root_series_patch_roots_at_its_cover_when_unseen(db):
+    """A series patch ([PATCH N/M]) whose cover hasn't been seen yet roots at
+       the cover it names (oldest Reference / In-Reply-To), not at itself —
+       so grouping doesn't depend on the cover being processed first."""
+    # cover unknown (empty cache, empty corpus); only the patch's own headers
+    parent, root = lore.resolve_root(
+        db, _msg("patch-2@x", in_reply_to="cover@x", references=("cover@x",)),
+        {}, series_patch=True)
+    assert parent is None
+    assert root == "cover@x"
+
+
+def test_resolve_root_non_series_still_self_roots_when_unseen(db):
+    """A standalone patch (no N/M) with an unknown parent still starts its own
+       thread — the cover fallback is gated to numbered series patches."""
+    parent, root = lore.resolve_root(
+        db, _msg("standalone@x", in_reply_to="some-thread@x"), {},
+        series_patch=False)
+    assert root == "standalone@x"
+
+
 def test_resolve_root_returns_self_when_no_parent_known(db):
     parent, root = lore.resolve_root(db, _msg("new@x"), {})
     assert (parent, root) == (None, "new@x")
@@ -328,6 +349,39 @@ def test_patchset_cap_stops_at_a_clean_boundary(monkeypatch, tmp_path, caplog):
     assert len(patchset_refs) == lore.MAX_PATCHSETS_PER_CYCLE
     # each gathered patchset is WHOLE — cover + 3 patches = 4 messages
     assert len(msg_refs) == lore.MAX_PATCHSETS_PER_CYCLE * 4
+
+
+def test_series_groups_under_cover_when_patches_precede_it(monkeypatch, tmp_path):
+    """REGRESSION: when the archive's commit order delivers series patches
+       before their cover, each patch used to become a standalone ghost
+       patchset (root == itself). Each patch's own In-Reply-To/References name
+       the cover, so grouping must be order-independent: one patchset, rooted
+       at the cover, with every part folded in.
+
+       A non-empty cursor is passed so the cold-start boundary-skip (which
+       would otherwise drop leading mid-series patches) is off — this is the
+       steady-state mid-stream case where the ghosts were observed."""
+    cover_id = "cover-x@x"
+    sha_msg = {}
+    # two patches FIRST (cover not seen yet), then the cover, then a 3rd patch
+    sha_msg["sha-p1"] = _mbytes("patch-x-1@x", "[PATCH 1/3] x: a",
+                                in_reply_to=cover_id, references=[cover_id])
+    sha_msg["sha-p2"] = _mbytes("patch-x-2@x", "[PATCH 2/3] x: b",
+                                in_reply_to=cover_id, references=[cover_id])
+    sha_msg["sha-c0"] = _mbytes(cover_id, "[PATCH 0/3] x: the series")
+    sha_msg["sha-p3"] = _mbytes("patch-x-3@x", "[PATCH 3/3] x: c",
+                                in_reply_to=cover_id, references=[cover_id])
+    refs = _drive(monkeypatch, tmp_path, sha_msg, cursor="prev-sha")
+    psets = [r for r in refs if isinstance(r, lore.PatchsetRef)]
+    msgs = [r for r in refs if isinstance(r, lore.MessageRef)]
+    # exactly ONE patchset (no ghosts), rooted at the cover
+    assert {r.root_message_id for r in psets} == {cover_id}
+    # all four messages grouped under the cover
+    assert len(msgs) == 4
+    assert all(m.root_message_id == cover_id for m in msgs)
+    # and the cover's PatchsetRef refreshed the name (not a patch subject)
+    cover_ref = [r for r in psets if r.subject.startswith("[PATCH 0/3]")]
+    assert cover_ref and cover_ref[-1].n_patches == 3
 
 
 def test_patchset_cap_log_fires_when_capping(monkeypatch, tmp_path, caplog):
