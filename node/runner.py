@@ -184,6 +184,27 @@ def run_once(cfg: Config, client: HoneCoreClient) -> bool:
         return False
     log.info("claimed %s (%s)", claim.get("claim_id"),
              claim.get("task_type"))
+    # Safety net: the node declares its capabilities on every claim, so
+    # hone-core shouldn't hand back an unsupported type — but if it does
+    # (an old hone-core that ignores the declaration, or a deploy-order
+    # window), release the claim and idle rather than crash on the handler's
+    # NotImplementedError. Returning False idles the loop so this degrades
+    # to a slow poll, not a hot reclaim spin.
+    task_type = claim.get("task_type")
+    if task_type not in tasks.SUPPORTED_TASK_TYPES:
+        log.warning("claimed unsupported task_type %r (this node supports "
+                    "%s) — releasing; check hone-core honours the per-claim "
+                    "capability declaration", task_type,
+                    ", ".join(tasks.SUPPORTED_TASK_TYPES))
+        try:
+            _with_backoff(cfg, "release unsupported claim",
+                          lambda: client.release_claim(
+                              claim["claim_id"],
+                              reason=f"node does not support {task_type}"))
+        except Exception:
+            log.exception("release of unsupported claim failed — it will "
+                          "lapse on its lease instead")
+        return False
     try:
         record = _with_backoff(
             cfg, f"{claim.get('task_type')} task",
@@ -319,7 +340,7 @@ def main() -> None:
     # unwinds the loop cleanly so `finally` runs.
     signal.signal(signal.SIGTERM, signal.default_int_handler)
     log.info("hone-node starting — core=%s", cfg.core_url)
-    client = HoneCoreClient(cfg)
+    client = HoneCoreClient(cfg, task_types=tasks.SUPPORTED_TASK_TYPES)
     try:
         bootstrap(cfg, client)
         # The claim loop. Transient failures (core unreachable, 5xx, 429) are

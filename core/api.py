@@ -73,6 +73,14 @@ class DeviceAuthRequest(BaseModel):
     task_types: list[str] | None = None   # capabilities (e.g. ["review","train"])
 
 
+class ClaimRequest(BaseModel):
+    # The node's *live* capabilities, declared per-claim. Overrides the
+    # set enrolled at first start (one-time, so it can be stale as the
+    # node's wired handlers grow). Optional — a node that sends nothing
+    # falls back to its enrolled capabilities.
+    task_types: list[str] | None = None
+
+
 class TokenRequest(BaseModel):
     grant_type: str
     device_code: str | None = None
@@ -650,7 +658,8 @@ def _redraft_context(db, parent_proposal_id):
 
 
 @router.post("/claims")
-def claim_task(request: Request, node: dict = Depends(require_node)):
+def claim_task(request: Request, body: ClaimRequest | None = None,
+               node: dict = Depends(require_node)):
     """Claim the next task for the node — a work item (prepare/review/train)
        or a draft task, or 204 when both queues are empty. The payload is
        self-contained: patches, comments, the compiled methodology, and any
@@ -671,13 +680,19 @@ def claim_task(request: Request, node: dict = Depends(require_node)):
                             "methodology not bootstrapped")
     version, document = active
 
-    # Read node capabilities; default to all work-item types if unspecified.
-    try:
-        import json as _json
-        types_decl = (_json.loads(node["task_types"])
-                       if node.get("task_types") else None)
-    except Exception:
-        types_decl = None
+    # Resolve the node's capabilities. The node declares its *live*
+    # capabilities in the claim body (authoritative — enrollment is
+    # one-time and that set can be stale as wired handlers grow); fall back
+    # to the set enrolled at first start, then to all work-item types.
+    if body is not None and body.task_types:
+        types_decl = body.task_types
+    else:
+        try:
+            import json as _json
+            types_decl = (_json.loads(node["task_types"])
+                           if node.get("task_types") else None)
+        except Exception:
+            types_decl = None
     work_type_ids = None
     wants_draft = True
     if types_decl:

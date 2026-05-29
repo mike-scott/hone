@@ -65,6 +65,15 @@ def test_handlers_registry_covers_the_four_task_types():
     assert set(tasks.HANDLERS) == {"prepare", "review", "train", "draft"}
 
 
+def test_supported_task_types_all_have_handlers():
+    """Every advertised capability must have a registered handler — so the
+       node never tells hone-core it can do work that has no handler at all.
+       (The remaining HANDLERS are NotImplementedError stubs, deliberately
+       NOT in SUPPORTED_TASK_TYPES.)"""
+    assert set(tasks.SUPPORTED_TASK_TYPES) <= set(tasks.HANDLERS)
+    assert "prepare" in tasks.SUPPORTED_TASK_TYPES
+
+
 def test_review_handler_raises_until_ai_integration_lands(monkeypatch):
     # the dispatch + claim shape are wired; the AI call is explicitly missing
     with pytest.raises(NotImplementedError):

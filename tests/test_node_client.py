@@ -111,11 +111,11 @@ def test_err_code(body, expected):
 
 # --- main-API HTTP methods (via httpx.MockTransport) -----------------------
 
-def _client_with_transport(cfg, transport):
+def _client_with_transport(cfg, transport, task_types=None):
     """A HoneCoreClient with its main-API http client replaced by one
        wired to an in-memory MockTransport — lets us exercise the real
        method bodies without an actual hone-core."""
-    c = HoneCoreClient(cfg)
+    c = HoneCoreClient(cfg, task_types=task_types)
     c._access = "access-tok"
     c._refresh = "refresh-tok"
     c._http = httpx.Client(base_url=cfg.core_url,
@@ -148,6 +148,25 @@ def test_claim_returns_the_payload_on_200(cfg):
     try:
         assert c.claim() == {"task_type": "review", "claim_id": "c1"}
         assert seen == [("POST", "/v1/claims", "Bearer access-tok")]
+    finally:
+        c.close()
+
+
+def test_claim_declares_live_capabilities_in_the_body(cfg):
+    """The claim POST carries the node's injected capabilities so hone-core
+       filters the queue to types this node can execute — overriding the
+       (one-time) enrolled set if it has gone stale."""
+    import json as _json
+    bodies = []
+
+    def handler(request):
+        bodies.append(_json.loads(request.content) if request.content else None)
+        return httpx.Response(204)
+    c = _client_with_transport(cfg, httpx.MockTransport(handler),
+                               task_types=["prepare"])
+    try:
+        assert c.claim() is None
+        assert bodies == [{"task_types": ["prepare"]}]
     finally:
         c.close()
 

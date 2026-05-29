@@ -21,6 +21,16 @@ from node.config import Config
 log = logging.getLogger("hone.node.tasks")
 
 
+# The task types whose AI integration is actually wired — the single source
+# of truth for this node's capability (the matching entries in HANDLERS below
+# do the work; the rest are NotImplementedError stubs). The runner injects it
+# into the client (HoneCoreClient(cfg, task_types=...)), which declares it to
+# hone-core at enrollment and on every claim, so the queue is filtered to work
+# this node can do — without it the node would be handed review/train/draft
+# work and crash. Add a type here as its handler lands.
+SUPPORTED_TASK_TYPES = ("prepare",)
+
+
 # The structured-metadata fields the prepare schema requires on a
 # `prepared` record (per common/schema/completion-record.schema.yaml).
 # The handler lifts these from Claude's response into the top-level

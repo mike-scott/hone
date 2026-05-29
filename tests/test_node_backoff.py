@@ -233,6 +233,40 @@ def test_run_once_releases_the_claim_on_a_non_transient_failure(monkeypatch):
     assert "Claude rejected the API key" in reason
 
 
+def test_run_once_releases_an_unsupported_task_type_without_crashing(
+        monkeypatch):
+    """If hone-core hands back a task_type the node has no wired handler for
+       (an old hone-core that ignores the per-claim capability declaration,
+       or a deploy-order window), run_once releases the claim and returns
+       False — it idles instead of crashing on the handler's
+       NotImplementedError or hot-spinning on a reclaim."""
+    class _StubClient:
+        def __init__(self):
+            self.released = []
+
+        def claim(self):
+            return {"claim_id": "c1", "task_type": "review"}   # unsupported
+
+        def release_claim(self, claim_id, reason):
+            self.released.append((claim_id, reason))
+
+        def submit_result(self, *args, **kw):
+            raise AssertionError("submit_result must not be called")
+
+    def must_not_dispatch(cfg, client, claim):
+        raise AssertionError("dispatch must not run for an unsupported type")
+
+    monkeypatch.setattr(runner.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(runner.tasks, "dispatch", must_not_dispatch)
+
+    cli = _StubClient()
+    assert runner.run_once(_Cfg, cli) is False
+    assert len(cli.released) == 1
+    claim_id, reason = cli.released[0]
+    assert claim_id == "c1"
+    assert "review" in reason
+
+
 def test_run_once_propagates_original_exception_even_if_release_fails(
         monkeypatch):
     """A failed release falls back to lease expiry — the original

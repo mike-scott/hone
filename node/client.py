@@ -26,7 +26,6 @@ from node.config import Config
 log = logging.getLogger("hone.node.client")
 
 _DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
-_TASK_TYPES = ["prepare", "review", "train", "draft"]   # this node's self-described capability
 
 
 class EnrollmentError(Exception):
@@ -61,8 +60,15 @@ def _err_code(response: httpx.Response) -> str | None:
 class HoneCoreClient:
     """One node's session with hone-core — enrollment, tokens, and the v1 API."""
 
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, task_types=None):
         self._cfg = cfg
+        # The task types this node can execute — declared to hone-core at
+        # enrollment AND on every claim, so the queue is filtered to work
+        # this node can do. Injected by the caller (the runner passes
+        # node.tasks.SUPPORTED_TASK_TYPES, the single source of truth) to
+        # avoid a client→tasks import cycle. None ⇒ no declaration, so
+        # hone-core falls back to the node's enrolled capabilities.
+        self._task_types = list(task_types) if task_types else None
         self._access: str | None = None
         self._refresh: str | None = None
         self._http: httpx.Client | None = None     # main-API client, once enrolled
@@ -119,7 +125,7 @@ class HoneCoreClient:
     def _begin_device_flow(self) -> dict:
         r = self._oauth_request(
             "/v1/oauth/device_authorization",
-            {"node_name": self._cfg.node_name, "task_types": _TASK_TYPES})
+            {"node_name": self._cfg.node_name, "task_types": self._task_types})
         # 409 means hone-core rejected the enrollment because the
         # requested node_name is already held by an active node. The
         # response body's `detail` carries the human-readable reason
@@ -243,8 +249,15 @@ class HoneCoreClient:
         return r
 
     def claim(self) -> dict | None:
-        """POST /v1/claims — the next task, or None on 204 (empty queue)."""
-        r = self._request("POST", "/v1/claims")
+        """POST /v1/claims — the next task, or None on 204 (empty queue).
+
+           Declares this node's live capabilities so hone-core filters the
+           queue to types it can execute — even when the set enrolled at
+           first start (one-time) is now stale. The body is additive on the
+           wire: an older hone-core that doesn't read it falls back to the
+           enrolled capability set, so this stays backward-compatible."""
+        r = self._request("POST", "/v1/claims",
+                           json={"task_types": self._task_types})
         if r.status_code == 204:
             return None
         r.raise_for_status()

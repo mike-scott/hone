@@ -472,3 +472,37 @@ def test_claim_respects_node_task_types_filter(ctx):
     r = ctx.http.post("/v1/claims", headers=HEADERS)
     # No prepare task is queued; the review and draft are out of scope; 204.
     assert r.status_code == 204
+
+
+def test_claim_body_task_types_override_stale_enrolled_capabilities(ctx):
+    """A node enrolled (one-time) with all four types but now declaring only
+       `prepare` per-claim must NOT be offered the queued review task — the
+       per-claim declaration overrides the stale enrolled set, so an
+       already-enrolled node self-heals without re-enrolling."""
+    core_db.upsert_patchset(ctx.db, "<r1@x>", subject="[PATCH 1/1] x",
+                             n_patches=1)
+    _plant_metadata(ctx.db, "<r1@x>")
+    core_db.upsert_message(ctx.db, "<p1@x>", root_message_id="<r1@x>",
+                           type=core_db.MSG_TYPE_PATCH, body="diff",
+                           part_index=1)
+    core_db.maybe_enqueue_review(ctx.db, "<r1@x>")
+    # ctx.node is still enrolled with all four types (the stale superset).
+    r = ctx.http.post("/v1/claims", headers=HEADERS,
+                      json={"task_types": ["prepare"]})
+    assert r.status_code == 204
+
+
+def test_claim_without_body_falls_back_to_enrolled_capabilities(ctx):
+    """Backward-compatible: a node that sends no claim body (an older
+       hone-node) is still filtered by its enrolled task_types — here the
+       enrolled superset includes `review`, so the queued review is served."""
+    core_db.upsert_patchset(ctx.db, "<r1@x>", subject="[PATCH 1/1] x",
+                             n_patches=1)
+    _plant_metadata(ctx.db, "<r1@x>")
+    core_db.upsert_message(ctx.db, "<p1@x>", root_message_id="<r1@x>",
+                           type=core_db.MSG_TYPE_PATCH, body="diff",
+                           part_index=1)
+    core_db.maybe_enqueue_review(ctx.db, "<r1@x>")
+    r = ctx.http.post("/v1/claims", headers=HEADERS)
+    assert r.status_code == 200
+    assert r.json()["task_type"] == "review"
