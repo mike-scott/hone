@@ -11,7 +11,7 @@ import jsonschema
 import pytest
 import yaml
 
-from node import cgit, tasks, tier0
+from node import ai, cgit, tasks, tier0
 
 
 # --- schema-based record validator ----------------------------------------
@@ -301,6 +301,47 @@ def test_prepare_handler_truncates_runaway_raw_responses(monkeypatch):
     assert record["meta"]["raw_response_length"] == 50000
     assert record["meta"]["raw_response_truncated"] is True
     assert len(record["meta"]["raw_response"]) < 50000
+    _validate_record(record)
+
+
+def test_prepare_handler_submits_record_when_claude_call_fails(monkeypatch):
+    """A CallClaudeError (the CLI ran but produced no usable answer —
+       a non-auth exit / timeout / a stream with no result event) does NOT
+       crash the claim loop. The handler returns a schema-valid
+       `uncharacterisable` record carrying the partial agent trace + the
+       CLI's failure context, so the attempt lands in the corpus (and the
+       Agent-messages UI) as debuggable data."""
+    partial_trace = [
+        {"step": "assistant_text", "text": "Looking at the patch."},
+        {"step": "tool_use", "name": "Bash",
+         "input": {"command": "echo $KERNEL_TREE_PATH"}},
+        {"step": "tool_result", "chars": 12}]
+
+    def _boom(cfg, system, user_text, *, model=None, max_tokens=None,
+              tools=None):
+        raise ai.CallClaudeError(
+            "`claude` CLI failed (1): kaboom",
+            category="other", returncode=1, stderr="kaboom",
+            trace=partial_trace, duration_ms=4200,
+            model="claude-opus-4-7")
+
+    monkeypatch.setattr("node.ai.call_claude", _boom)
+    record = tasks.handle_prepare_task(_cfg(), None, _PREPARE_CLAIM)
+    assert record["task_type"] == "prepare"
+    assert record["outcome"]   == "uncharacterisable"
+    assert "kaboom" in record["reason"]
+    assert record["model"] == "claude-opus-4-7"
+    assert record["usage"]["duration_ms"] == 4200
+    # The success-path fields must be absent on the failure shape.
+    assert "subsystem" not in record
+    assert "self_review_record" not in record
+    # The partial trace + the CLI failure context ride on meta — the trace
+    # for the Agent-messages timeline, claude_error for debugging.
+    assert [s["step"] for s in record["meta"]["trace"]] == \
+        ["assistant_text", "tool_use", "tool_result"]
+    assert record["meta"]["claude_error"]["category"] == "other"
+    assert record["meta"]["claude_error"]["returncode"] == 1
+    assert "kaboom" in record["meta"]["claude_error"]["stderr"]
     _validate_record(record)
 
 

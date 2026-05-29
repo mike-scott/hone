@@ -69,6 +69,30 @@ class CallClaudeAuthError(Exception):
        producing the same clean error each time until the key is
        valid."""
 
+
+class CallClaudeError(RuntimeError):
+    """A Claude call that *ran* but produced no usable answer — the CLI
+       exited non-zero (non-auth), timed out, or its stream ended without
+       a success result.
+
+       Unlike CallClaudeAuthError this is NOT configuration-fatal: it's a
+       per-task failure. It carries whatever the turn produced before it
+       failed (the partial `trace`, the CLI's `stderr`, the failure
+       `category`, the wall-clock `duration_ms`) so the handler can submit
+       a failure-outcome record — surfacing the attempt (and its agent
+       trace) into the corpus — instead of crashing the claim loop."""
+
+    def __init__(self, message, *, category="other", returncode=None,
+                 stderr="", trace=None, duration_ms=0, model=None):
+        super().__init__(message)
+        self.category = category
+        self.returncode = returncode
+        self.stderr = stderr
+        self.trace = trace or []
+        self.duration_ms = duration_ms
+        self.model = model
+
+
 # Default model. Resolution order in call_claude: explicit `model=`
 # kwarg → cfg.anthropic_model (ANTHROPIC_MODEL env) → DEFAULT_MODEL.
 DEFAULT_MODEL = "claude-sonnet-4-6"
@@ -431,9 +455,11 @@ def _call_claude_cli(cfg, system, user_text, *, model, tools=None):
 
     if timed_out.is_set():
         _record_outcome("connection")
-        raise RuntimeError(
+        raise CallClaudeError(
             f"`claude` CLI timed out after {_CLI_TIMEOUT_SECONDS}s "
-            "— the subprocess was wedged.") from None
+            "— the subprocess was wedged.",
+            category="connection", trace=trace,
+            duration_ms=duration_ms, model=model_used) from None
     stderr = "".join(stderr_chunks)
     if rc != 0:
         category = _classify_cli_stderr(stderr)
@@ -442,21 +468,29 @@ def _call_claude_cli(cfg, system, user_text, *, model, tools=None):
                      stderr.strip()[:200])
         _record_outcome(category)
         if category == "auth":
+            # Auth is the one configuration-fatal CLI failure — no record
+            # to submit, the operator must re-login. Stays a hard exit.
             raise CallClaudeAuthError(
                 "`claude` CLI auth state is stale or absent — "
                 "run `claude` on the host to re-login, then ensure "
                 "the container's $HOME/.claude mount is read-write."
             ) from None
-        raise RuntimeError(
-            f"`claude` CLI failed ({rc}): {stderr.strip()[:500]}")
+        raise CallClaudeError(
+            f"`claude` CLI failed ({rc}): {stderr.strip()[:500]}",
+            category=category, returncode=rc, stderr=stderr,
+            trace=trace, duration_ms=duration_ms, model=model_used)
     if result_event is None:
         _record_outcome("other")
-        raise RuntimeError(
-            "`claude` CLI stream ended without a result event")
+        raise CallClaudeError(
+            "`claude` CLI stream ended without a result event",
+            category="other", returncode=rc, stderr=stderr,
+            trace=trace, duration_ms=duration_ms, model=model_used)
     if result_event.get("is_error") or result_event.get("subtype") != "success":
         _record_outcome("other")
-        raise RuntimeError(
-            f"`claude` CLI returned an error result: {result_event!r}")
+        raise CallClaudeError(
+            f"`claude` CLI returned an error result: {result_event!r}",
+            category="other", returncode=rc, stderr=stderr,
+            trace=trace, duration_ms=duration_ms, model=model_used)
 
     _record_outcome(None)
     usage = result_event.get("usage") or {}

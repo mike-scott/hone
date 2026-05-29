@@ -500,13 +500,15 @@ def test_cli_backend_translates_auth_stderr_to_auth_error(monkeypatch):
 
 
 def test_cli_backend_classifies_rate_limit_for_health(monkeypatch):
-    """A `rate limit` stderr → _LAST_ERROR='rate_limit' (and a generic
-       RuntimeError raised, since rate-limit is recoverable via
-       backoff but isn't auth-fatal)."""
+    """A `rate limit` stderr → _LAST_ERROR='rate_limit' and a
+       CallClaudeError (carrying the category) rather than a config-fatal
+       auth error — the handler turns it into a submittable record."""
     _patch_popen(monkeypatch, returncode=1,
                  stderr="Error: rate limit exceeded; retry later")
-    with pytest.raises(RuntimeError):
+    with pytest.raises(ai.CallClaudeError) as ei:
         ai.call_claude(_CliCfg(), "s", "u")
+    assert ei.value.category == "rate_limit"
+    assert ei.value.returncode == 1
     assert ai.get_last_error() == "rate_limit"
 
 
@@ -524,18 +526,43 @@ def test_cli_backend_handles_missing_binary(monkeypatch):
 
 def test_cli_backend_errors_when_stream_has_no_result(monkeypatch):
     """A clean exit whose stream never carried a `result` event (the CLI
-       crashed mid-stream) bails with a clear RuntimeError."""
+       crashed mid-stream) bails with a CallClaudeError."""
     _patch_popen(monkeypatch, returncode=0,
                  events=[_init_event(), _assistant_text_event()])
-    with pytest.raises(RuntimeError, match="without a result event"):
+    with pytest.raises(ai.CallClaudeError, match="without a result event"):
         ai.call_claude(_CliCfg(), "s", "u")
     assert ai.get_last_error() == "other"
 
 
 def test_cli_backend_handles_error_result(monkeypatch):
     """A `result` event with is_error=true (CLI internal failure) raises
-       rather than returning the assistant text."""
+       a CallClaudeError rather than returning the assistant text."""
     _patch_popen(monkeypatch, returncode=0, events=[_envelope(is_error=True)])
-    with pytest.raises(RuntimeError, match="error result"):
+    with pytest.raises(ai.CallClaudeError, match="error result"):
         ai.call_claude(_CliCfg(), "s", "u")
     assert ai.get_last_error() == "other"
+
+
+def test_cli_backend_failure_preserves_partial_trace(monkeypatch):
+    """A non-zero CLI exit carries everything the turn produced before it
+       failed — the partial trace (assistant text + tool_use + tool_result),
+       the stderr, the failure category, and the returncode — so the
+       handler can submit it as a record instead of crashing the loop."""
+    _patch_popen(
+        monkeypatch, returncode=1, stderr="Error: kaboom",
+        events=[_init_event(),
+                _assistant_text_event(text="Looking at the patch."),
+                _assistant_tool_event(name="Read",
+                                      tool_input={"file_path": "mm/slab.c"}),
+                _tool_result_event(content="x" * 42)])
+    with pytest.raises(ai.CallClaudeError) as ei:
+        ai.call_claude(_CliCfg(), "s", "u")
+    exc = ei.value
+    assert exc.category == "other"
+    assert exc.returncode == 1
+    assert "kaboom" in exc.stderr
+    steps = [s["step"] for s in exc.trace]
+    assert steps == ["assistant_text", "tool_use", "tool_result"]
+    assert exc.trace[0]["text"] == "Looking at the patch."
+    assert exc.trace[1]["name"] == "Read"
+    assert exc.trace[2]["chars"] == 42

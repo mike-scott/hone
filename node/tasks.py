@@ -239,7 +239,33 @@ def handle_prepare_task(cfg: Config, client: HoneCoreClient,
     # every tree-dependent field, so the model needs no tools. tools=[] bars
     # the CLI from running Bash/git — stops it probing for a kernel tree
     # (which the legacy prompt still nudges it to do) regardless of prompt.
-    response = ai.call_claude(cfg, system, user_text, tools=[])
+    try:
+        response = ai.call_claude(cfg, system, user_text, tools=[])
+    except ai.CallClaudeError as exc:
+        # The Claude call ran but yielded no usable answer (CLI non-auth
+        # exit / timeout / stream with no success result). Rather than let
+        # it crash the claim loop, submit an uncharacterisable record that
+        # carries the partial agent trace + the CLI's failure context — the
+        # attempt lands in the corpus (and the Agent-messages UI) as
+        # debuggable data instead of a restart loop. Auth failures take a
+        # different, configuration-fatal path (ai.CallClaudeAuthError).
+        log.warning("prepare: Claude call failed (%s) — submitting "
+                    "uncharacterisable: %s", exc.category, exc)
+        return {"task_type": "prepare",
+                "worker_id": _worker_id(cfg),
+                "model":     exc.model or cfg.anthropic_model or "",
+                "usage":     {"input_tokens":  0, "output_tokens": 0,
+                              "duration_ms":   exc.duration_ms},
+                "outcome":   "uncharacterisable",
+                "reason":    str(exc),
+                "meta":      {"deterministic_resolver_version":
+                                  det["resolver_version"],
+                              "trace":        _cap_trace(exc.trace),
+                              "claude_error": {
+                                  "category":   exc.category,
+                                  "returncode": exc.returncode,
+                                  "stderr":     (exc.stderr or "")
+                                                    .strip()[:_RAW_RESPONSE_CAP]}}}
     header = {"task_type": "prepare",
               "worker_id": _worker_id(cfg),
               "model":     response["model"],
