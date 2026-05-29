@@ -291,6 +291,30 @@ def test_prepare_rejects_bad_base_fallback(schema):
         _reject(schema, record)
 
 
+def test_meta_trace_validates_and_keeps_meta_open(schema):
+    """meta.trace (the captured Claude turn) validates when present, while
+       meta stays open to its other keys (resolver version, etc.)."""
+    record = _prepare(outcome="prepared", self_review_record=_SELF_REVIEW,
+                      **{**_PREPARE_METADATA,
+                         "meta": {"deterministic_resolver_version": "tier0-3",
+                                  "trace": [
+                                      {"step": "assistant_text",
+                                       "text": "hi", "chars": 2},
+                                      {"step": "tool_use", "id": "t1",
+                                       "name": "Read",
+                                       "input": {"file_path": "f"}},
+                                      {"step": "tool_result", "id": "t1",
+                                       "chars": 99}]}})
+    _validate(schema, record)
+
+
+def test_meta_trace_rejects_an_unknown_step(schema):
+    record = _prepare(outcome="prepared", self_review_record=_SELF_REVIEW,
+                      **{**_PREPARE_METADATA,
+                         "meta": {"trace": [{"step": "thinking"}]}})
+    _reject(schema, record)
+
+
 # --- review ----------------------------------------------------------------
 
 def test_review_reviewed_with_concerns(schema):

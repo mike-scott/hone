@@ -222,33 +222,79 @@ def _envelope(text="ok", model="claude-opus-4-7",
     }
 
 
-def _patch_run(monkeypatch, *, returncode=0, stdout="", stderr="",
-                file_not_found=False, timeout=False):
-    """Replace subprocess.run with a stub that records its call args
-       so the assertions can pin the cmdline shape."""
-    import subprocess as sp
-    calls = []
+# --- stream-json event builders --------------------------------------------
 
-    def stub(cmd, input=None, capture_output=False, text=False, timeout=None):
-        calls.append({"cmd": cmd, "input": input, "timeout": timeout})
-        if file_not_found:
-            raise FileNotFoundError("claude")
-        if timeout is not None and stub._raise_timeout:
-            raise sp.TimeoutExpired("claude", timeout)
-        return SimpleNamespace(returncode=returncode,
-                                stdout=stdout, stderr=stderr)
-    stub._raise_timeout = timeout
-    monkeypatch.setattr("node.ai.subprocess.run", stub)
-    return calls
+def _init_event(model="claude-sonnet-4-6", tools=()):
+    return {"type": "system", "subtype": "init", "session_id": "3f9cabcd12",
+            "model": model, "tools": list(tools)}
+
+
+def _assistant_text_event(text="ok", model="claude-sonnet-4-6"):
+    return {"type": "assistant",
+            "message": {"role": "assistant", "model": model,
+                        "content": [{"type": "text", "text": text}]}}
+
+
+def _assistant_tool_event(name="Read", tool_input=None, tool_id="toolu_1"):
+    return {"type": "assistant",
+            "message": {"role": "assistant",
+                        "content": [{"type": "tool_use", "id": tool_id,
+                                     "name": name,
+                                     "input": tool_input or {}}]}}
+
+
+def _tool_result_event(tool_id="toolu_1", content="file contents"):
+    return {"type": "user",
+            "message": {"role": "user",
+                        "content": [{"type": "tool_result",
+                                     "tool_use_id": tool_id,
+                                     "content": content}]}}
+
+
+def _patch_popen(monkeypatch, *, events=(), returncode=0, stderr="",
+                 file_not_found=False, delay=0.0):
+    """Replace subprocess.Popen with a fake that streams `events` (dicts →
+       newline-delimited stream-json) on stdout after an optional `delay`,
+       captures stdin, drains a `stderr` string, and exits `returncode`.
+       Returns a `state` dict recording the cmd, stdin, and kill()."""
+    import time as _t
+    state = {"cmd": None, "stdin": "", "killed": False}
+    lines = [json.dumps(e) + "\n" for e in events]
+    stderr_out = stderr               # not shadowed by __init__'s stderr param
+
+    def gen_stdout():
+        if delay:
+            _t.sleep(delay)
+        yield from lines
+
+    class _Stdin:
+        def write(self, s): state["stdin"] += s
+        def close(self): pass
+
+    class _FakePopen:
+        def __init__(self, cmd, stdin=None, stdout=None, stderr=None,
+                     text=False):
+            if file_not_found:
+                raise FileNotFoundError("claude")
+            state["cmd"] = cmd
+            self.stdin = _Stdin()
+            self.stdout = gen_stdout()
+            self.stderr = iter([stderr_out] if stderr_out else [])
+        def wait(self, timeout=None):
+            return returncode
+        def kill(self):
+            state["killed"] = True
+
+    monkeypatch.setattr("node.ai.subprocess.Popen", _FakePopen)
+    return state
 
 
 def test_cli_backend_runs_claude_with_the_right_cmdline(monkeypatch):
-    """The CLI invocation is `claude -p --output-format json
-       --system-prompt <sys> --model <model>`, with user_text piped
-       through stdin (not -p) so multi-thousand-line prompts avoid
+    """The CLI invocation is `claude -p --output-format stream-json
+       --verbose --system-prompt <sys> --model <model>`, with user_text
+       piped through stdin (not -p) so multi-thousand-line prompts avoid
        the ARG_MAX cap."""
-    calls = _patch_run(monkeypatch, stdout=json.dumps(_envelope()),
-                        returncode=0)
+    state = _patch_popen(monkeypatch, events=[_envelope()])
     ai._record_outcome("auth")            # pre-existing failure category
     out = ai.call_claude(_CliCfg(), "SYS-PROMPT", "USER-MESSAGE",
                          model="claude-opus-4-7")
@@ -258,33 +304,25 @@ def test_cli_backend_runs_claude_with_the_right_cmdline(monkeypatch):
     assert out["usage"]["output_tokens"] == 50
     # The success cleared the prior failure category.
     assert ai.get_last_error() is None
-    # Cmdline shape.
-    cmd = calls[0]["cmd"]
+    # Cmdline shape — streaming.
+    cmd = state["cmd"]
     assert cmd[0] == "claude"
     assert "-p" in cmd
-    assert "--output-format" in cmd and "json" in cmd
-    assert "--system-prompt" in cmd
+    assert "--output-format" in cmd and "stream-json" in cmd
+    assert "--verbose" in cmd
     assert cmd[cmd.index("--system-prompt") + 1] == "SYS-PROMPT"
     assert "--model" in cmd
     # User text on stdin (not in argv).
-    assert calls[0]["input"] == "USER-MESSAGE"
+    assert state["stdin"] == "USER-MESSAGE"
     assert "USER-MESSAGE" not in cmd
 
 
 def test_cli_backend_logs_a_heartbeat_while_claude_thinks(monkeypatch, caplog):
-    """A turn that outlasts the heartbeat interval emits 'still working'
-       elapsed-time lines so a console viewer isn't staring at a frozen log
-       while the (silent, capture-mode) CLI runs."""
-    import time as _t
+    """A turn that outlasts the heartbeat interval (here, a stall before the
+       events arrive) emits 'still working' elapsed-time lines so a console
+       viewer isn't staring at a frozen log."""
     monkeypatch.setattr(ai, "_HEARTBEAT_SECONDS", 0.02)
-
-    def slow_run(cmd, input=None, capture_output=False, text=False,
-                 timeout=None):
-        _t.sleep(0.1)                         # ~5 heartbeat intervals
-        return SimpleNamespace(returncode=0, stdout=json.dumps(_envelope()),
-                               stderr="")
-
-    monkeypatch.setattr("node.ai.subprocess.run", slow_run)
+    _patch_popen(monkeypatch, events=[_envelope()], delay=0.1)   # ~5 intervals
     with caplog.at_level("INFO", logger="hone.node.ai"):
         ai.call_claude(_CliCfg(), "SYS", "USER")
     assert any("still working" in r.message for r in caplog.records)
@@ -293,7 +331,7 @@ def test_cli_backend_logs_a_heartbeat_while_claude_thinks(monkeypatch, caplog):
 def test_cli_backend_no_heartbeat_for_a_fast_call(monkeypatch, caplog):
     """A turn shorter than the interval logs no heartbeat — the watchdog
        only fires for genuinely slow calls."""
-    _patch_run(monkeypatch, stdout=json.dumps(_envelope()), returncode=0)
+    _patch_popen(monkeypatch, events=[_envelope()])
     with caplog.at_level("INFO", logger="hone.node.ai"):
         ai.call_claude(_CliCfg(), "SYS", "USER")
     assert not any("still working" in r.message for r in caplog.records)
@@ -341,7 +379,7 @@ def test_cli_backend_sums_cache_tokens_into_input_tokens(monkeypatch):
                      cache_creation_input_tokens=200,
                      cache_read_input_tokens=29750,
                      output_tokens=1000)
-    _patch_run(monkeypatch, stdout=json.dumps(env), returncode=0)
+    _patch_popen(monkeypatch, events=[env])
     out = ai.call_claude(_CliCfg(), "SYS", "USER")
     assert out["usage"]["input_tokens"] == 30000      # 50 + 200 + 29750
     assert out["usage"]["output_tokens"] == 1000
@@ -357,12 +395,11 @@ def test_cli_backend_uses_anthropic_model_from_cfg(monkeypatch):
        back to cfg.anthropic_model (sourced from $ANTHROPIC_MODEL) and
        passes it to `claude --model`. This is the operator-facing
        knob that lets .env pin the model without code changes."""
-    calls = _patch_run(monkeypatch, stdout=json.dumps(_envelope()),
-                        returncode=0)
+    state = _patch_popen(monkeypatch, events=[_envelope()])
     cfg = _CliCfg()
     cfg.anthropic_model = "claude-sonnet-4-6"
     ai.call_claude(cfg, "SYS", "USER")          # no explicit model=
-    cmd = calls[0]["cmd"]
+    cmd = state["cmd"]
     assert cmd[cmd.index("--model") + 1] == "claude-sonnet-4-6"
 
 
@@ -370,34 +407,73 @@ def test_explicit_model_kwarg_beats_cfg_anthropic_model(monkeypatch):
     """Explicit model= at the call site wins over cfg.anthropic_model.
        Keeps the env knob from silently overriding per-call requests
        (none today, but future operations may want it)."""
-    calls = _patch_run(monkeypatch, stdout=json.dumps(_envelope()),
-                        returncode=0)
+    state = _patch_popen(monkeypatch, events=[_envelope()])
     cfg = _CliCfg()
     cfg.anthropic_model = "claude-sonnet-4-6"
     ai.call_claude(cfg, "SYS", "USER", model="claude-opus-4-7")
-    cmd = calls[0]["cmd"]
+    cmd = state["cmd"]
     assert cmd[cmd.index("--model") + 1] == "claude-opus-4-7"
 
 
-def test_cli_backend_strips_fences_in_the_envelope_result(monkeypatch):
+def test_cli_backend_strips_fences_in_the_result(monkeypatch):
     """Even though Claude is asked for raw JSON only, the CLI
        sometimes wraps the assistant text in markdown fences. The
        same _strip_fences helper that protects the SDK path also
        protects the CLI path."""
     body = json.dumps({"a": 1})
     wrapped = f"```json\n{body}\n```"
-    _patch_run(monkeypatch,
-                stdout=json.dumps(_envelope(text=wrapped)), returncode=0)
+    _patch_popen(monkeypatch, events=[_envelope(text=wrapped)])
     out = ai.call_claude(_CliCfg(), "s", "u")
     assert out["text"] == body            # fence removed
+
+
+def test_cli_backend_captures_assistant_and_tool_trace(monkeypatch):
+    """The streamed assistant text + tool_use/tool_result events are
+       captured into `trace` — the ordered record hone-core persists and
+       presents in the web UI."""
+    events = [
+        _init_event(tools=["Read"]),
+        _assistant_text_event("let me look"),
+        _assistant_tool_event("Read", {"file_path": "drivers/net/foo.c"}),
+        _tool_result_event(content="x" * 1234),
+        _assistant_text_event('{"ok": true}'),
+        _envelope(text='{"ok": true}'),
+    ]
+    _patch_popen(monkeypatch, events=events)
+    out = ai.call_claude(_CliCfg(), "s", "u")
+    steps = [s["step"] for s in out["trace"]]
+    assert steps == ["assistant_text", "tool_use", "tool_result",
+                     "assistant_text"]
+    tool = next(s for s in out["trace"] if s["step"] == "tool_use")
+    assert tool["name"] == "Read"
+    assert tool["input"]["file_path"] == "drivers/net/foo.c"
+    assert next(s for s in out["trace"]
+                if s["step"] == "tool_result")["chars"] == 1234
+
+
+def test_cli_backend_logs_tool_target_and_text_snippet(monkeypatch, caplog):
+    """INFO lines show WHAT Claude is doing — a short snippet of assistant
+       text and the tool's target file — not just lengths/names."""
+    events = [
+        _init_event(tools=["Read"]),
+        _assistant_text_event("Let me read the changed file before judging."),
+        _assistant_tool_event("Read", {"file_path": "drivers/net/foo.c"}),
+        _envelope(text='{"ok": true}'),
+    ]
+    _patch_popen(monkeypatch, events=events)
+    with caplog.at_level("INFO", logger="hone.node.ai"):
+        ai.call_claude(_CliCfg(), "s", "u")
+    msgs = "\n".join(r.getMessage() for r in caplog.records)
+    assert "drivers/net/foo.c" in msgs                 # tool target shown
+    assert "Let me read the changed file" in msgs      # text snippet shown
 
 
 def test_cli_backend_translates_auth_stderr_to_auth_error(monkeypatch):
     """A `claude` CLI non-zero exit whose stderr mentions credentials /
        login surfaces as CallClaudeAuthError so the runner's existing
        config-fatal exit path triggers cleanly."""
-    _patch_run(monkeypatch, returncode=1,
-                stderr="Error: Please run `claude` to log in.")
+    _patch_popen(monkeypatch, returncode=1,
+                 stderr="Error: Please run `claude` to log in.")
     with pytest.raises(ai.CallClaudeAuthError) as ei:
         ai.call_claude(_CliCfg(), "s", "u")
     assert "claude" in str(ei.value).lower()
@@ -409,8 +485,8 @@ def test_cli_backend_classifies_rate_limit_for_health(monkeypatch):
     """A `rate limit` stderr → _LAST_ERROR='rate_limit' (and a generic
        RuntimeError raised, since rate-limit is recoverable via
        backoff but isn't auth-fatal)."""
-    _patch_run(monkeypatch, returncode=1,
-                stderr="Error: rate limit exceeded; retry later")
+    _patch_popen(monkeypatch, returncode=1,
+                 stderr="Error: rate limit exceeded; retry later")
     with pytest.raises(RuntimeError):
         ai.call_claude(_CliCfg(), "s", "u")
     assert ai.get_last_error() == "rate_limit"
@@ -420,7 +496,7 @@ def test_cli_backend_handles_missing_binary(monkeypatch):
     """If the `claude` binary isn't in PATH (Dockerfile built without
        the CLI layer), surface the operator-facing message — same
        shape as a wrong API key."""
-    _patch_run(monkeypatch, file_not_found=True)
+    _patch_popen(monkeypatch, file_not_found=True)
     with pytest.raises(ai.CallClaudeAuthError) as ei:
         ai.call_claude(_CliCfg(), "s", "u")
     assert "claude" in str(ei.value)
@@ -428,22 +504,20 @@ def test_cli_backend_handles_missing_binary(monkeypatch):
     assert ai.get_last_error() == "auth"
 
 
-def test_cli_backend_handles_unparseable_envelope(monkeypatch):
-    """If the CLI's stdout isn't a JSON object (e.g. it crashed
-       mid-emit), bail with a clear RuntimeError rather than an
-       opaque ValueError from the JSON decode."""
-    _patch_run(monkeypatch, returncode=0, stdout="not json at all")
-    with pytest.raises(RuntimeError, match="unparseable JSON"):
+def test_cli_backend_errors_when_stream_has_no_result(monkeypatch):
+    """A clean exit whose stream never carried a `result` event (the CLI
+       crashed mid-stream) bails with a clear RuntimeError."""
+    _patch_popen(monkeypatch, returncode=0,
+                 events=[_init_event(), _assistant_text_event()])
+    with pytest.raises(RuntimeError, match="without a result event"):
         ai.call_claude(_CliCfg(), "s", "u")
     assert ai.get_last_error() == "other"
 
 
-def test_cli_backend_handles_error_envelope(monkeypatch):
-    """A returncode=0 with an is_error=true envelope (which the CLI
-       can emit on internal failures) raises rather than returning
-       the assistant text."""
-    env = _envelope(is_error=True)
-    _patch_run(monkeypatch, returncode=0, stdout=json.dumps(env))
-    with pytest.raises(RuntimeError, match="error envelope"):
+def test_cli_backend_handles_error_result(monkeypatch):
+    """A `result` event with is_error=true (CLI internal failure) raises
+       rather than returning the assistant text."""
+    _patch_popen(monkeypatch, returncode=0, events=[_envelope(is_error=True)])
+    with pytest.raises(RuntimeError, match="error result"):
         ai.call_claude(_CliCfg(), "s", "u")
     assert ai.get_last_error() == "other"

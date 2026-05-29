@@ -138,6 +138,10 @@ def call_claude(cfg, system, user_text, *, model=None,
            "text":  the assistant text (markdown fences stripped),
            "model": the model identifier actually used,
            "usage": {"input_tokens", "output_tokens", "duration_ms"},
+           "trace": ordered [{"step": ...}] of the turn's assistant text,
+                    tool_use, and tool_result steps — for hone-core to
+                    persist + present (CLI streams the real steps; the SDK
+                    path is a single assistant_text step).
          }
 
        Auth failures are translated to `CallClaudeAuthError` regardless
@@ -205,7 +209,11 @@ def _call_claude_sdk(cfg, system, user_text, *, model, max_tokens):
              "model": chosen,
              "usage": {"input_tokens":  input_total,
                        "output_tokens": resp.usage.output_tokens,
-                       "duration_ms":   duration_ms}}
+                       "duration_ms":   duration_ms},
+             # No tools / streaming on the SDK path (single completion) — the
+             # trace is just the one assistant turn, for shape parity with
+             # the CLI path so downstream can treat them uniformly.
+             "trace": [{"step": "assistant_text", "text": text}]}
 
 
 # Markers in `claude` CLI stderr that classify the failure for the
@@ -238,38 +246,109 @@ def _classify_cli_stderr(stderr):
 _CLI_TIMEOUT_SECONDS = 600
 
 
+def _parse_event(line):
+    """One stream-json line → a dict, or None for blank / non-JSON lines
+       (the CLI occasionally interleaves a stray non-event line; ignore it
+       rather than abort the turn)."""
+    line = line.strip()
+    if not line:
+        return None
+    try:
+        return json.loads(line)
+    except ValueError:
+        return None
+
+
+# Input keys, in priority order, that name what a tool acted on — used to
+# put the target (file / pattern / command) on the INFO tool_use line.
+_TOOL_INPUT_KEYS = ("file_path", "path", "pattern", "command", "query", "url")
+
+
+def _tool_summary(tool_input):
+    """A short representative value from a tool_use's input for the log
+       line — the file path / pattern / command, whichever is present."""
+    if not isinstance(tool_input, dict):
+        return ""
+    for key in _TOOL_INPUT_KEYS:
+        val = tool_input.get(key)
+        if val:
+            return str(val)[:80]
+    return ""
+
+
+def _trace_assistant(ev, trace):
+    """Log + record an `assistant` event's text and tool_use blocks. The
+       INFO lines carry a short text snippet and the tool's target so a
+       console viewer sees WHAT Claude is doing; the full text + tool input
+       ride in `trace` (and the full result at DEBUG). Each block becomes
+       one ordered `trace` step (assistant_text / tool_use) for hone-core to
+       persist + show."""
+    for block in (ev.get("message") or {}).get("content", []):
+        btype = block.get("type")
+        if btype == "text":
+            text = block.get("text", "")
+            snippet = " ".join(text.split())     # collapse newlines/runs
+            shown = snippet[:80] + ("…" if len(snippet) > 80 else "")
+            log.info('claude CLI ‹ assistant: "%s" (%d chars)',
+                     shown, len(text))
+            trace.append({"step": "assistant_text", "text": text})
+        elif btype == "tool_use":
+            name = block.get("name")
+            summary = _tool_summary(block.get("input"))
+            log.info("claude CLI ‹ assistant: tool_use %s%s",
+                     name, f" {summary}" if summary else "")
+            trace.append({"step": "tool_use", "id": block.get("id"),
+                          "name": name, "input": block.get("input")})
+
+
+def _trace_tool_results(ev, trace):
+    """Record a `user` event's tool_result blocks — size only, not the full
+       content (a Read of a big file would bloat the record)."""
+    for block in (ev.get("message") or {}).get("content", []):
+        if block.get("type") == "tool_result":
+            content = block.get("content")
+            trace.append({"step": "tool_result",
+                          "id": block.get("tool_use_id"),
+                          "chars": len(content) if isinstance(content, str)
+                                   else None})
+
+
 def _call_claude_cli(cfg, system, user_text, *, model):
     """`claude` CLI subprocess path — uses the OAuth session in
-       $HOME/.claude rather than ANTHROPIC_API_KEY. Pipes user_text
-       through stdin (avoids the ARG_MAX cap on multi-thousand-line
-       prompts); system prompt goes through `--system-prompt`;
-       `--output-format json` gives us a structured envelope to parse.
+       $HOME/.claude rather than ANTHROPIC_API_KEY. Pipes user_text through
+       stdin (avoids the ARG_MAX cap on multi-thousand-line prompts); the
+       system prompt goes through `--system-prompt`.
 
-       The CLI's stderr is the only auth-state signal we have — the
-       process exits non-zero with a message like "Please run `claude`
-       to log in." We classify that into the same category vocabulary
-       the SDK path uses so the health snapshot stays uniform across
-       backends."""
+       Streams `--output-format stream-json --verbose`: the CLI emits one
+       JSON event per line as the turn unfolds (session init, assistant
+       text, tool_use, tool_result, then a final `result`). We read them as
+       they arrive — logging each step so a console viewer can follow what
+       Claude is doing, and building a `trace` of assistant messages + tool
+       uses for hone-core to persist and present. The final `result` event
+       carries the answer text + token usage.
+
+       A watchdog thread emits a 'still working' heartbeat between events
+       (covering a stall mid-tool-run or mid-think) AND enforces
+       _CLI_TIMEOUT_SECONDS — Popen has no built-in timeout and the stdout
+       read blocks until the CLI closes the pipe. stderr is drained on its
+       own thread (a chatty CLI mustn't deadlock on a full pipe) and is the
+       auth-state signal: a non-zero exit with a message like 'Please run
+       `claude` to log in', classified into the SDK path's category
+       vocabulary."""
     chosen = model or DEFAULT_MODEL
-    cmd = ["claude", "-p", "--output-format", "json",
+    cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose",
            "--system-prompt", system]
     if chosen:
         cmd += ["--model", chosen]
-    # INFO-level send/receive lines mirror what httpx auto-logs for the
-    # SDK path — without them the CLI backend would be invisible in
-    # `docker logs`. Lengths only; the full prompts ride at DEBUG so
-    # operators can opt in to verbose tracing without flooding the
-    # default log.
-    log.info("claude CLI → model=%s system=%d user=%d chars",
+    log.info("claude CLI → model=%s system=%d user=%d chars (stream)",
               chosen, len(system), len(user_text))
     log.debug("claude CLI → system: %s", system)
     log.debug("claude CLI → user:   %s", user_text)
     started = time.monotonic()
     try:
-        with _heartbeat("claude CLI", started):
-            r = subprocess.run(cmd, input=user_text,
-                               capture_output=True, text=True,
-                               timeout=_CLI_TIMEOUT_SECONDS)
+        proc = subprocess.Popen(
+            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True)
     except FileNotFoundError:
         # `claude` binary isn't in PATH. This is configuration-fatal —
         # same operator-feedback shape as a wrong API key.
@@ -279,18 +358,71 @@ def _call_claude_cli(cfg, system, user_text, *, model):
             "Either install @anthropic-ai/claude-code in the container "
             "image, or switch HONE_CLAUDE_BACKEND back to sdk."
         ) from None
-    except subprocess.TimeoutExpired:
+
+    done = threading.Event()
+    timed_out = threading.Event()
+
+    def watchdog():
+        while not done.wait(_HEARTBEAT_SECONDS):
+            if time.monotonic() - started >= _CLI_TIMEOUT_SECONDS:
+                timed_out.set()
+                proc.kill()
+                return
+            log.info("claude CLI … still working (%.0fs elapsed)",
+                     time.monotonic() - started)
+
+    stderr_chunks = []
+
+    def drain_stderr():
+        for chunk in proc.stderr:
+            stderr_chunks.append(chunk)
+
+    threading.Thread(target=watchdog, name="claude-cli-watchdog",
+                     daemon=True).start()
+    threading.Thread(target=drain_stderr, name="claude-cli-stderr",
+                     daemon=True).start()
+
+    trace, result_event, model_used = [], None, chosen
+    try:
+        try:
+            proc.stdin.write(user_text)
+            proc.stdin.close()
+        except BrokenPipeError:
+            pass                            # process already exited; rc/stderr
+                                            # below explain why
+        for line in proc.stdout:
+            ev = _parse_event(line)
+            if ev is None:
+                continue
+            etype = ev.get("type")
+            if etype == "system" and ev.get("subtype") == "init":
+                model_used = ev.get("model") or model_used
+                log.info("claude CLI ‹ session %s — model %s, %d tool(s)",
+                          (ev.get("session_id") or "?")[:8],
+                          ev.get("model"), len(ev.get("tools") or []))
+            elif etype == "assistant":
+                model_used = (ev.get("message") or {}).get("model") or model_used
+                _trace_assistant(ev, trace)
+            elif etype == "user":
+                _trace_tool_results(ev, trace)
+            elif etype == "result":
+                result_event = ev
+        rc = proc.wait()
+    finally:
+        done.set()                          # stop the watchdog
+    duration_ms = int((time.monotonic() - started) * 1000)
+
+    if timed_out.is_set():
         _record_outcome("connection")
         raise RuntimeError(
             f"`claude` CLI timed out after {_CLI_TIMEOUT_SECONDS}s "
             "— the subprocess was wedged.") from None
-    duration_ms = int((time.monotonic() - started) * 1000)
-
-    if r.returncode != 0:
-        category = _classify_cli_stderr(r.stderr)
+    stderr = "".join(stderr_chunks)
+    if rc != 0:
+        category = _classify_cli_stderr(stderr)
         log.warning("claude CLI ← exit=%d category=%s in %.1fs: %s",
-                     r.returncode, category, duration_ms / 1000,
-                     (r.stderr or "").strip()[:200])
+                     rc, category, duration_ms / 1000,
+                     stderr.strip()[:200])
         _record_outcome(category)
         if category == "auth":
             raise CallClaudeAuthError(
@@ -299,24 +431,19 @@ def _call_claude_cli(cfg, system, user_text, *, model):
                 "the container's $HOME/.claude mount is read-write."
             ) from None
         raise RuntimeError(
-            f"`claude` CLI failed ({r.returncode}): "
-            f"{(r.stderr or '').strip()[:500]}")
-
-    try:
-        env = json.loads(r.stdout)
-    except (ValueError, TypeError):
+            f"`claude` CLI failed ({rc}): {stderr.strip()[:500]}")
+    if result_event is None:
         _record_outcome("other")
         raise RuntimeError(
-            f"`claude` CLI returned unparseable JSON envelope: "
-            f"{r.stdout[:500]!r}") from None
-    if env.get("is_error") or env.get("type") != "result":
+            "`claude` CLI stream ended without a result event")
+    if result_event.get("is_error") or result_event.get("subtype") != "success":
         _record_outcome("other")
         raise RuntimeError(
-            f"`claude` CLI returned an error envelope: {env!r}")
+            f"`claude` CLI returned an error result: {result_event!r}")
 
     _record_outcome(None)
-    usage = env.get("usage") or {}
-    result_text = _strip_fences(env.get("result", ""))
+    usage = result_event.get("usage") or {}
+    result_text = _strip_fences(result_event.get("result", ""))
     # The CLI's `input_tokens` is the *non-cached* portion only; cached
     # portions are reported separately. Sum all three so `input_tokens`
     # downstream reflects what Claude actually processed (otherwise a
@@ -328,15 +455,16 @@ def _call_claude_cli(cfg, system, user_text, *, model):
     input_uncached = usage.get("input_tokens")                or 0
     input_total    = input_uncached + cache_read + cache_creation
     log.info("claude CLI ← in=%d (uncached=%d cache_read=%d cache_new=%d) "
-             "out=%s tokens, %.1fs",
+             "out=%s tokens, %.1fs, %d trace step(s)",
               input_total, input_uncached, cache_read, cache_creation,
-              usage.get("output_tokens"), duration_ms / 1000)
+              usage.get("output_tokens"), duration_ms / 1000, len(trace))
     log.debug("claude CLI ← result: %s", result_text)
     return {"text":  result_text,
-             "model": env.get("model") or chosen,
+             "model": result_event.get("model") or model_used,
              "usage": {"input_tokens":  input_total,
                        "output_tokens": usage.get("output_tokens"),
-                       "duration_ms":   duration_ms}}
+                       "duration_ms":   duration_ms},
+             "trace": trace}
 
 
 def parse_json_response(text):

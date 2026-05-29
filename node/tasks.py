@@ -36,6 +36,32 @@ _PREPARE_FIELDS = ("patchset_id", "tree_state", "subsystem", "patch_size",
 # length is also recorded so the truncation point is obvious.
 _RAW_RESPONSE_CAP = 20000
 
+# Cap on the per-call assistant/tool trace (node.ai builds it from the
+# streamed Claude turn) attached to a record's meta.trace. It's telemetry
+# for the web UI, not authoritative data, so keep it bounded: a step
+# ceiling plus a per-text truncation, preserving each assistant_text's
+# original length as `chars` so the UI can still show "(N chars)".
+_TRACE_MAX_STEPS = 50
+_TRACE_TEXT_CAP = 2000
+
+
+def _cap_trace(trace):
+    """Bound a call's trace for storage in the completion record's meta —
+       cap the step count, and truncate each assistant_text to
+       _TRACE_TEXT_CAP (recording the pre-truncation length in `chars`).
+       tool_use / tool_result steps are already small. Returns a list
+       (empty when the backend produced no trace)."""
+    capped = []
+    for step in (trace or [])[:_TRACE_MAX_STEPS]:
+        s = dict(step)
+        if s.get("step") == "assistant_text":
+            text = s.get("text") or ""
+            s["chars"] = len(text)
+            if len(text) > _TRACE_TEXT_CAP:
+                s["text"] = text[:_TRACE_TEXT_CAP]
+        capped.append(s)
+    return capped
+
 
 def _worker_id(cfg: Config) -> str:
     """The worker_id every completion record carries. The node-name from
@@ -214,8 +240,11 @@ def handle_prepare_task(cfg: Config, client: HoneCoreClient,
               "worker_id": _worker_id(cfg),
               "model":     response["model"],
               "usage":     response["usage"]}
-    resolver_meta = {"deterministic_resolver_version":
-                      det["resolver_version"]}
+    # resolver_meta rides on both the prepared and the uncharacterisable
+    # record (the trace is just as useful — more so — when the JSON didn't
+    # parse, since it shows what Claude actually did).
+    resolver_meta = {"deterministic_resolver_version": det["resolver_version"],
+                     "trace": _cap_trace(response.get("trace"))}
     try:
         body = ai.parse_json_response(response["text"])
     except ValueError as exc:

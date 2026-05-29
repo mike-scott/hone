@@ -169,18 +169,23 @@ _STUB_PREPARE_BODY = {
 }
 
 
-def _fake_call_claude(response_text):
+def _fake_call_claude(response_text, *, trace=None):
     """A node.ai.call_claude replacement that captures the (system, user)
-       prompts the handler built and returns a canned response."""
+       prompts the handler built and returns a canned response. `trace`,
+       when given, is included in the response the way the streaming CLI
+       path returns it."""
     calls = []
     def _stub(cfg, system, user_text, *, model=None, max_tokens=None):
         calls.append({"system": system, "user_text": user_text,
                        "model": model, "max_tokens": max_tokens})
-        return {"text":  response_text,
-                "model": "claude-opus-4-7",
-                "usage": {"input_tokens": 1000,
-                          "output_tokens": 200,
-                          "duration_ms": 5000}}
+        out = {"text":  response_text,
+               "model": "claude-opus-4-7",
+               "usage": {"input_tokens": 1000,
+                         "output_tokens": 200,
+                         "duration_ms": 5000}}
+        if trace is not None:
+            out["trace"] = trace
+        return out
     return _stub, calls
 
 
@@ -274,6 +279,9 @@ def test_prepare_handler_falls_back_to_uncharacterisable_on_bad_json(monkeypatch
     assert record["meta"]["raw_response"] == raw
     assert record["meta"]["raw_response_length"] == len(raw)
     assert record["meta"]["raw_response_truncated"] is False
+    # the trace rides on the uncharacterisable record too (here empty —
+    # the stub returned no trace)
+    assert record["meta"]["trace"] == []
     _validate_record(record)
 
 
@@ -334,6 +342,28 @@ def test_prepare_runs_deterministic_phase_with_no_trailer_offline(monkeypatch):
     assert record["subsystem"]["source"] == "thread"
     assert record["meta"]["deterministic_resolver_version"] == \
         tier0.RESOLVER_VERSION
+    _validate_record(record)
+
+
+def test_prepare_record_carries_a_capped_claude_trace(monkeypatch):
+    """The streamed assistant/tool trace is lifted into meta.trace, capped:
+       each assistant_text truncated to the cap with its original length
+       kept in `chars`. The record (with the trace) is schema-valid."""
+    trace = [{"step": "assistant_text", "text": "x" * 5000},
+             {"step": "tool_use", "id": "t1", "name": "Read",
+              "input": {"file_path": "drivers/net/foo.c"}},
+             {"step": "tool_result", "id": "t1", "chars": 3210}]
+    stub, _calls = _fake_call_claude(json.dumps(_STUB_PREPARE_BODY),
+                                     trace=trace)
+    monkeypatch.setattr("node.ai.call_claude", stub)
+    record = tasks.handle_prepare_task(_cfg(), None, _PREPARE_CLAIM)
+    t = record["meta"]["trace"]
+    assert [s["step"] for s in t] == ["assistant_text", "tool_use",
+                                      "tool_result"]
+    assert len(t[0]["text"]) == tasks._TRACE_TEXT_CAP   # truncated
+    assert t[0]["chars"] == 5000                        # original length kept
+    assert t[1]["name"] == "Read"
+    assert t[1]["input"]["file_path"] == "drivers/net/foo.c"
     _validate_record(record)
 
 

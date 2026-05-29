@@ -89,8 +89,37 @@ $defs:
     type: object
     description: >-
       Free-form node-reported metadata (provider, prompt hashes, cache
-      token counts, etc.). hone-core stores it verbatim alongside the
-      decomposed record.
+      token counts, the deterministic resolver version, a raw_response on
+      failure, etc.). hone-core stores it verbatim alongside the decomposed
+      record. Stays open (no additionalProperties:false) so the node can
+      attach new keys without a schema bump; `trace` is the one shaped key,
+      validated when present.
+    properties:
+      trace:
+        type: array
+        description: >-
+          Ordered record of the Claude turn — assistant text, tool uses,
+          and tool results — for later presentation in the web UI.
+          Telemetry, not authoritative data; the node caps it
+          (node/tasks._cap_trace): a step ceiling, and each assistant_text
+          truncated with its original length kept in `chars`.
+        items:
+          type: object
+          additionalProperties: false
+          required: [step]
+          properties:
+            step:
+              type: string
+              enum: [assistant_text, tool_use, tool_result]
+            text:  { type: string }       # assistant_text (possibly capped)
+            name:  { type: string }       # tool_use
+            input: { type: object }       # tool_use args (opaque)
+            id:    { type: string }       # tool_use / tool_result correlation
+            chars:                         # assistant_text orig len / result size
+              oneOf:
+                - type: "null"
+                - type: integer
+                  minimum: 0
 
   # =====================================================================
   # Self-review record (shared across success-path outcomes)
