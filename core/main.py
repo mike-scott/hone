@@ -11,7 +11,7 @@ import os
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from core import api, core_db, gather, runtime_config, tls, ui
@@ -224,7 +224,11 @@ def create_app() -> FastAPI:
     app.state.config = Config.from_env()
 
     app.include_router(api.router)   # /v1/* — the node-facing REST API
-    app.include_router(ui.router)    # the operator web UI
+    # The operator web UI is gated by HTTP Basic auth (HONE_ADMIN_TOKEN as the
+    # password) — it exposes the corpus + admin actions (enrollment approval,
+    # gather, settings) and must never be open to the internet. /v1/* keeps
+    # its own fleet-secret/bearer gates; /healthz + /static stay open.
+    app.include_router(ui.router, dependencies=[Depends(api.require_ui_auth)])
     app.mount("/static",
               StaticFiles(directory=os.path.join(_HERE, "static")),
               name="static")
