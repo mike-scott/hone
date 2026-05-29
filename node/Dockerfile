@@ -114,7 +114,8 @@ ENV HOME=/home/hone \
     HONE_DATA=/data \
     HONE_REPO_DIR=/data/linux \
     HONE_SCRATCH_DIR=/data/scratch \
-    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
+    DISABLE_TELEMETRY=1
 VOLUME ["/data"]
 
 # No EXPOSE and no HEALTHCHECK: the node serves nothing and only dials out.
