@@ -10,3 +10,7 @@ docker-compose.override.yml
 
 # Ignore .claude settings
 .claude
+
+# hone-core DB/identity backups produced by core/scripts/backup.sh —
+# local operational artifacts, never committed.
+core/backups/
