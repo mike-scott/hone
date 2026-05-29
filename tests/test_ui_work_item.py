@@ -162,6 +162,51 @@ def test_work_item_detail_surfaces_meta_schema_error(ctx):
     assert "maintainer/mailing_lists/0" in body
 
 
+def test_work_item_detail_renders_agent_messages_trace(ctx):
+    """A record whose meta carries the captured Claude turn (meta.trace)
+       renders an 'Agent messages' section — assistant text, tool uses
+       (with a target from the tool input), and tool results."""
+    _plant_patchset(ctx.db)
+    wid = core_db.enqueue_review(ctx.db, "<r1@x>")
+    claim = core_db.claim_work_item(
+        ctx.db, "builder-7", methodology_version=1,
+        types=(core_db.WORK_ITEM_TYPE_REVIEW,))
+    core_db.submit_work_result(
+        ctx.db, claim["claim_id"],
+        state=core_db.WORK_ITEM_STATE_COMPLETED,
+        record={"outcome": "reviewed", "concerns": [],
+                "meta": {"trace": [
+                    {"step": "assistant_text",
+                     "text": "Reading the driver to confirm the base.",
+                     "chars": 39},
+                    {"step": "tool_use", "name": "Read",
+                     "input": {"file_path": "drivers/net/foo.c"}},
+                    {"step": "tool_result", "chars": 3210}]}})
+    body = ctx.client.get(f"/work-items/{wid}").text
+    assert "Agent messages" in body
+    assert "Reading the driver to confirm the base." in body
+    assert "Read" in body
+    assert "drivers/net/foo.c" in body
+    assert "3210 chars" in body
+
+
+def test_work_item_detail_omits_agent_messages_when_no_trace(ctx):
+    """No meta.trace → the 'Agent messages' section is absent (the page
+       still renders the completion record)."""
+    _plant_patchset(ctx.db)
+    wid = core_db.enqueue_review(ctx.db, "<r1@x>")
+    claim = core_db.claim_work_item(
+        ctx.db, "builder-7", methodology_version=1,
+        types=(core_db.WORK_ITEM_TYPE_REVIEW,))
+    core_db.submit_work_result(
+        ctx.db, claim["claim_id"],
+        state=core_db.WORK_ITEM_STATE_COMPLETED,
+        record={"outcome": "reviewed", "concerns": []})
+    body = ctx.client.get(f"/work-items/{wid}").text
+    assert "Agent messages" not in body
+    assert "Full JSON record" in body
+
+
 def test_work_item_detail_404_for_unknown_id(ctx):
     r = ctx.client.get("/work-items/99999")
     assert r.status_code == 404

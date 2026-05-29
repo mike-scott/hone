@@ -139,6 +139,38 @@
 </details>
 {% endif %}
 
+{% if meta_trace %}
+<details class="mb-3">
+  <summary>Agent messages <span class="text-muted">({{ meta_trace|length }}
+    step{{ '' if meta_trace|length == 1 else 's' }})</span></summary>
+  <div class="mt-2" style="max-height: 40rem; overflow: auto;">
+    {% for step in meta_trace %}
+      {% if step.step == "assistant_text" %}
+      <div class="mb-2">
+        <span class="badge text-bg-secondary me-1">assistant</span>
+        <span class="text-muted small">{{ step.chars or (step.text or "")|length }} chars</span>
+        <pre class="small bg-body-tertiary p-2 rounded mt-1 mb-0"
+             style="white-space: pre-wrap;">{{ step.text }}</pre>
+      </div>
+      {% elif step.step == "tool_use" %}
+      <div class="mb-2">
+        <span class="badge text-bg-info me-1"><i class="bi bi-wrench me-1"></i>{{ step.name }}</span>
+        {% set arg = (step.input or {}).get("file_path")
+                     or (step.input or {}).get("command")
+                     or (step.input or {}).get("pattern") %}
+        {% if arg %}<code class="small text-break">{{ arg }}</code>{% endif %}
+      </div>
+      {% elif step.step == "tool_result" %}
+      <div class="mb-2 text-muted small">
+        <i class="bi bi-arrow-return-right me-1"></i>result
+        {% if step.chars is not none %}({{ step.chars }} chars){% endif %}
+      </div>
+      {% endif %}
+    {% endfor %}
+  </div>
+</details>
+{% endif %}
+
 <details>
   <summary>Full JSON record</summary>
   <pre class="small bg-body-tertiary p-2 rounded mt-2"
