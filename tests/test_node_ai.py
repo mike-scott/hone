@@ -317,6 +317,24 @@ def test_cli_backend_runs_claude_with_the_right_cmdline(monkeypatch):
     assert "USER-MESSAGE" not in cmd
 
 
+def test_cli_backend_gates_tools(monkeypatch):
+    """tools=[] passes an empty --allowedTools (no tools); a list passes the
+       names; tools=None leaves the flag off (CLI default)."""
+    state = _patch_popen(monkeypatch, events=[_envelope()])
+    ai.call_claude(_CliCfg(), "s", "u", tools=[])
+    cmd = state["cmd"]
+    assert cmd[cmd.index("--allowedTools") + 1] == ""      # empty → no tools
+
+    state = _patch_popen(monkeypatch, events=[_envelope()])
+    ai.call_claude(_CliCfg(), "s", "u", tools=["Read", "Grep"])
+    cmd = state["cmd"]
+    assert cmd[cmd.index("--allowedTools") + 1] == "Read,Grep"
+
+    state = _patch_popen(monkeypatch, events=[_envelope()])
+    ai.call_claude(_CliCfg(), "s", "u")                    # tools=None default
+    assert "--allowedTools" not in state["cmd"]
+
+
 def test_cli_backend_logs_a_heartbeat_while_claude_thinks(monkeypatch, caplog):
     """A turn that outlasts the heartbeat interval (here, a stall before the
        events arrive) emits 'still working' elapsed-time lines so a console

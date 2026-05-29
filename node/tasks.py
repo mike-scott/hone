@@ -235,7 +235,11 @@ def handle_prepare_task(cfg: Config, client: HoneCoreClient,
     det = _run_deterministic(cfg, claim)
     system = _build_prepare_system(claim)
     user_text = _build_prepare_user_text(claim)
-    response = ai.call_claude(cfg, system, user_text)
+    # prepare is a tree-free text→JSON characterisation: Tier-0 (above) owns
+    # every tree-dependent field, so the model needs no tools. tools=[] bars
+    # the CLI from running Bash/git — stops it probing for a kernel tree
+    # (which the legacy prompt still nudges it to do) regardless of prompt.
+    response = ai.call_claude(cfg, system, user_text, tools=[])
     header = {"task_type": "prepare",
               "worker_id": _worker_id(cfg),
               "model":     response["model"],

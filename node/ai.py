@@ -124,7 +124,7 @@ def _heartbeat(label, started):
 
 
 def call_claude(cfg, system, user_text, *, model=None,
-                max_tokens=DEFAULT_MAX_TOKENS):
+                max_tokens=DEFAULT_MAX_TOKENS, tools=None):
     """Call Claude and return the response, dispatching on
        cfg.claude_backend:
 
@@ -132,6 +132,13 @@ def call_claude(cfg, system, user_text, *, model=None,
          - "cli": subprocess the `claude` CLI binary (uses the OAuth
                   session under $HOME/.claude — for Claude Code
                   subscribers without API billing)
+
+       `tools` gates the CLI's tool access (the SDK path has no tools
+       regardless): None leaves the CLI's tools at their default; a list
+       restricts them to exactly those names — an empty list `[]` means NO
+       tools, which is how the (tree-free) prepare task keeps the model from
+       running Bash/git to probe for a kernel tree. This is enforced by the
+       CLI, independent of what the prompt says.
 
        Both backends return the same shape:
          {
@@ -150,7 +157,8 @@ def call_claude(cfg, system, user_text, *, model=None,
        health snapshot picks up the category."""
     resolved = model or cfg.anthropic_model or None
     if cfg.claude_backend == "cli":
-        return _call_claude_cli(cfg, system, user_text, model=resolved)
+        return _call_claude_cli(cfg, system, user_text, model=resolved,
+                                tools=tools)
     return _call_claude_sdk(cfg, system, user_text, model=resolved,
                              max_tokens=max_tokens)
 
@@ -313,11 +321,17 @@ def _trace_tool_results(ev, trace):
                                    else None})
 
 
-def _call_claude_cli(cfg, system, user_text, *, model):
+def _call_claude_cli(cfg, system, user_text, *, model, tools=None):
     """`claude` CLI subprocess path — uses the OAuth session in
        $HOME/.claude rather than ANTHROPIC_API_KEY. Pipes user_text through
        stdin (avoids the ARG_MAX cap on multi-thousand-line prompts); the
        system prompt goes through `--system-prompt`.
+
+       `tools` gates tool access: None leaves the default; a list passes
+       `--allowedTools <names>`, and an empty list passes an empty allowlist
+       — no tools. prepare uses `[]` so the model can't run Bash/git to hunt
+       for a kernel tree (it has none; Tier-0 owns the tree-dependent
+       fields), regardless of what the prompt says.
 
        Streams `--output-format stream-json --verbose`: the CLI emits one
        JSON event per line as the turn unfolds (session init, assistant
@@ -338,10 +352,13 @@ def _call_claude_cli(cfg, system, user_text, *, model):
     chosen = model or DEFAULT_MODEL
     cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose",
            "--system-prompt", system]
+    if tools is not None:
+        cmd += ["--allowedTools", ",".join(tools)]   # [] → "" → no tools
     if chosen:
         cmd += ["--model", chosen]
-    log.info("claude CLI → model=%s system=%d user=%d chars (stream)",
-              chosen, len(system), len(user_text))
+    log.info("claude CLI → model=%s system=%d user=%d chars tools=%s (stream)",
+              chosen, len(system), len(user_text),
+              "default" if tools is None else (tools or "none"))
     log.debug("claude CLI → system: %s", system)
     log.debug("claude CLI → user:   %s", user_text)
     started = time.monotonic()

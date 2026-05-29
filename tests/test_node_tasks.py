@@ -175,9 +175,11 @@ def _fake_call_claude(response_text, *, trace=None):
        when given, is included in the response the way the streaming CLI
        path returns it."""
     calls = []
-    def _stub(cfg, system, user_text, *, model=None, max_tokens=None):
+    def _stub(cfg, system, user_text, *, model=None, max_tokens=None,
+              tools=None):
         calls.append({"system": system, "user_text": user_text,
-                       "model": model, "max_tokens": max_tokens})
+                       "model": model, "max_tokens": max_tokens,
+                       "tools": tools})
         out = {"text":  response_text,
                "model": "claude-opus-4-7",
                "usage": {"input_tokens": 1000,
@@ -343,6 +345,15 @@ def test_prepare_runs_deterministic_phase_with_no_trailer_offline(monkeypatch):
     assert record["meta"]["deterministic_resolver_version"] == \
         tier0.RESOLVER_VERSION
     _validate_record(record)
+
+
+def test_prepare_calls_claude_with_no_tools(monkeypatch):
+    """prepare is tree-free, so it must gate the CLI to no tools (tools=[])
+       — the model can't run Bash/git to probe for a kernel tree."""
+    stub, calls = _fake_call_claude(json.dumps(_STUB_PREPARE_BODY))
+    monkeypatch.setattr("node.ai.call_claude", stub)
+    tasks.handle_prepare_task(_cfg(), None, _PREPARE_CLAIM)
+    assert calls[0]["tools"] == []
 
 
 def test_prepare_record_carries_a_capped_claude_trace(monkeypatch):
