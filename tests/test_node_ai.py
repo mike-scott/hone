@@ -271,6 +271,62 @@ def test_cli_backend_runs_claude_with_the_right_cmdline(monkeypatch):
     assert "USER-MESSAGE" not in cmd
 
 
+def test_cli_backend_logs_a_heartbeat_while_claude_thinks(monkeypatch, caplog):
+    """A turn that outlasts the heartbeat interval emits 'still working'
+       elapsed-time lines so a console viewer isn't staring at a frozen log
+       while the (silent, capture-mode) CLI runs."""
+    import time as _t
+    monkeypatch.setattr(ai, "_HEARTBEAT_SECONDS", 0.02)
+
+    def slow_run(cmd, input=None, capture_output=False, text=False,
+                 timeout=None):
+        _t.sleep(0.1)                         # ~5 heartbeat intervals
+        return SimpleNamespace(returncode=0, stdout=json.dumps(_envelope()),
+                               stderr="")
+
+    monkeypatch.setattr("node.ai.subprocess.run", slow_run)
+    with caplog.at_level("INFO", logger="hone.node.ai"):
+        ai.call_claude(_CliCfg(), "SYS", "USER")
+    assert any("still working" in r.message for r in caplog.records)
+
+
+def test_cli_backend_no_heartbeat_for_a_fast_call(monkeypatch, caplog):
+    """A turn shorter than the interval logs no heartbeat — the watchdog
+       only fires for genuinely slow calls."""
+    _patch_run(monkeypatch, stdout=json.dumps(_envelope()), returncode=0)
+    with caplog.at_level("INFO", logger="hone.node.ai"):
+        ai.call_claude(_CliCfg(), "SYS", "USER")
+    assert not any("still working" in r.message for r in caplog.records)
+
+
+def test_sdk_backend_logs_a_heartbeat_while_claude_thinks(monkeypatch, caplog):
+    """The SDK path blocks on one HTTPS call, also silent — so it gets the
+       same elapsed-time heartbeat when the turn outlasts the interval."""
+    import time as _t
+    import anthropic
+    monkeypatch.setattr(ai, "_HEARTBEAT_SECONDS", 0.02)
+
+    class _SlowMessages:
+        def create(self, **kw):
+            _t.sleep(0.1)
+            return SimpleNamespace(
+                content=[SimpleNamespace(type="text", text="ok")],
+                usage=SimpleNamespace(input_tokens=10, output_tokens=5,
+                                      cache_read_input_tokens=0,
+                                      cache_creation_input_tokens=0))
+
+    class _SlowClient:
+        def __init__(self, **kw): pass
+        @property
+        def messages(self): return _SlowMessages()
+
+    monkeypatch.setattr(anthropic, "Anthropic", _SlowClient)
+    with caplog.at_level("INFO", logger="hone.node.ai"):
+        out = ai.call_claude(SimpleNamespaceCfg(), "SYS", "USER")
+    assert out["text"] == "ok"
+    assert any("still working" in r.message for r in caplog.records)
+
+
 def test_cli_backend_sums_cache_tokens_into_input_tokens(monkeypatch):
     """The CLI envelope's `input_tokens` is the *non-cached* portion
        only. cache_creation_input_tokens (first-write to cache) and

@@ -16,10 +16,12 @@ Why a thin wrapper instead of calling the SDK from each handler:
     in the Anthropic client at module-load time — useful in tests
     and in dry-run / `--help` style invocations.
 """
+import contextlib
 import json
 import logging
 import re
 import subprocess
+import threading
 import time
 
 log = logging.getLogger("hone.node.ai")
@@ -93,6 +95,34 @@ def _strip_fences(text):
     return m.group(1) if m else text
 
 
+# How often to log a "still working" heartbeat while a Claude call runs.
+# Both backends are silent for the whole turn — the CLI captures (doesn't
+# stream) its output, and the SDK blocks on one HTTPS call — so without
+# this a console viewer sees a frozen log while Claude thinks. A periodic
+# elapsed-time line shows the node is alive and how long it's been going.
+_HEARTBEAT_SECONDS = 15
+
+
+@contextlib.contextmanager
+def _heartbeat(label, started):
+    """Log `<label> … still working (Ns elapsed)` every _HEARTBEAT_SECONDS
+       until the block exits (on return or raise). A daemon thread, so it
+       never keeps the process alive; the stop is a threading.Event set in
+       the finally."""
+    done = threading.Event()
+
+    def beat():
+        while not done.wait(_HEARTBEAT_SECONDS):
+            log.info("%s … still working (%.0fs elapsed)",
+                     label, time.monotonic() - started)
+
+    threading.Thread(target=beat, name="claude-heartbeat", daemon=True).start()
+    try:
+        yield
+    finally:
+        done.set()
+
+
 def call_claude(cfg, system, user_text, *, model=None,
                 max_tokens=DEFAULT_MAX_TOKENS):
     """Call Claude and return the response, dispatching on
@@ -130,11 +160,12 @@ def _call_claude_sdk(cfg, system, user_text, *, model, max_tokens):
     client = anthropic.Anthropic(api_key=cfg.anthropic_api_key)
     started = time.monotonic()
     try:
-        resp = client.messages.create(
-            model=chosen,
-            max_tokens=max_tokens,
-            system=system,
-            messages=[{"role": "user", "content": user_text}])
+        with _heartbeat("claude SDK", started):
+            resp = client.messages.create(
+                model=chosen,
+                max_tokens=max_tokens,
+                system=system,
+                messages=[{"role": "user", "content": user_text}])
     except (anthropic.AuthenticationError,
              anthropic.PermissionDeniedError) as exc:
         # Translate the SDK's specific auth-class error into a
@@ -235,9 +266,10 @@ def _call_claude_cli(cfg, system, user_text, *, model):
     log.debug("claude CLI → user:   %s", user_text)
     started = time.monotonic()
     try:
-        r = subprocess.run(cmd, input=user_text,
-                           capture_output=True, text=True,
-                           timeout=_CLI_TIMEOUT_SECONDS)
+        with _heartbeat("claude CLI", started):
+            r = subprocess.run(cmd, input=user_text,
+                               capture_output=True, text=True,
+                               timeout=_CLI_TIMEOUT_SECONDS)
     except FileNotFoundError:
         # `claude` binary isn't in PATH. This is configuration-fatal —
         # same operator-feedback shape as a wrong API key.
