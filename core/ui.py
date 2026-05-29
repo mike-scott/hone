@@ -193,6 +193,25 @@ _TYPE_BADGE = {"prepare": "text-bg-secondary",
                "review":  "text-bg-primary",
                "train":   "text-bg-dark"}
 
+# Patchset state-filter keys (the chips above the table) — lifecycle flags
+# plus the one base-state filter, "skipped". "gathered" is omitted: every
+# patchset in the corpus has been gathered, so it carries no information.
+_PATCHSET_FILTERS = ("prepared", "reviewed", "training", "skipped")
+# Per-row lifecycle flags shown in the State column: (row key, abbreviation,
+# full title, badge class). A patchset can carry several at once; they're
+# abbreviated + colour-coded, with the full word on hover.
+_PATCHSET_FLAGS = (("is_prepared", "P", "Prepared", "text-bg-info"),
+                   ("is_reviewed", "R", "Reviewed", "text-bg-success"),
+                   ("is_training", "T", "Training", "text-bg-warning"))
+# Patchset-list columns in display order: (sort key, header label, sortable).
+# State is not sortable — it's a multi-flag column, not a single value.
+_PATCHSET_COLUMNS = (("subject",  "Patchset", True),
+                     ("author",   "Author",   True),
+                     ("date",     "Date",     True),
+                     ("state",    "State",    False),
+                     ("patches",  "Patches",  True),
+                     ("comments", "Comments", True))
+
 
 # Page-size options for the queue paginator (small dropdown). 25 is
 # the default — small enough to scan on a single screen and consistent
@@ -209,7 +228,7 @@ _DEFAULT_CLAIMS_PAGE_SIZE = 10
 
 
 def _queue_url(*, type=None, state=None, page=None, size=None):
-    """Build a `/?...` queue URL preserving the chosen axes + paging.
+    """Build a `/queue?...` queue URL preserving the chosen axes + paging.
        Filter chips drop page (changing filter resets to page 1); paging
        links keep filter + size; the size selector keeps filter + resets
        page to 1."""
@@ -222,7 +241,7 @@ def _queue_url(*, type=None, state=None, page=None, size=None):
         parts.append(f"page={page}")
     if size and size != _DEFAULT_PAGE_SIZE:
         parts.append(f"size={size}")
-    return "/" + ("?" + "&".join(parts) if parts else "")
+    return "/queue" + ("?" + "&".join(parts) if parts else "")
 
 
 def _page_window(current, pages, radius=2):
@@ -353,13 +372,192 @@ def _queue_view(db, type, state, page, size):
     }
 
 
+def _short_list_tag(tag):
+    """Display label for a mailing-list tag: the list name before the first
+       dot (netdev.vger.kernel.org → netdev)."""
+    return tag.split(".", 1)[0]
+
+
+def _patchsets_url(*, q=None, state=None, comments=None, list_tag=None,
+                   patch_type=None, sort=None, direction=None, page=None,
+                   size=None):
+    """Build a `/?...` patchset-list URL preserving search, the filter axes,
+       sort, and paging. Defaults (sort=date, direction=desc, page=1,
+       size=25) are omitted so the bare home URL stays clean. state /
+       comments / list_tag / patch_type are independent axes — each
+       round-trips when set."""
+    parts = []
+    if q:
+        parts.append(f"q={quote(q, safe='')}")
+    if state:
+        parts.append(f"state={state}")
+    if comments:
+        parts.append(f"comments={comments}")
+    if list_tag:
+        parts.append(f"list_tag={quote(list_tag, safe='')}")
+    if patch_type:
+        parts.append(f"patch_type={quote(patch_type, safe='')}")
+    if sort and sort != "date":
+        parts.append(f"sort={sort}")
+    if direction and direction != "desc":
+        parts.append(f"direction={direction}")
+    if page and page > 1:
+        parts.append(f"page={page}")
+    if size and size != _DEFAULT_PAGE_SIZE:
+        parts.append(f"size={size}")
+    return "/" + ("?" + "&".join(parts) if parts else "")
+
+
+def _patchsets_view(db, q, state, comments, list_tag, patch_type,
+                    sort, direction, page, size):
+    """Build the patchset-list render context — search-box value, the
+       independent filter axes (lifecycle state, comments, mailing list,
+       patch type), sortable column headers, the page of rows, and paging.
+       Rows carry a `detail_url` into the per-patchset page with `?back=`
+       round-tripping to this listing."""
+    q = (q or "").strip() or None
+    if state not in _PATCHSET_FILTERS:
+        state = None
+    comments = "with" if comments == "with" else None
+    # Value-axis options come from the data, so the dropdowns never offer a
+    # choice with zero matches; an unknown value falls back to "all".
+    tag_options = core_db.distinct_patchset_tags(db)
+    type_options = core_db.distinct_patch_types(db)
+    if list_tag not in tag_options:
+        list_tag = None
+    if patch_type not in type_options:
+        patch_type = None
+    if sort not in core_db.PATCHSET_SORT_COLUMNS:
+        sort = "date"
+    direction = "asc" if str(direction).lower() == "asc" else "desc"
+
+    size = size if size in _PAGE_SIZES else _DEFAULT_PAGE_SIZE
+    total = core_db.count_patchsets(db, q=q, state=state, comments=comments,
+                                    list_tag=list_tag, patch_type=patch_type)
+    pages = max(1, -(-total // size))             # ceil division
+    page = max(1, min(page or 1, pages))
+    offset = (page - 1) * size
+
+    # All listing URLs preserve the full filter/sort/size context; callers
+    # override just the axis they change (and omit page → reset to page 1).
+    def url(**over):
+        args = dict(q=q, state=state, comments=comments, list_tag=list_tag,
+                    patch_type=patch_type, sort=sort, direction=direction,
+                    size=size)
+        args.update(over)
+        return _patchsets_url(**args)
+
+    this_url = url(page=page if page > 1 else None)
+    back_qs = "?back=" + quote(this_url, safe="")
+
+    items = []
+    for p in core_db.list_patchsets_page(db, q=q, state=state, comments=comments,
+                                          list_tag=list_tag, patch_type=patch_type,
+                                          sort=sort, direction=direction,
+                                          limit=size, offset=offset):
+        items.append({
+            "subject":      p["subject"] or p["root_message_id"],
+            "author":       p["author"] or "—",
+            "sent_display": _when(p["sent"]),
+            "skipped":      p["state"] == core_db.PATCHSET_STATE_SKIPPED,
+            # P/R/T flags actually set on this patchset, in display order.
+            "flags":        [{"abbr": ab, "title": ti, "badge": bg}
+                             for key, ab, ti, bg in _PATCHSET_FLAGS if p[key]],
+            "n_patches":    p["n_patches"] if p["n_patches"] is not None else "—",
+            "n_comments":   p["n_comments"],
+            "detail_url":   f"/patchsets/{quote(p['root_message_id'])}{back_qs}",
+        })
+
+    # Two independent filter rows. A chip change resets to page 1 (url()
+    # omits page) but preserves the other axis, search, sort, and size.
+    state_chips = [{"label": "All", "active": state is None, "url": url(state=None)}]
+    for key in _PATCHSET_FILTERS:
+        state_chips.append({"label": key.capitalize(), "active": state == key,
+                            "url": url(state=key)})
+    comment_chips = [
+        {"label": "All", "active": comments is None, "url": url(comments=None)},
+        {"label": "With comments", "active": comments == "with",
+         "url": url(comments="with")}]
+
+    # Value-axis dropdowns (mailing list, patch type): an "All" option plus
+    # one per value present in the corpus, each navigating via data-url.
+    list_select = [{"label": "All lists", "selected": list_tag is None,
+                    "url": url(list_tag=None)}]
+    for t in tag_options:
+        list_select.append({"label": _short_list_tag(t), "selected": list_tag == t,
+                            "url": url(list_tag=t)})
+    type_select = [{"label": "All types", "selected": patch_type is None,
+                    "url": url(patch_type=None)}]
+    for t in type_options:
+        type_select.append({"label": t.capitalize(), "selected": patch_type == t,
+                            "url": url(patch_type=t)})
+
+    # Sortable headers: clicking the active column flips direction; a fresh
+    # column starts desc for date (newest first), asc otherwise. The State
+    # column is multi-flag, so it renders as a plain (unsortable) header.
+    columns = []
+    for key, label, sortable in _PATCHSET_COLUMNS:
+        if not sortable:
+            columns.append({"key": key, "label": label, "sortable": False})
+            continue
+        if key == sort:
+            next_dir, indicator = (("asc", "down") if direction == "desc"
+                                   else ("desc", "up"))
+        else:
+            next_dir, indicator = ("desc" if key == "date" else "asc"), None
+        columns.append({"key": key, "label": label, "sortable": True,
+                        "indicator": indicator,
+                        "url": url(sort=key, direction=next_dir)})
+
+    win = _page_window(page, pages)
+    paging = {
+        "page": page, "pages": pages, "size": size, "total": total,
+        "start": offset + 1 if items else 0, "end": offset + len(items),
+        "first_url": url(page=1), "prev_url": url(page=max(1, page - 1)),
+        "next_url": url(page=min(pages, page + 1)), "last_url": url(page=pages),
+        "has_prev": page > 1, "has_next": page < pages,
+        "size_options": [{"value": s, "url": url(size=s)} for s in _PAGE_SIZES],
+        "window": [{"page": p, "url": url(page=p), "active": p == page}
+                   for p in win],
+        "show_first_ellipsis": win[:1] != [1] if win else False,
+        "show_last_ellipsis":  win[-1:] != [pages] if win else False,
+    }
+    return {
+        "items": items, "q": q or "", "filter_state": state,
+        "filter_comments": comments, "filter_list_tag": list_tag,
+        "filter_patch_type": patch_type, "sort": sort, "direction": direction,
+        "state_chips": state_chips, "comment_chips": comment_chips,
+        "list_select": list_select, "type_select": type_select,
+        "columns": columns, "paging": paging,
+    }
+
+
 @router.get("/", response_class=HTMLResponse)
+async def patchsets(request: Request,
+                    q: str | None = None, state: str | None = None,
+                    comments: str | None = None, list_tag: str | None = None,
+                    patch_type: str | None = None,
+                    sort: str = "date", direction: str = "desc",
+                    page: int = 1, size: int = _DEFAULT_PAGE_SIZE):
+    """The patchset corpus — the operator UI's home page. A search box
+       (partial subject or author name) plus independent filter axes
+       (lifecycle state, comments, mailing list, patch type), sortable
+       columns, and a 25/50/100/200 paginator above and below the table.
+       Default sort is newest patchset date first; each row links to the
+       per-patchset detail page."""
+    db = request.app.state.db
+    ctx = _patchsets_view(db, q, state, comments, list_tag, patch_type,
+                          sort, direction, page, size)
+    return templates.TemplateResponse(request, "patchsets.html", ctx)
+
+
+@router.get("/queue", response_class=HTMLResponse)
 async def queue(request: Request,
                 type: str | None = None, state: str | None = None,
                 page: int = 1, size: int = _DEFAULT_PAGE_SIZE):
-    """The work queue — the operator UI's home page. `?type=` filters to
-       one work-item type (prepare / review / train); `?state=` filters to
-       one state. Unknown axis values are ignored. `?page=` and `?size=`
+    """The work queue. `?type=` filters to one work-item type (prepare /
+       review / train); `?state=` filters to one state. Unknown axis values
+       are ignored. `?page=` and `?size=`
        page the listing (page is 1-indexed; size is clamped to one of
        _PAGE_SIZES — defaults to 25).
 

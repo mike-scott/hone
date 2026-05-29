@@ -1,4 +1,4 @@
-"""Tests for the work-queue home page (core/ui.py GET /) — review + train
+"""Tests for the work-queue page (core/ui.py GET /queue) — review + train
 work items rendered via core_db.list_work_items / work_item_counts."""
 from types import SimpleNamespace
 
@@ -64,7 +64,7 @@ def _enqueue_train(db, root, message_id, subject="patch one"):
 
 
 def test_queue_home_page_empty(ctx):
-    r = ctx.client.get("/")
+    r = ctx.client.get("/queue")
     assert r.status_code == 200
     assert "Work queue" in r.text and "queue is empty" in r.text
     assert f"hone-core-{__version__}" in r.text          # base-template footer
@@ -94,7 +94,7 @@ def test_queue_sorted_by_most_recent_activity(ctx):
         ctx.db, "worker-1", methodology_version=1,
         types=(core_db.WORK_ITEM_TYPE_REVIEW,))
     assert claim is not None
-    body = ctx.client.get("/").text
+    body = ctx.client.get("/queue").text
     # The just-claimed row's subject should appear BEFORE the others in
     # the rendered listing — even though it was enqueued first.
     assert (body.index("oldest-subj")
@@ -107,13 +107,13 @@ def test_queue_pane_carries_htmx_polling_attributes(ctx):
        itself with outerHTML — so new rows + updated chip counts appear
        without a manual reload. See _queue_pane.html."""
     _enqueue_review(ctx.db, "<r-1@x>", "a queued patchset")
-    r = ctx.client.get("/?type=review")
+    r = ctx.client.get("/queue?type=review")
     assert r.status_code == 200
     body = r.text
     # The polling URL preserves the active filter (so the auto-refresh
     # stays scoped to whatever view the operator is currently watching).
     assert 'id="queue-pane"' in body
-    assert 'hx-get="/?type=review"' in body
+    assert 'hx-get="/queue?type=review"' in body
     assert 'hx-trigger="every 5s"' in body
     assert 'hx-target="#queue-pane"' in body
     assert 'hx-swap="outerHTML"' in body
@@ -164,7 +164,7 @@ def test_hx_request_with_matching_version_returns_204(ctx):
        avoid mis-204-ing descendant clicks."""
     _enqueue_review(ctx.db, "<r-1@x>", "p")
     version = core_db.queue_version(ctx.db)
-    r = ctx.client.get("/", headers={"HX-Request": "true",
+    r = ctx.client.get("/queue", headers={"HX-Request": "true",
                                        "HX-Trigger": "queue-pane",
                                        "X-Queue-Version": version})
     assert r.status_code == 204
@@ -178,7 +178,7 @@ def test_hx_request_with_stale_version_returns_200_with_new_version(ctx):
        round-trip that fresh value."""
     _enqueue_review(ctx.db, "<r-1@x>", "p")
     fresh_version = core_db.queue_version(ctx.db)
-    r = ctx.client.get("/", headers={"HX-Request": "true",
+    r = ctx.client.get("/queue", headers={"HX-Request": "true",
                                        "HX-Trigger": "queue-pane",
                                        "X-Queue-Version": "stale-0"})
     assert r.status_code == 200
@@ -198,7 +198,7 @@ def test_pagination_click_with_matching_version_still_renders(ctx):
     # Pagination click: HX-Request true, X-Queue-Version current
     # (inherited from wrapper), HX-Trigger absent because the link
     # has no id. Must render page 2, not 204.
-    r = ctx.client.get("/", params={"page": 2},
+    r = ctx.client.get("/queue", params={"page": 2},
                        headers={"HX-Request": "true",
                                 "X-Queue-Version": version})
     assert r.status_code == 200
@@ -211,7 +211,7 @@ def test_full_page_load_never_short_circuits(ctx):
        polls — never a fresh page load."""
     _enqueue_review(ctx.db, "<r-1@x>", "p")
     version = core_db.queue_version(ctx.db)
-    r = ctx.client.get("/", headers={"X-Queue-Version": version})
+    r = ctx.client.get("/queue", headers={"X-Queue-Version": version})
     assert r.status_code == 200
     assert "Work queue" in r.text         # full base.html chrome rendered
 
@@ -222,7 +222,7 @@ def test_queue_htmx_partial_returns_self_renewing_pane(ctx):
        Without this, polling would re-inject the sidebar / footer
        inside itself."""
     _enqueue_review(ctx.db, "<r-1@x>", "p")
-    r = ctx.client.get("/", headers={"HX-Request": "true"})
+    r = ctx.client.get("/queue", headers={"HX-Request": "true"})
     assert r.status_code == 200
     body = r.text
     assert 'id="queue-pane"' in body
@@ -234,7 +234,7 @@ def test_queue_htmx_partial_returns_self_renewing_pane(ctx):
 
 def test_queue_lists_a_review_work_item(ctx):
     _enqueue_review(ctx.db, "<r-1@x>", "a queued patchset")
-    body = ctx.client.get("/").text
+    body = ctx.client.get("/queue").text
     assert "a queued patchset" in body
     assert "claimable" in body and "review" in body
 
@@ -242,7 +242,7 @@ def test_queue_lists_a_review_work_item(ctx):
 def test_queue_lists_review_and_train_items(ctx):
     _enqueue_review(ctx.db, "<r-1@x>", "rv subject")
     _enqueue_train(ctx.db, "<r-2@x>", "<p-2@x>", "tr subject")
-    body = ctx.client.get("/").text
+    body = ctx.client.get("/queue").text
     assert "rv subject" in body and "tr subject" in body
     assert "review" in body and "train" in body
 
@@ -267,8 +267,8 @@ def test_work_item_counts_zero_filled(ctx):
 def test_queue_type_filter_partitions_review_and_train(ctx):
     _enqueue_review(ctx.db, "<r-1@x>", "review-only subject")
     _enqueue_train(ctx.db, "<r-2@x>", "<p-2@x>", "train-only subject")
-    review_only = ctx.client.get("/", params={"type": "review"}).text
-    train_only  = ctx.client.get("/", params={"type": "train"}).text
+    review_only = ctx.client.get("/queue", params={"type": "review"}).text
+    train_only  = ctx.client.get("/queue", params={"type": "train"}).text
     assert "review-only subject" in review_only
     assert "train-only subject" not in review_only
     assert "train-only subject" in train_only
@@ -281,33 +281,33 @@ def test_queue_state_filter_partitions_the_listing(ctx):
     core_db.claim_work_item(ctx.db, worker_id="node-1",
                             methodology_version=1,
                             types=(core_db.WORK_ITEM_TYPE_REVIEW,))
-    claimable = ctx.client.get("/", params={"state": "claimable"}).text
-    claimed   = ctx.client.get("/", params={"state": "claimed"}).text
+    claimable = ctx.client.get("/queue", params={"state": "claimable"}).text
+    claimed   = ctx.client.get("/queue", params={"state": "claimed"}).text
     for subject in ("patchset one", "patchset two"):
         assert (subject in claimable) != (subject in claimed)
 
 
 def test_queue_ignores_unknown_axis_values(ctx):
     _enqueue_review(ctx.db, "<r-1@x>", "a queued patchset")
-    r = ctx.client.get("/", params={"state": "bogus", "type": "bogus"})
+    r = ctx.client.get("/queue", params={"state": "bogus", "type": "bogus"})
     assert r.status_code == 200 and "a queued patchset" in r.text
 
 
 def test_queue_chips_show_per_axis_counts(ctx):
     _enqueue_review(ctx.db, "<r-1@x>", "review one")
     _enqueue_train(ctx.db, "<r-2@x>", "<p-2@x>", "train one")
-    body = ctx.client.get("/").text
+    body = ctx.client.get("/queue").text
     # type chips: All=2, review=1, train=1
     assert "Type:" in body and "Work state:" in body
     # filter URLs round-trip the axes
-    assert 'href="/?type=review"' in body
-    assert 'href="/?state=claimable"' in body
+    assert 'href="/queue?type=review"' in body
+    assert 'href="/queue?state=claimable"' in body
 
 
 def test_queue_type_and_state_compose(ctx):
     _enqueue_review(ctx.db, "<r-1@x>", "review-claimable")
     _enqueue_train(ctx.db, "<r-2@x>", "<p-2@x>", "train-claimable")
-    r = ctx.client.get("/", params={"type": "review", "state": "claimable"})
+    r = ctx.client.get("/queue", params={"type": "review", "state": "claimable"})
     assert "review-claimable" in r.text
     assert "train-claimable" not in r.text
 
@@ -345,7 +345,7 @@ def test_list_work_items_respects_offset(ctx):
 def test_queue_page_paginates_at_default_size(ctx):
     """Default size is 25 — with 40 items the page shows 25 + a paginator."""
     _seed_n_reviews(ctx.db, 40)
-    body = ctx.client.get("/").text
+    body = ctx.client.get("/queue").text
     # paginator renders + indicates "Showing 1–25 of 40"
     assert 'aria-label="Pagination"' in body
     assert "Showing <strong>1</strong>" in body
@@ -356,13 +356,13 @@ def test_queue_page_paginates_at_default_size(ctx):
 
 def test_queue_paginator_hidden_when_one_page(ctx):
     _seed_n_reviews(ctx.db, 3)
-    body = ctx.client.get("/").text
+    body = ctx.client.get("/queue").text
     assert 'aria-label="Pagination"' not in body
 
 
 def test_queue_page_2_shows_the_next_slice(ctx):
     _seed_n_reviews(ctx.db, 40)
-    body = ctx.client.get("/", params={"page": 2}).text
+    body = ctx.client.get("/queue", params={"page": 2}).text
     # the latest (highest-numbered) subjects are on page 1; page 2 shows
     # the older subjects (smaller numbers).
     assert "Showing <strong>26</strong>" in body
@@ -373,7 +373,7 @@ def test_queue_size_clamps_to_allowed_set(ctx):
     """`?size=` outside the allowed PAGE_SIZES set falls back to the
        default — guards against attacker-supplied giant page sizes."""
     _seed_n_reviews(ctx.db, 40)
-    body = ctx.client.get("/", params={"size": "999999"}).text
+    body = ctx.client.get("/queue", params={"size": "999999"}).text
     # default 25 applied; paginator shows 25/page
     assert "Showing <strong>1</strong>–<strong>25</strong>" in body
 
@@ -382,7 +382,7 @@ def test_queue_partial_swap_for_htmx_requests(ctx):
     """An HTMX-driven page click sends `HX-Request: true`; the handler
        returns just the swap-target body partial, no base layout chrome."""
     _seed_n_reviews(ctx.db, 40)
-    r = ctx.client.get("/", params={"page": 2},
+    r = ctx.client.get("/queue", params={"page": 2},
                        headers={"HX-Request": "true"})
     assert r.status_code == 200
     assert 'id="queue-body"' in r.text
@@ -394,10 +394,10 @@ def test_queue_filter_chips_reset_page(ctx):
     """Changing filter shouldn't carry the operator's old page number —
        a new filter starts on page 1. The chip URLs drop `page=`."""
     _seed_n_reviews(ctx.db, 75)
-    body = ctx.client.get("/", params={"page": 2}).text
+    body = ctx.client.get("/queue", params={"page": 2}).text
     # the chip URLs do NOT carry the page parameter
-    assert 'href="/?state=claimable"' in body
-    assert 'href="/?state=claimable&page=' not in body
+    assert 'href="/queue?state=claimable"' in body
+    assert 'href="/queue?state=claimable&page=' not in body
 
 
 def test_queue_paging_preserves_filter(ctx):
@@ -405,8 +405,8 @@ def test_queue_paging_preserves_filter(ctx):
        stays on the same filter, doesn't reset to All. (`&` is rendered
        as `&amp;` because Jinja autoescapes attribute values.)"""
     _seed_n_reviews(ctx.db, 75)
-    body = ctx.client.get("/", params={"type": "review"}).text
-    assert 'href="/?type=review&amp;page=2"' in body
+    body = ctx.client.get("/queue", params={"type": "review"}).text
+    assert 'href="/queue?type=review&amp;page=2"' in body
 
 
 def test_queue_paging_bar_mirrors_top_and_bottom(ctx):
@@ -415,7 +415,7 @@ def test_queue_paging_bar_mirrors_top_and_bottom(ctx):
        the same controls and the same Showing/total readout at both ends
        so they don't have to scroll to flip pages or change page size."""
     _seed_n_reviews(ctx.db, 75)
-    body = ctx.client.get("/").text
+    body = ctx.client.get("/queue").text
     # both paginator <nav>s (the macro is invoked from each paging_bar)
     assert body.count('aria-label="Pagination"') == 2
     # Showing/total readout appears in both bars
@@ -430,7 +430,7 @@ def test_queue_paging_bar_renders_when_one_page(ctx):
        but the centered middle column is empty (no paginator). Layout
        stays the same shape whether or not paging is needed."""
     _seed_n_reviews(ctx.db, 3)
-    body = ctx.client.get("/").text
+    body = ctx.client.get("/queue").text
     assert 'aria-label="Pagination"' not in body
     # both bars still render
     assert body.count("Showing <strong>1</strong>") == 2
@@ -443,5 +443,5 @@ def test_queue_paging_bar_select_has_no_duplicate_id(ctx):
        an `id` — duplicate IDs are invalid HTML. The label associates
        implicitly by visual proximity."""
     _seed_n_reviews(ctx.db, 75)
-    body = ctx.client.get("/").text
+    body = ctx.client.get("/queue").text
     assert 'id="page-size"' not in body

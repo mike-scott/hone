@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+{% from "_paginator.html" import paging_bar %}
+{% block title %}Patchsets · hone-core{% endblock %}
+{% block content %}
+<h1 class="h3 mb-3">Patchsets</h1>
+
+{# Search + state filter. The search submits a full-page GET to / and
+   resets to page 1; the hidden inputs carry the current filter/sort/size
+   so searching doesn't drop them. #}
+<div class="d-flex flex-wrap gap-3 align-items-center mb-3">
+  <form method="get" action="/" class="flex-grow-1" style="max-width: 32rem;"
+        role="search">
+    <div class="input-group">
+      <span class="input-group-text"><i class="bi bi-search"></i></span>
+      <input type="search" class="form-control" name="q" value="{{ q }}"
+             placeholder="Search by subject or author name…"
+             aria-label="Search patchsets by subject or author name">
+      {% if filter_state %}<input type="hidden" name="state" value="{{ filter_state }}">{% endif %}
+      {% if filter_comments %}<input type="hidden" name="comments" value="{{ filter_comments }}">{% endif %}
+      {% if filter_list_tag %}<input type="hidden" name="list_tag" value="{{ filter_list_tag }}">{% endif %}
+      {% if filter_patch_type %}<input type="hidden" name="patch_type" value="{{ filter_patch_type }}">{% endif %}
+      {% if sort != 'date' %}<input type="hidden" name="sort" value="{{ sort }}">{% endif %}
+      {% if direction != 'desc' %}<input type="hidden" name="direction" value="{{ direction }}">{% endif %}
+      {% if paging.size != 25 %}<input type="hidden" name="size" value="{{ paging.size }}">{% endif %}
+      <button class="btn btn-primary" type="submit">Search</button>
+    </div>
+  </form>
+
+  <div class="d-flex flex-wrap gap-2 align-items-center">
+    <span class="text-muted small me-1">State:</span>
+    {% for c in state_chips %}
+    <a href="{{ c.url }}" class="btn btn-sm
+       {%- if c.active %} btn-primary{% else %} btn-outline-secondary{% endif %}">
+      {{ c.label }}</a>
+    {% endfor %}
+  </div>
+
+  <div class="d-flex flex-wrap gap-2 align-items-center">
+    <span class="text-muted small me-1">Comments:</span>
+    {% for c in comment_chips %}
+    <a href="{{ c.url }}" class="btn btn-sm
+       {%- if c.active %} btn-primary{% else %} btn-outline-secondary{% endif %}">
+      {{ c.label }}</a>
+    {% endfor %}
+  </div>
+
+  <div class="d-flex flex-wrap gap-2 align-items-center">
+    <label class="text-muted small me-1">List:</label>
+    <select class="form-select form-select-sm" style="width: auto;"
+            aria-label="Filter by mailing list"
+            onchange="window.location.href = this.options[this.selectedIndex].dataset.url">
+      {% for o in list_select %}
+      <option data-url="{{ o.url }}" {% if o.selected %}selected{% endif %}>{{ o.label }}</option>
+      {% endfor %}
+    </select>
+    <label class="text-muted small ms-2 me-1">Type:</label>
+    <select class="form-select form-select-sm" style="width: auto;"
+            aria-label="Filter by patch type"
+            onchange="window.location.href = this.options[this.selectedIndex].dataset.url">
+      {% for o in type_select %}
+      <option data-url="{{ o.url }}" {% if o.selected %}selected{% endif %}>{{ o.label }}</option>
+      {% endfor %}
+    </select>
+  </div>
+</div>
+
+{{ paging_bar(paging, margin="mb-2") }}
+
+<div class="table-responsive">
+  <table class="table table-sm table-hover align-middle">
+    <thead>
+      <tr>
+        {% for col in columns %}
+        <th scope="col" class="{% if col.key in ('patches', 'comments') %}text-end{% endif %}">
+          {% if col.sortable %}
+          <a href="{{ col.url }}" class="link-body-emphasis text-decoration-none">
+            {{ col.label }}
+            {%- if col.indicator == 'up' %} <i class="bi bi-caret-up-fill small"></i>
+            {%- elif col.indicator == 'down' %} <i class="bi bi-caret-down-fill small"></i>
+            {%- endif %}
+          </a>
+          {% else %}{{ col.label }}{% endif %}
+        </th>
+        {% endfor %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in items %}
+      {# Whole row is clickable; the subject is also a real link for
+         keyboard / middle-click / open-in-new-tab. #}
+      <tr style="cursor: pointer;" onclick="window.location='{{ row.detail_url }}'">
+        <td>
+          <a href="{{ row.detail_url }}"
+             class="link-body-emphasis text-decoration-none"
+             onclick="event.stopPropagation()">{{ row.subject }}</a>
+        </td>
+        <td>{{ row.author }}</td>
+        <td class="text-nowrap">{{ row.sent_display }}</td>
+        <td>
+          {%- if row.skipped %}
+          <span class="badge text-bg-secondary" title="Skipped">skipped</span>
+          {%- elif row.flags %}
+          {%- for f in row.flags %}
+          <span class="badge {{ f.badge }}" title="{{ f.title }}">{{ f.abbr }}</span>
+          {%- endfor %}
+          {%- else %}<span class="text-muted">—</span>{% endif %}
+        </td>
+        <td class="text-end">{{ row.n_patches }}</td>
+        <td class="text-end">{{ row.n_comments }}</td>
+      </tr>
+      {% else %}
+      <tr>
+        <td colspan="{{ columns|length }}" class="text-center text-muted py-4">
+          No patchsets match.
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{{ paging_bar(paging, margin="mt-2") }}
+{% endblock %}

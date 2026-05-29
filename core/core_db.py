@@ -823,6 +823,143 @@ def list_patchsets(db, *, state=None, limit=200):
     return [dict(r) for r in rows]
 
 
+# Sortable columns for the web-UI patchset listing → the ORDER BY expression.
+# Whitelisted so the caller's sort key never reaches the SQL string directly.
+# `author` and `n_comments` are SELECT aliases (resolvable in ORDER BY).
+# State is deliberately absent — it's a multi-flag column, not a single
+# sortable value.
+PATCHSET_SORT_COLUMNS = {
+    "date":     "p.sent",
+    "subject":  "p.subject",
+    "author":   "author",
+    "patches":  "p.n_patches",
+    "comments": "n_comments",
+}
+
+# Lifecycle "flag" predicates for a patchset, as correlated EXISTS subqueries
+# over `p` (the patchsets row): has it been Prepared (metadata written),
+# Reviewed (an ai_review exists), or used for Training (session history).
+# Static SQL — no user input — so safe to interpolate; reused both to derive
+# the listing's per-row flags and to back the same-named state filters.
+_PATCHSET_PREPARED = ("EXISTS (SELECT 1 FROM patchset_metadata pm "
+                      "WHERE pm.root_message_id = p.root_message_id)")
+_PATCHSET_REVIEWED = ("EXISTS (SELECT 1 FROM ai_reviews ar "
+                      "WHERE ar.root_message_id = p.root_message_id)")
+_PATCHSET_TRAINING = ("EXISTS (SELECT 1 FROM patchset_session_history ph "
+                      "WHERE ph.root_message_id = p.root_message_id)")
+
+# Whether the patchset's thread drew at least one comment message — an
+# independent filter axis from the lifecycle flags above.
+_PATCHSET_HAS_COMMENTS = (f"EXISTS (SELECT 1 FROM messages mc "
+                          f"WHERE mc.root_message_id = p.root_message_id "
+                          f"AND mc.type = {MSG_TYPE_COMMENT})")
+
+# State-filter key → its WHERE predicate. The lifecycle flags are not
+# mutually exclusive (a patchset can be prepared AND reviewed AND trained);
+# "skipped" is the one base-state filter. ("gathered" isn't offered — every
+# patchset in the corpus has been gathered, so it carries no information.)
+_PATCHSET_FILTER_CLAUSES = {
+    "prepared": _PATCHSET_PREPARED,
+    "reviewed": _PATCHSET_REVIEWED,
+    "training": _PATCHSET_TRAINING,
+    "skipped":  f"p.state = {PATCHSET_STATE_SKIPPED}",
+}
+
+
+def _patchset_list_where(q, state, comments, list_tag, patch_type):
+    """Shared WHERE clause + params for the patchset listing and its count.
+       Every argument is an independent, AND-composed filter axis:
+         q          partial subject OR author (name/email, case-insensitive)
+         state      a key from _PATCHSET_FILTER_CLAUSES (prepared / reviewed /
+                    training / skipped) or None
+         comments   "with" → thread carries ≥1 comment
+         list_tag   patchset is tagged with this mailing list
+         patch_type prepare-derived primary patch type (bugfix / feature / …)"""
+    clauses, params = [], []
+    if q:
+        like = f"%{q}%"
+        clauses.append("(p.subject LIKE ? OR rm.author_name LIKE ? "
+                       "OR rm.author_email LIKE ? OR p.submitter_email LIKE ?)")
+        params += [like, like, like, like]
+    if state in _PATCHSET_FILTER_CLAUSES:
+        clauses.append(_PATCHSET_FILTER_CLAUSES[state])
+    if comments == "with":
+        clauses.append(_PATCHSET_HAS_COMMENTS)
+    if list_tag:
+        clauses.append("EXISTS (SELECT 1 FROM patchset_tags pt "
+                       "WHERE pt.root_message_id = p.root_message_id "
+                       "AND pt.tag = ?)")
+        params.append(list_tag)
+    if patch_type:
+        clauses.append("EXISTS (SELECT 1 FROM patchset_metadata pmt "
+                       "WHERE pmt.root_message_id = p.root_message_id "
+                       "AND json_extract(pmt.patch_type, '$.primary') = ?)")
+        params.append(patch_type)
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    return where, params
+
+
+def distinct_patchset_tags(db):
+    """The distinct list tags actually carried by patchsets — the options for
+       the listing's mailing-list filter."""
+    return [r[0] for r in db.execute(
+        "SELECT DISTINCT tag FROM patchset_tags ORDER BY tag")]
+
+
+def distinct_patch_types(db):
+    """The distinct prepare-derived primary patch types present in the corpus
+       — the options for the listing's patch-type filter."""
+    return [r[0] for r in db.execute(
+        "SELECT DISTINCT json_extract(patch_type, '$.primary') t "
+        "FROM patchset_metadata WHERE t IS NOT NULL ORDER BY t")]
+
+
+def count_patchsets(db, *, q=None, state=None, comments=None, list_tag=None,
+                    patch_type=None):
+    """Total patchsets matching the listing's search + filter axes — the
+       pager's denominator. Joins the root message so an author-name search
+       term is honoured."""
+    where, params = _patchset_list_where(q, state, comments, list_tag,
+                                         patch_type)
+    return db.execute(
+        "SELECT count(*) FROM patchsets p "
+        "LEFT JOIN messages rm ON rm.message_id = p.root_message_id" + where,
+        params).fetchone()[0]
+
+
+def list_patchsets_page(db, *, q=None, state=None, comments=None,
+                        list_tag=None, patch_type=None, sort="date",
+                        direction="desc", limit=25, offset=0):
+    """One page of the web-UI patchset listing. Each row carries the table's
+       display fields: `author` (the root message's name, falling back to its
+       email then the patchset's submitter_email), `n_comments` (the thread's
+       comment messages), and the lifecycle flags `is_prepared` / `is_reviewed`
+       / `is_training` (0/1); `n_patches` + `state` ride on the patchset row.
+
+       `sort` is one of PATCHSET_SORT_COLUMNS (anything else → date);
+       `direction` is asc/desc. Results are stably tie-broken by sent DESC
+       then root id so paging is deterministic."""
+    col = PATCHSET_SORT_COLUMNS.get(sort, PATCHSET_SORT_COLUMNS["date"])
+    direction = "ASC" if str(direction).lower() == "asc" else "DESC"
+    where, params = _patchset_list_where(q, state, comments, list_tag,
+                                         patch_type)
+    rows = db.execute(
+        "SELECT p.*, "
+        "COALESCE(rm.author_name, rm.author_email, p.submitter_email) AS author, "
+        "(SELECT count(*) FROM messages c "
+        "   WHERE c.root_message_id = p.root_message_id AND c.type = ?) "
+        "  AS n_comments, "
+        f"{_PATCHSET_PREPARED} AS is_prepared, "
+        f"{_PATCHSET_REVIEWED} AS is_reviewed, "
+        f"{_PATCHSET_TRAINING} AS is_training "
+        "FROM patchsets p "
+        "LEFT JOIN messages rm ON rm.message_id = p.root_message_id" + where +
+        f" ORDER BY {col} {direction}, p.sent DESC, p.root_message_id "
+        "LIMIT ? OFFSET ?",
+        [MSG_TYPE_COMMENT, *params, limit, offset])
+    return [dict(r) for r in rows]
+
+
 # ===========================================================================
 # Messages  (every thread email: cover, patch, comment)
 # ===========================================================================

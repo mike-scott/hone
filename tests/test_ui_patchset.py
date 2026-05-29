@@ -192,10 +192,10 @@ def test_queue_row_links_to_the_work_item_detail_page(ctx):
        so the work-item detail's ← Back returns to this exact view."""
     _plant_patchset(ctx.db)
     work_item_id = core_db.enqueue_review(ctx.db, "<r1@x>")
-    r = ctx.client.get("/?type=review&state=claimable")
+    r = ctx.client.get("/queue?type=review&state=claimable")
     assert r.status_code == 200
     body = r.text
     expected_detail = (f'/work-items/{work_item_id}'
-                       f'?back={quote("/?type=review&state=claimable", safe="")}')
+                       f'?back={quote("/queue?type=review&state=claimable", safe="")}')
     assert expected_detail in body
     assert f'data-href="{expected_detail}"' in body

@@ -32,7 +32,12 @@
       <ul class="navbar-nav me-auto">
         <li class="nav-item">
           <a href="/" class="nav-link
-             {%- if active == '/' %} active{% endif %}">
+             {%- if active == '/' or active.startswith('/patchsets') %} active{% endif %}">
+            <i class="bi bi-collection me-1"></i>Patchsets</a>
+        </li>
+        <li class="nav-item">
+          <a href="/queue" class="nav-link
+             {%- if active.startswith('/queue') %} active{% endif %}">
             <i class="bi bi-list-task me-1"></i>Queue</a>
         </li>
         <li class="nav-item">
