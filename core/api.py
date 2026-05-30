@@ -356,6 +356,20 @@ def _completion_record_schemas():
 
 _COMPLETION_RECORD_SCHEMAS = _completion_record_schemas()
 
+# Appended to every check/candidate body when compiling a REVIEW slice
+# (see _compile_methodology). Point-of-use reinforcement of the concern
+# return contract; the binding shape is the schema injected into the
+# review operation's return block via %COMPLETION_RECORD_SCHEMA_JSON%.
+_CHECK_RETURN_CONTRACT = (
+    "Output: an array of `concern` objects (concern_id, stage_id, "
+    "candidate_or_check_id, text, severity, is_preexisting, patch_scope, "
+    "locations) — full shape per the schema in this task's return "
+    "contract. Return [] if this check is clean; an empty array is a "
+    "valid, complete answer. Do your reading first, then emit. Emit one "
+    "concern per distinct defect — Stage C consolidates across checks, "
+    "so do not pre-merge with other checks here."
+)
+
 
 def _methodology_variables(task_type=None):
     """Live values substituted into the compiled methodology slice at
@@ -441,7 +455,7 @@ def _compile_methodology(document, task_type_name):
        The returned slice has %NAME% placeholders substituted via
        _methodology_variables() — see the comment block above the
        _VAR_RE definition."""
-    _CORE_KEYS = ("principles", "stages", "checks",
+    _CORE_KEYS = ("principles", "stages", "checks", "candidates",
                   "documentation_review", "report_finalization")
     if task_type_name == "prepare":
         core_slice = {"principles": document.get("principles", [])}
@@ -451,7 +465,23 @@ def _compile_methodology(document, task_type_name):
                 "operations": {task_type_name:
                               document.get("operations", {}).get(task_type_name,
                                                                   {})}}
-    return _substitute(compiled, _methodology_variables(task_type_name))
+    compiled = _substitute(compiled, _methodology_variables(task_type_name))
+    # Reinforce the concern-array return contract at the point of use by
+    # appending it to every check and candidate body. Only for `review`:
+    # review is the operation whose checks/candidates emit concerns; in
+    # train/draft the same arrays are reference material (outcome judging,
+    # proposal authoring), so the footer would mislead. Done here, at
+    # compile, so the canonical YAML stays free of the boilerplate and
+    # graduated checks/candidates inherit it automatically. Mutating
+    # `compiled` is safe — _substitute returned a fresh copy, so the
+    # cached methodology document is untouched.
+    if task_type_name == "review":
+        for key in ("checks", "candidates"):
+            for entry in compiled["core"].get(key, []):
+                body = (entry.get("body") or "").rstrip()
+                entry["body"] = (f"{body}\n\n{_CHECK_RETURN_CONTRACT}"
+                                 if body else _CHECK_RETURN_CONTRACT)
+    return compiled
 
 
 def _patches_payload(db, root):

@@ -285,7 +285,23 @@ $defs:
         minLength: 1
         description: >-
           Which check or candidate fired to produce this concern. Refs
-          a methodology check id or a methodology candidate id.
+          a methodology check id or a methodology candidate id. After a
+          Stage C cross-check merge this is the primary (root-cause)
+          check that leads the merged concern.
+      contributing_check_ids:
+        type: array
+        items:
+          type: string
+          minLength: 1
+        description: >-
+          Set by Stage C only when it merges concerns from more than one
+          check into a single concern (cross-check facets of one root
+          cause). The COMPLETE set of check/candidate ids that fired into
+          this concern, INCLUDING the primary candidate_or_check_id.
+          Absent (or a single element) for a concern that is not a
+          cross-check merge. The training layer credits every id listed
+          here, so a cross-check merge does not lose per-check
+          attribution.
       text:
         type: string
         minLength: 1
