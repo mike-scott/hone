@@ -10,13 +10,17 @@ the stratified selection that consumes this metadata is in
 [`ARCHITECTURE-TRAINING.md`](ARCHITECTURE-TRAINING.md); the record
 shapes are in [`API.md`](API.md).
 
-> Status: **target architecture.** This describes where prepare is
-> headed, not how it works today. Today a single `prepare` node task
-> produces all the metadata below *through the LLM* and pulls a kernel
-> tree to do it; `review` pulls a tree too. This document is the plan
-> to (a) split prepare into a deterministic code phase and an
-> LLM-judgment phase, (b) confine the kernel tree to `review` alone.
-> The migration sequence is at the end.
+> Status: **mostly landed.** The tiered design described here is now the
+> implementation, not just a plan. `prepare` runs a deterministic Tier-0
+> code phase on the node (`node/cgit.py` multi-tree base resolution,
+> `node/maintainers.py` `get_maintainer.pl` runner, `node/tier0.py` field
+> assembler — no LLM, no kernel tree) and overlays an LLM Tier-1 judgment
+> phase (`node/tasks.py` `handle_prepare_task`, `node/ai.py`), with code
+> winning for the fields it owns; `node/refrepo.py` consumes the
+> `base_tree` hint. What remains is **Tier 2** — confining the enrichment
+> quartet to `review` — which lands when `handle_review_task` is built (it
+> still raises `NotImplementedError`). The migration sequence at the end
+> marks what is done.
 
 ## Motivation
 
@@ -323,6 +327,14 @@ already chose). So do **not** gate the LLM phase without consciously
 accepting weaker stratification.
 
 ## Migration sequence
+
+> **Where this stands:** steps 1–3 are implemented — the node-side Tier-0
+> pieces (`node/cgit.py`, `node/maintainers.py`, `node/tier0.py`), the
+> deterministic phase in `handle_prepare_task`, and `refrepo`'s
+> `base_tree` hint all exist, with `perl` in the node image. Steps 4–5
+> (moving the enrichment quartet to the review record, and dropping the
+> kernel tree from prepare-only nodes) are pending `handle_review_task`,
+> which still raises `NotImplementedError`.
 
 1. Build the node-side Tier-0 pieces: a cgit client + the named-trees
    registry + a multi-tree resolver (`node/cgit.py`), a

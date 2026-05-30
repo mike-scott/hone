@@ -5,11 +5,17 @@ shaped: operational steps live in `PROCEDURE.md`; this file is the *model*
 behind them.
 
 > **Status.** This describes the **target** architecture — a containerized
-> service. The repo today carries the design (this doc plus the API,
-> deployment, and procedure companions) and a skeleton implementation;
-> the FastAPI app, the operator UI, the node task handlers, and the
-> statistical / merge-gate machinery are still to build. See *Today vs.
-> target* at the end for the concrete inventory.
+> service. The repo today carries the design (this doc and its companions)
+> plus a working core of the implementation: the FastAPI app and the full
+> `/v1` contract, the GATHER loop, the operator UI, the complete SQLite
+> schema, and the `prepare` node task (deterministic Tier-0 + LLM Tier-1)
+> are built. Still to build: the `review` / `train` / `draft` node
+> handlers, and the self-honing machinery that turns train results into
+> methodology change — review-level aggregation, the statistical model,
+> the eligibility-gate / draft-trigger pipeline, the training-session
+> orchestrator, and the merge gate. For most of those the DB tables and
+> CRUD primitives already exist but the driving logic does not. See *Today
+> vs. target* at the end for the concrete inventory.
 
 ## Governing principle
 
@@ -179,7 +185,8 @@ Pages:
   → *List-tag filter*).
 - **Merge gate** — disposition the `methodology_proposals` queue (see *The
   merge gate*). Planned; not yet implemented.
-- Reporting pages, patchset detail view — later.
+- Reporting pages — later. (The patchset and work-item detail views are
+  built.)
 
 Operators authenticate with a human login (session-based), distinct from the
 header credentials a node presents.
@@ -319,10 +326,10 @@ rejected with the field flagged and `config.yaml` left untouched. A
 separate read-only panel lists the deployment configuration.
 
 **Authentication.** The Settings page **mutates** hone-core's behaviour,
-so it must sit behind the operator login (session-based; see *Operator web
-UI*). Until that login exists the page — like the rest of the operator UI
-— is unauthenticated; the login is a prerequisite for exposing Settings on
-an untrusted network.
+so it sits behind operator authentication. Today the whole operator UI is
+gated by HTTP Basic auth against `HONE_ADMIN_TOKEN` (`require_ui_auth` in
+`core/api.py`); the session-based login described under *Operator web UI*
+is the target refinement, not yet built.
 
 **Not in scope here.** Methodology import/export (export the DB methodology
 to YAML, re-import an edited one — see *Methodology storage*) is operator
@@ -935,152 +942,152 @@ web UI** on hone-core, not node-facing APIs.
 
 ## Today vs. target
 
-**In the repo today** — the design (this doc plus the API, deployment,
-procedure, and sources companions) and a skeleton implementation:
+**In the repo today** — the design (this doc and its companions) plus a
+substantial implementation.
 
-- `common/schema/` — the JSON Schemas shared across both tiers:
-  `methodology.schema.yaml` (validates the methodology YAML) and
-  `completion-record.schema.yaml` (validates the body of `POST
-  /v1/claims/{claim_id}/result`).
-- `core/default-methodology.yaml` — the canonical kernel-patchset
-  review methodology; imported on hone-core's first run as version 1.
-- `core/core_db.py` — the SQLite schema and helpers (patchsets,
-  messages, list_tags / patchset_tags, methodology_versions /
-  candidates / proposals, work_items, ai_reviews, nodes /
-  node_enrollments / node_tokens, gather_state). The data-model
-  additions listed below are not yet there.
-- `core/gather-modules/{gather_api.py, lore.py}` — the gather-module
-  framework and the `lore` source.
+hone-core:
+
+- `common/schema/` — the shared JSON Schemas: `methodology.schema.yaml`
+  (with `severity_scale` already the extended object — `levels` +
+  `weighting` + `uncertainty_rule` + `cross_kind_defaults`, per-level
+  `criteria` / `anchors`) and `completion-record.schema.yaml` (all four
+  task branches, `self_review_record`, scoped `patch_scope` +
+  `is_preexisting` concerns, the structured `train_record`).
+- `core/default-methodology.yaml` — the canonical methodology, imported
+  on first run as version 1; its `report_finalization.severity_scale`
+  ships the extended structure with per-level criteria.
+- `core/core_db.py` — the full `_SCHEMA_V1`: every table the data model
+  describes, including `patchset_metadata`, `review_evaluations`,
+  `methodology_candidates` (with both `severity_witness` histograms),
+  `methodology_proposals`, `eligibility_flags`, `draft_tasks`, and the
+  three training-session tables, plus the CRUD helpers for each.
+- `core/main.py` + `core/api.py` — the FastAPI app and the full `/v1`
+  wire contract: the OAuth device-grant endpoints, `POST /v1/claims`
+  (self-contained per-task payloads built for all four task types),
+  `…/heartbeat`, `…/release`, `…/result`, and the compiled methodology
+  slice.
+- `core/ui.py` + `core/templates/` + `core/static/` — the server-rendered
+  operator UI (Queue, Nodes, Enroll, Settings, patchset and work-item
+  detail) on vendored AdminLTE / Bootstrap / HTMX assets, gated by HTTP
+  Basic auth against `HONE_ADMIN_TOKEN`.
+- `core/gather.py` + `core/gather-modules/{gather_api.py, lore.py}` — the
+  GATHER supervisor (per-source asyncio tasks, cursor resume, stall
+  cancel) and the `lore` source.
+- `core/methodology_format.py` + the compile step in `api.py` —
+  methodology import (schema-validated), export (deterministic YAML), and
+  per-task compile.
+- `core/tls.py` (first-start CA + server certificate),
+  `core/runtime_config.py` + `core/config.py` (the layered tunable config).
 - `core/Dockerfile` + `core/docker-compose.yml`,
-  `node/Dockerfile` + `node/docker-compose.yml` +
-  `node/docker-compose.override.yml` — the per-tier images, compose
-  deployments, and the local-testing host-network override.
+  `node/Dockerfile` (with `perl`, for `get_maintainer.pl`) +
+  `node/docker-compose.yml` + `node/docker-compose.override.yml` — the
+  per-tier images, compose deployments, and the local-testing override.
 
-**To build:**
-- The AI implementations of all four node task handlers
-  (`node/tasks.py`'s `handle_prepare_task` / `handle_review_task` /
-  `handle_train_task` / `handle_draft_task` currently raise
-  `NotImplementedError`).
-- The `patchset_metadata` table and the prepare auto-enqueue trigger;
-  the prepare task schema validation; the re-preparation policy job.
-- The `severity_scale` block in the methodology (nested under
-  `report_finalization`): the extended YAML structure (existing
-  `tag` / `meaning` / `blocks_merge` preserved, plus the new
-  `criteria` / `anchors` per level and rubric-wide `weighting` /
-  `uncertainty_rule` / `cross_kind_defaults`),
-  `common/schema/methodology.schema.yaml` additions (object-wrapped
-  `severity_scale`, 5-level enforcement of the existing lowercase
-  tags, criterion / anchor ID rules, weighting monotonicity), the
-  importer's semantic-validation passes (anchor-patch references,
-  criterion cross-refs), the exporter's deterministic ordering, and
-  the initial criteria decomposition in `core/default-methodology.yaml`
-  (criteria derived from each level's existing `meaning` prose;
-  anchors deferred until the corpus has examples worth citing).
-- The `revise-severity-scale` recommendation type (issued by draft
-  tasks), with its statistical-gate evidence requirement (measured
-  reduction in **temporal drift** of severity assignments on similar
-  patches across time windows — the single-node analog of inter-node
-  drift) and merge-gate UI integration alongside the existing
-  recommendation types.
-- The broader severity rollout (these are follow-ups, each
-  independent): severity rationale fields on every finding emitted by
-  a node (rationale references `severity_scale` criterion and anchor
-  IDs by ID, not paraphrase, so audit and aggregation can verify
-  matches without parsing free-form prose); per-methodology-version
-  `severity_witness` histograms on candidate practices — since
-  severity_scale changes only ride a methodology-version bump (a
-  `revise-severity-scale` proposal ratified at the merge gate), the
-  histogram forks at the version boundary, with each version
-  maintaining its own histogram across the five tags so any
-  cross-version aggregation that compares apples-to-apples remains
-  defensible; review-level aggregation pinning to the review's
-  `methodology_version` with projection rules for trains that
-  completed under a newer version; statistical aggregation computing
-  severity-weighted metrics within a methodology version; the
-  spot-check audit UI surfacing the version-pinned rubric to the
-  auditor.
-- The scoped-concern shape (`patch_scope`) on `ai_reviews.concerns`,
-  the review operation's prompt update to require it, and the schema
-  validation rejecting reviews whose concerns lack scope.
-- The `is_preexisting` boolean on every finding (concerns in
-  `ai_reviews`, echoed in train responses' `concerns_considered`),
-  the review operation's prompt update to require it (the node sets
-  it true exactly when the finding originates from the
-  `preexisting-issues` Stage 2 check), and the schema validation
-  rejecting reviews whose concerns lack the field. The downstream
-  propagation: the `blocks_merge` derivation rule on report
-  finalization (effective `blocks_merge` = rubric value AND NOT
-  `is_preexisting`); the two parallel `severity_witness` histograms
-  on candidate practices (`severity_witness_introduced` and
-  `severity_witness_preexisting`) replacing the single histogram;
-  the `unmatched_preexisting` verdict in review-level aggregation
-  and the `fp_rate` formula's exclusion of pre-existing concerns
-  from both numerator and denominator; the `preexisting_unmatched_count`
-  rollup column on `review_evaluations`; the per-candidate
-  `fired_on_preexisting` flag in `per_candidate_review_stats`; the
-  merge-gate evidence panel's introduced-vs-preexisting split
-  display.
-- The review-level aggregation workflow on hone-core: the per-(patchset,
-  session) trigger (every train the session created for the patchset
-  reaches a terminal state), the aggregation pass that produces
-  per-concern verdicts and review-level coverage / FP rate / redundancy
-  metrics, and the idempotent re-aggregation when a re-run is needed.
-- The draft-task trigger pipeline on hone-core (see *The merge gate
-  → Draft-task trigger logic*): the `eligibility_flags` table; the
-  six per-recommendation-type eligibility gate computations
+hone-node:
+
+- `node/runner.py` + `node/client.py` — the claim loop (claim → work →
+  submit, 204 poll, indefinite backoff, idempotent submit) and the
+  device-grant enrollment with CA-pinned TLS and token refresh.
+- `node/tasks.py` `handle_prepare_task` — implemented: it runs the
+  deterministic **Tier-0** phase (`node/cgit.py` multi-tree base
+  resolution, `node/maintainers.py` `get_maintainer.pl` runner,
+  `node/tier0.py` field assembler) and overlays the **Tier-1** LLM
+  judgment phase (`node/ai.py` `call_claude`); see
+  [`ARCHITECTURE-PREPARE.md`](ARCHITECTURE-PREPARE.md).
+- `node/refrepo.py` — the reference kernel repo with the `base_tree`
+  fetch hint.
+
+**To build** — the remaining AI deliverables and the self-honing
+machinery that converts train results into methodology change. Several
+items below already have their DB tables and CRUD primitives in place
+(noted *schema present*); what is missing is the logic that drives them.
+
+*Node AI handlers*
+
+- `handle_review_task` / `handle_train_task` / `handle_draft_task` in
+  `node/tasks.py` still raise `NotImplementedError`. (`handle_prepare_task`
+  is done — see *In the repo today*.)
+
+*The comment → methodology loop (hone-core)*
+
+- Per-candidate counter updates on train receipt — `bump_candidate` /
+  `bump_severity_witness` exist, but `POST /v1/claims/{id}/result` does
+  not yet call them (a `pass` / TODO on the train path), so the pooled
+  counters and both `severity_witness` histograms stay unpopulated.
+  *(schema present.)*
+- Review-level aggregation — the `review_evaluations` table and its
+  read/write helpers exist, but the per-`(patchset, session)` trigger and
+  the aggregation pass (per-concern verdicts; coverage / FP-rate /
+  redundancy; the `unmatched_preexisting` verdict and the
+  `preexisting_unmatched_count` rollup) are not implemented. *(schema
+  present.)*
+- The draft-task trigger pipeline — `eligibility_flags` / `draft_tasks`
+  and their CRUD (set / clear / suppress / defer-watermark, enqueue,
+  claim, debounce) exist, but the six eligibility-gate computations
   (`graduate_eligible`, `prune_ineffective_eligible`,
-  `prune_redundant_eligible`, `consolidate_eligible`,
-  `revise_eligible`, `severity_scale_revise_eligible`); the
-  re-evaluation hooks on counter updates and on training-session
-  `analyzed` transitions; the suppression-log and defer-watermark
-  filtering between eligibility and enqueue; the batching with
-  snapshot semantics, the configurable `draft_batch_max` cap and
-  overflow-priority rules, and single-outstanding-task debouncing;
-  the disposition feedback path (Accept clears flags structurally;
-  Defer sets `defer_watermark_at`; Reject sets `suppressed_at`;
-  Return for redraft spawns a redraft-specific draft task outside
-  the normal eligibility pipeline). The `severity_scale_revise_eligible`
-  gate's drift-coefficient choice (Krippendorff's α vs. alternatives)
-  and threshold values are empirical tunables that need a calibration
-  pass once data has accumulated.
-- The training-session tables (`training_sessions`,
-  `training_session_patchsets`, `patchset_session_history`) and the
-  session orchestrator in hone-core.
-- The session-draft operator UI (profile picker, plan preview,
-  advisory panel, live re-solve via HTMX).
-- The session-progress operator UI.
-- The statistical-aggregation module: bootstrap CI, TOST, CUSUM,
-  Bayesian posterior, revision clustering, FDR correction.
-- FP-rate reconciliation in the prune utility formula: replace the
-  estimated `λ` penalty parameter with measured per-review FP rates
-  from `review_evaluations`, update the formula in *Three
-  transitions*, and define the migration path for any prune decisions
-  in flight under the old formula.
-- Review-intensity weighting of FP rate: a patchset with few comments
-  will have many `unmatched_in_scope` concerns that are simply
-  unreviewed rather than false-positive, so FP rate must be weighted
-  by comment count (or excluded below a minimum-comment threshold).
-  The weighting scheme, the merge-gate evidence panel exposing both
-  raw and weighted rates, and the statistical model's use of the
-  weighted rate downstream.
-- The spot-check audit workflow: a configurable-rate sampler that
-  pulls a fraction of prepared `patchset_metadata` rows, completed
-  per-comment train results, and completed `review_evaluations` rows
-  for manual operator review, an operator UI to disposition them
-  (correct / incorrect / ambiguous, with a note), and the feedback
-  path that flows verdicts back into node reputation scoring and
-  statistical-aggregation health metrics.
-- The richer train payload (`training_session_id`, `session_role`,
-  `stratum_label` fields on the claim payload, plus the scoped prior
-  review) and the richer train response (`concerns_considered`,
-  comment points, per-point matches, candidate / check outcomes,
-  summary, proposals with `derived_from` lineage).
-- The merge-gate UI (the `methodology_proposals` queue surface) with
-  the new evidence-panel fields including session lineage and the
-  parent reviews' coverage / FP rates from `review_evaluations`.
-- The session-based operator login (the web UI is currently
-  unauthenticated).
-- Reporting pages.
+  `prune_redundant_eligible`, `consolidate_eligible`, `revise_eligible`,
+  `severity_scale_revise_eligible`) and the counter-update / session-
+  `analyzed` re-evaluation hooks that set the flags are not. *(schema
+  present.)*
+- The statistical-aggregation module — bootstrap CI, TOST, CUSUM,
+  Bayesian posterior, ICC, revision clustering (embedding + DBSCAN), and
+  FDR correction. Nothing computes these yet; the draft payload's
+  evidence summaries are placeholders.
+- The training-session orchestrator — the three session tables and their
+  CRUD exist, but the stratified selection solver, the `draft → ready`
+  materialisation that creates one train work-item per `(patch, comment)`
+  pair (with the comment trainability filters), and the
+  `in_progress → complete → analyzed` lifecycle driver are not built.
+  *(schema present.)*
+- The merge gate — `methodology_proposals` and its add / list / decide
+  helpers exist (Reject → suppress, Defer → watermark are wired at the DB
+  layer), but the version bump + change application on Accept, layer-2
+  mechanical validation, layer-3 statistical-gate validation, and
+  node-reputation scoring are not. *(schema present.)*
+- The re-preparation policy job — the periodic re-enqueue of `prepare`
+  for heuristic / stale `patchset_metadata` rows (the table already
+  records `methodology_version` / `node_tree_revision` / `mode`).
+
+*Operator surfaces*
+
+- The session-draft UI (profile picker, plan preview, advisory panel,
+  live re-solve via HTMX), the session-progress UI, the merge-gate UI
+  (the `methodology_proposals` queue with the session-lineage and
+  parent-review coverage / FP-rate evidence panel), and reporting pages —
+  none of these operator surfaces exist yet.
+- The spot-check audit workflow — a sampler over prepared metadata, train
+  results, and `review_evaluations`, the disposition UI, and the feedback
+  path into node reputation / health metrics. Not started.
+- The session-based operator login — the UI is gated by HTTP Basic auth
+  against `HONE_ADMIN_TOKEN` today; the richer session-based login is the
+  target.
+
+*Further refinements (after the machinery lands)*
+
+- The `revise-severity-scale` recommendation type from draft tasks, with
+  its temporal-drift evidence requirement and merge-gate integration.
+- The broader severity rollout: `severity_rationale` fields referencing
+  `severity_scale` criterion / anchor IDs on every finding;
+  per-methodology-version `severity_witness` histograms (forked at the
+  version boundary); severity-weighted aggregation metrics; the
+  version-pinned rubric in the spot-check audit UI.
+- FP-rate reconciliation in the prune utility formula — replace the
+  estimated `λ` penalty with measured per-review FP rates from
+  `review_evaluations` — and review-intensity weighting of FP rate
+  (weight by comment count, or exclude below a minimum-comment
+  threshold).
+- The prepare Tier-2 enrichment move — relocate `applies_cleanly` /
+  `churn_ratio` / `file_activity` / `fixes_verified` from prepare to the
+  review record, landed atomically with `handle_review_task` (see
+  [`ARCHITECTURE-PREPARE.md`](ARCHITECTURE-PREPARE.md) → *Migration
+  sequence*).
+
+Note: the `patch_scope` + `is_preexisting` concern shape, the four-branch
+completion-record schema, and the extended `severity_scale` block — all
+listed as "to build" in earlier revisions — are now present in
+`common/schema/` and `core/default-methodology.yaml`; what remains for
+them is the consuming logic above (the review operation that emits them
+and the aggregation that reads them).
 
 **Open / not yet specified:** see `API.md` → *Open* for unresolved
 wire-contract corners (fleet-secret upgrade, refresh-token rotation

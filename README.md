@@ -18,11 +18,17 @@ the data model, and the UI. The authoritative documents it draws on:
   (claim protocol, review output, train task, review-level aggregation,
   node resilience),
   [`ARCHITECTURE-TRAINING.md`](docs/ARCHITECTURE-TRAINING.md)
-  (training sessions and the statistical model behind transitions), and
+  (training sessions and the statistical model behind transitions),
   [`ARCHITECTURE-MERGE-GATE.md`](docs/ARCHITECTURE-MERGE-GATE.md)
-  (the merge gate and node-guarding).
+  (the merge gate and node-guarding), and
+  [`ARCHITECTURE-PREPARE.md`](docs/ARCHITECTURE-PREPARE.md)
+  (the target tiered prepare design — a deterministic cgit phase and an
+  LLM-judgment phase, confining the kernel tree to `review`).
 - [`docs/API.md`](docs/API.md) — the hone-core ↔ node REST wire contract
   (`/v1`).
+- [`docs/SOURCES.md`](docs/SOURCES.md) — the gather-module framework and
+  the canonical `lore` data source (resume cursors, the list-tag filter,
+  dedup).
 - [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) — the build-and-run model
   (images, compose, volumes, env-var contract).
 - [`docs/PROCEDURE.md`](docs/PROCEDURE.md) — the operator runbook.
@@ -128,9 +134,23 @@ out of the node-facing API. See
 
 ## Status
 
-The `core/` and `node/` directories are placeholders for the upcoming
-implementation; the design lives in `docs/`. See
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) → *Today vs. target* for
-what is implemented and what is still to build, and
-[`docs/API.md`](docs/API.md) → *Open* for unspecified corners of the
-contract.
+The design lives in `docs/`, and `core/` and `node/` already carry a
+substantial implementation: the SQLite schema (`core/core_db.py`), the
+GATHER loop with the `lore` source (`core/gather.py`,
+`core/gather-modules/`), the canonical methodology
+(`core/default-methodology.yaml`) and shared JSON Schemas
+(`common/schema/`), the FastAPI app serving the full `/v1` wire contract
+(`core/api.py`) alongside the server-rendered operator UI (`core/ui.py`,
+`core/templates/`, vendored assets in `core/static/`), self-provisioned
+TLS (`core/tls.py`), and — on the node — the claim runner plus the
+`prepare` task, both its deterministic Tier-0 phase (`node/cgit.py`,
+`node/tier0.py`, `node/maintainers.py`) and its LLM Tier-1 phase
+(`node/tasks.py`, `node/ai.py`). Still to build: the `review`, `train`,
+and `draft` task handlers (`node/tasks.py`, currently raising
+`NotImplementedError`); training sessions and the statistical-aggregation
+module; the merge gate and its operator UI; and the session-based
+operator login. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) →
+*Today vs. target* for the design's own implementation inventory (note
+that it lags the code in places — e.g. the operator UI and the prepare
+Tier-0 split, both now landed), and [`docs/API.md`](docs/API.md) →
+*Open* for unspecified corners of the contract.
