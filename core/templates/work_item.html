@@ -11,7 +11,18 @@
 
 <h1 class="h4 mb-1">
   <span class="badge {{ type_badge }} me-1">{{ type }}</span>
+  {% if state == "deferred" %}
+  {# A deferred item is terminal and unheld — clicking the badge releases
+     it back to claimable (the manual analog of the lease-elapsed re-arm). #}
+  <form method="post"
+        action="/work-items/{{ id }}/release-deferred{{ ('?back=' ~ (back_url | urlencode)) if back_url else '' }}"
+        class="d-inline">
+    <button type="submit" class="badge border-0 {{ state_badge }} me-2"
+            title="Release back to claimable">{{ state }} <i class="bi bi-arrow-repeat"></i></button>
+  </form>
+  {% else %}
   <span class="badge {{ state_badge }} me-2">{{ state }}</span>
+  {% endif %}
   work-item <code>{{ id }}</code>
 </h1>
 <div class="text-muted small mb-3">

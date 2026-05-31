@@ -240,3 +240,53 @@ def test_node_detail_recent_claims_links_to_work_item_detail(ctx):
     body = ctx.client.get(f"/nodes/{node_id}").text
     expected_back = quote(f"/nodes/{node_id}", safe="")
     assert f"/work-items/{wid}?back={expected_back}" in body
+
+
+# --- deferred badge → release-deferred action ------------------------------
+
+def _claimed_review(db):
+    """Plant a patchset and claim its review — returns (item_id, claim)."""
+    _plant_patchset(db)
+    wid = core_db.enqueue_review(db, "<r1@x>")
+    claim = core_db.claim_work_item(
+        db, "builder-7", methodology_version=1,
+        types=(core_db.WORK_ITEM_TYPE_REVIEW,))
+    return wid, claim
+
+
+def _deferred_review(db):
+    """A review work item left in the DEFERRED state — returns its id."""
+    wid, claim = _claimed_review(db)
+    core_db.submit_work_result(db, claim["claim_id"],
+                               state=core_db.WORK_ITEM_STATE_DEFERRED,
+                               record={"outcome": "deferred"})
+    return wid
+
+
+def test_deferred_badge_offers_a_release_action(ctx):
+    item_id = _deferred_review(ctx.db)
+    body = ctx.client.get(f"/work-items/{item_id}").text
+    assert f'action="/work-items/{item_id}/release-deferred' in body
+
+
+def test_non_deferred_badge_is_static(ctx):
+    """A claimed item's badge is a plain span — no release form."""
+    item_id, _ = _claimed_review(ctx.db)
+    body = ctx.client.get(f"/work-items/{item_id}").text
+    assert "/release-deferred" not in body
+
+
+def test_post_release_deferred_reverts_to_claimable(ctx):
+    item_id = _deferred_review(ctx.db)
+    r = ctx.client.post(f"/work-items/{item_id}/release-deferred",
+                        follow_redirects=False)
+    assert r.status_code == 303
+    state = ctx.db.execute("SELECT state FROM work_items WHERE id=?",
+                           (item_id,)).fetchone()["state"]
+    assert state == core_db.WORK_ITEM_STATE_CLAIMABLE
+
+
+def test_post_release_deferred_unknown_id_404s(ctx):
+    r = ctx.client.post("/work-items/999999/release-deferred",
+                        follow_redirects=False)
+    assert r.status_code == 404

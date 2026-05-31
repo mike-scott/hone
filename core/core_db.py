@@ -1593,6 +1593,42 @@ def release_claim(db, claim_id, *, reason=None):
     return "ok"
 
 
+def release_deferred(db, item_id):
+    """Operator-triggered release of a DEFERRED work item back to the
+       CLAIMABLE pool — the manual, immediate analog of the lease-elapsed
+       re-arm (claim_work_item already re-offers a deferred row once its
+       lease lapses; this lets the operator skip the wait from the
+       work-item detail page). The row's state flips DEFERRED → CLAIMABLE
+       and every claim-time field is cleared (claim_id, claimed_by,
+       claimed_at, lease_expires, heartbeat_at, methodology_version) so the
+       next claimer sees a fresh row.
+
+       Safe: a deferred item is terminal and unheld — the node that
+       deferred it already submitted and moved on — so there is no
+       in-flight claim to disrupt and no counters are touched.
+
+       Keyed on `item_id` (the operator acts from the UI, holding the row
+       id, not a claim_id). Returns 'ok' on release, 'not_deferred' when
+       the row is in any other state (idempotent no-op — a double click,
+       or a row already re-claimed), or 'unknown' when the id doesn't
+       exist."""
+    row = db.execute("SELECT state FROM work_items WHERE id=?",
+                     (item_id,)).fetchone()
+    if row is None:
+        return "unknown"
+    if row["state"] != WORK_ITEM_STATE_DEFERRED:
+        return "not_deferred"
+    log.info("release_deferred: work item %s → claimable", item_id)
+    db.execute(
+        "UPDATE work_items SET state=?, claim_id=NULL, claimed_by=NULL, "
+        "claimed_at=NULL, lease_expires=NULL, heartbeat_at=NULL, "
+        "methodology_version=NULL "
+        "WHERE id=?",
+        (WORK_ITEM_STATE_CLAIMABLE, item_id))
+    db.commit()
+    return "ok"
+
+
 def reclaim_expired(db):
     """Crash recovery: return lease-expired claims to their queues. Returns
        (work_items_reclaimed, draft_tasks_reclaimed)."""

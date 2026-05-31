@@ -1255,6 +1255,23 @@ async def work_item_detail(request: Request, work_item_id: int,
     return templates.TemplateResponse(request, "work_item.html", ctx)
 
 
+@router.post("/work-items/{work_item_id:int}/release-deferred")
+async def release_deferred(request: Request, work_item_id: int,
+                           back: str | None = None):
+    """Operator-triggered release of a DEFERRED work item back to the
+       CLAIMABLE pool — the deferred badge on the detail page POSTs here.
+       Reuses core_db.release_deferred: a no-op ('not_deferred') if the row
+       has since been re-claimed or completed, so a double-click is safe.
+       Redirect-after-POST back to the detail page (preserving ?back=)."""
+    result = core_db.release_deferred(request.app.state.db, work_item_id)
+    if result == "unknown":
+        raise HTTPException(status.HTTP_404_NOT_FOUND,
+                            f"no work-item with id {work_item_id}")
+    suffix = f"?back={quote(back, safe='')}" if back else ""
+    return RedirectResponse(f"/work-items/{work_item_id}{suffix}",
+                            status_code=303)
+
+
 @router.get("/enroll", response_class=HTMLResponse)
 async def enroll(request: Request, code: str | None = None):
     """A node's enrollment verification page — the `verification_uri` it logs.
