@@ -645,6 +645,21 @@ def _patchset_view(db, root):
                 if ai_review["node_id"] else None)
         ai_review["producer_label"] = (
             node.get("name") or f"id {node['id']}") if node else None
+        # Render each concern location's code_snippet through the SAME
+        # per-line diff classifier the thread's patch messages use
+        # (patchview), so a snippet picks up the .patch-body .pl-* colours
+        # — hunk/file markers muted, +/- lines on the add/del wash — and
+        # reads "just like a patch diff". The classifier only washes +/-
+        # lines that sit inside a hunk, so a bare excerpt renders as honest
+        # plain lines in the same component. The snippet is short, untrusted
+        # node output; patchview HTML-escapes each line, so snippet_html is
+        # safe to mark |safe in the template.
+        for c in ai_review["concerns"]:
+            for loc in c.get("locations") or []:
+                snippet = loc.get("code_snippet")
+                loc["snippet_html"] = (
+                    patchview.render(snippet, is_patch=True).body_html
+                    if snippet else None)
 
     messages = []
     for m in core_db.messages_for_patchset(db, root):

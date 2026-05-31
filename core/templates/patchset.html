@@ -72,7 +72,22 @@
       <td><span class="badge text-bg-warning">{{ c.severity }}</span></td>
       <td><code class="small">{{ c.stage_id }}</code></td>
       <td><code class="small">{{ c.candidate_or_check_id }}</code></td>
-      <td>{{ c.text }}</td>
+      <td>
+        {{ c.text }}
+        {# Quoted source for each location, rendered with the same
+           per-line diff treatment as the thread's patch messages
+           (core/patchview.py → .patch-body .pl-* in app.css). snippet_html
+           is server-rendered, pre-escaped, per-line classified markup. #}
+        {% for loc in c.locations %}
+        <div class="small text-muted mt-2">
+          <code>{{ loc.file }}{% if loc.function_symbol %} · {{ loc.function_symbol }}{% endif %}</code>
+        </div>
+        {% if loc.snippet_html %}
+        <pre class="patch-body small bg-body-tertiary p-2 rounded mt-1"
+             style="max-height: 20rem; overflow: auto;">{{ loc.snippet_html|safe }}</pre>
+        {% endif %}
+        {% endfor %}
+      </td>
       <td class="small text-muted">
         {{ c.patch_scope.kind if c.patch_scope else "—" }}
         {% if c.is_preexisting %}<em>(pre-existing)</em>{% endif %}

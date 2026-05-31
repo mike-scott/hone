@@ -243,6 +243,69 @@ def test_ai_review_skips_attribution_when_node_id_is_null(ctx):
     assert "&lt;deleted&gt;" not in body
 
 
+# --- AI review concern rendering (diff-style snippets) --------------------
+
+def test_ai_review_renders_concern_snippet_as_diff(ctx):
+    """A concern's code_snippet is rendered through the same diff component
+       the thread's patch messages use (.patch-body + per-line .pl-* spans
+       from core/patchview.py), so the operator reads it just like a patch
+       diff. When the snippet carries real diff markers (a hunk), the
+       +/- lines pick up the add/del wash."""
+    _plant_patchset(ctx.db)
+    # patchview enters diff mode on a `diff --git` line; the hunk header
+    # then governs +/- classification — same as a real patch message.
+    snippet = ("diff --git a/drivers/net/foo.c b/drivers/net/foo.c\n"
+               "@@ -1,1 +1,2 @@\n"
+               "-\tkfree(dev);\n"
+               "+\tkfree(dev);\n"
+               "+\tdev = NULL;")
+    concern = {
+        "concern_id": "rev-c-001",
+        "stage_id": "2",
+        "candidate_or_check_id": "use-after-free",
+        "text": "possible use-after-free of dev",
+        "severity": "major",
+        "is_preexisting": False,
+        "patch_scope": {"kind": "patch", "patches": ["<p1@x>"]},
+        "locations": [{
+            "file": "drivers/net/foo.c",
+            "function_symbol": "foo_probe",
+            "code_snippet": snippet,
+        }],
+    }
+    core_db.upsert_ai_review(ctx.db, "<r1@x>", concerns=[concern],
+                              model="m")
+    body = ctx.client.get(f"/patchsets/{quote('r1@x')}").text
+    # Reuses the diff component's wrapper + per-line classes.
+    assert 'class="patch-body' in body
+    assert "pl-add" in body and "pl-del" in body and "pl-hunk" in body
+    # The location pointer and concern text render alongside the snippet.
+    assert "drivers/net/foo.c" in body
+    assert "foo_probe" in body
+    assert "use-after-free of dev" in body
+
+
+def test_ai_review_snippet_without_diff_markers_still_uses_diff_component(ctx):
+    """A bare code excerpt (no @@ hunk) carries no +/- changes, so it
+       renders as plain per-line spans inside the same .patch-body
+       component — consistent treatment, honest colouring (the classifier
+       only washes +/- lines that sit inside a hunk)."""
+    _plant_patchset(ctx.db)
+    concern = {
+        "concern_id": "rev-c-002", "stage_id": "1",
+        "candidate_or_check_id": "null-check", "text": "missing NULL check",
+        "severity": "minor", "is_preexisting": True,
+        "patch_scope": {"kind": "patch", "patches": ["<p1@x>"]},
+        "locations": [{"file": "drivers/net/foo.c",
+                       "code_snippet": "\tif (!dev)\n\t\treturn -ENOMEM;"}],
+    }
+    core_db.upsert_ai_review(ctx.db, "<r1@x>", concerns=[concern], model="m")
+    body = ctx.client.get(f"/patchsets/{quote('r1@x')}").text
+    assert 'class="patch-body' in body
+    assert "pl-plain" in body                       # rendered, not coloured
+    assert "missing NULL check" in body
+
+
 # --- queue row → detail wiring --------------------------------------------
 
 def test_queue_row_links_to_the_work_item_detail_page(ctx):
