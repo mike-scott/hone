@@ -58,9 +58,11 @@ uses it for thread-root resolution against the corpus).
 
 The framework's `_ingest_ref(db, module, ref)` writes the patchset or
 message into `hone.db`, applies the list-tag filter to a `PatchsetRef`, and
-fires the auto-enqueue triggers: `maybe_enqueue_prepare` after each
-patchset, and `maybe_enqueue_review` after each patch (gated on the
-prepare task having produced a `patchset_metadata` row). Comments are
+fires the prepare auto-enqueue trigger: `maybe_enqueue_prepare` after each
+patchset. Review is **not** auto-enqueued — it is an operator action (the
+"Request review" button on the patchset detail page, `POST
+/review-requests/<root>` → `maybe_enqueue_review`), so a gather pass
+enqueues only prepare. Comments are
 upserted but trigger no work-items — training is session-driven, so
 comments are inert corpus material until an operator launches a session.
 The cursor on the ref is persisted as the source's new resume point.

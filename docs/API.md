@@ -571,10 +571,10 @@ selects one of four schema branches: **prepare** / **review** / **train** /
 
 What hone-core does with a valid record, by `task_type`:
 
-- **prepare** — writes a `patchset_metadata` row for the patchset, then
-  calls `maybe_enqueue_review` to enqueue the review work-item (the
-  prepare-completion-gates-review check passes once the row exists and
-  every patch message has landed).
+- **prepare** — writes a `patchset_metadata` row for the patchset. This
+  makes the patchset *review-eligible* (the "Request review" button on the
+  detail page un-dims) but does **not** auto-enqueue a review — review is
+  operator-triggered (`POST /review-requests/<root>`).
 - **review** — writes an `ai_reviews` row (source = `hone-node`) for the
   patchset. A `reviewed` outcome carries `concerns[]`; `unappliable` /
   `deferred` carry only a `reason` and write no review. No train enqueue

@@ -107,20 +107,20 @@ skips it because no enabled tag matched. Skipped patchsets are recorded
 with `state=skipped` on the `patchsets` row; no work-items of any type
 are enqueued; they are never picked or re-offered.
 
-**Auto-enqueue triggers** (in `core_db.maybe_enqueue_prepare` /
-`maybe_enqueue_review`, fired by `gather._ingest_ref` as each ref
-lands):
+**Enqueue triggers**:
 
-- after a non-skipped `patchset` lands → enqueue one `prepare` work-item
-  (idempotent, one per root Message-ID);
-- after a `patch`-message lands on a patchset that already has a
-  completed `prepare` → enqueue one `review` work-item per patchset
-  (idempotent, one per root Message-ID). A review may not start until
-  preparation is complete — this orders the metadata before the review
-  so reviewers can be cited against the authoritative maintainer set,
-  and so the patchset can be filtered out at the eligibility level
-  before review compute is spent on it (e.g., bot-only threads,
-  malformed patchsets).
+- **prepare — auto-enqueued.** In `core_db.maybe_enqueue_prepare`, fired by
+  `gather._ingest_ref` after a non-skipped `patchset` lands → one `prepare`
+  work-item (idempotent, one per root Message-ID).
+- **review — operator-triggered, not auto-enqueued.** The operator requests
+  a review from the patchset detail page (`POST /review-requests/<root>` →
+  `core_db.maybe_enqueue_review`), which enqueues one `review` work-item per
+  patchset (idempotent, one per root Message-ID). Auto-enqueueing review at
+  gather time would flood the queue, so it is a deliberate per-patchset
+  action. The request is only offered once a `patchset_metadata` row exists,
+  so preparation still precedes the review — reviewers cited against the
+  authoritative maintainer set, and bot-only / malformed patchsets filtered
+  out before review compute is spent on them.
 
 Comments are upserted into `messages` but **never** auto-enqueue work
 items. Training is exclusively session-driven: the corpus accumulates

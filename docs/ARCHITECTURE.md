@@ -352,9 +352,11 @@ by concern:
 | **Nodes & auth** | `nodes`, `node_enrollments`, `node_tokens` | enrolled nodes + the device-authorization-grant enrollments + the issued access/refresh token pairs (hashed only) |
 | **Gather state** | `gather_state` | one row per gather module — the opaque resume cursor (see `SOURCES.md`) |
 
-A patchset is gathered once; a comment lands as a separate `messages` row;
-each new comment on a patchset that already carries a hone-node `ai_review`
-auto-enqueues a `train` work-item for that patch.
+A patchset is gathered once; a comment lands as a separate `messages` row
+and is inert at gather time. Comments never auto-enqueue work — training is
+session-driven: the session orchestrator creates one `train` work-item per
+selected `(patch, comment)` pair at `draft → ready` materialisation (see
+*Training sessions* and `ARCHITECTURE-TRAINING.md`).
 
 **Dedup.** A patchset's identity is the **root Message-ID** of its thread,
 so the same submission gathered via two sources is one `patchsets` row.

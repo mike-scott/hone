@@ -96,10 +96,12 @@ after the lease elapses).
   draft tasks running → an outstanding draft task is blocked; check
   the queue for `draft` items in `claimed` state.
 
-The operator never queues a review by hand: review work-items are
-auto-enqueued by `gather._ingest_ref` once the patchset has a
-`patchset_metadata` row from the prepare task; train work-items are
-auto-enqueued as each comment lands on a reviewed patchset.
+The operator queues each review by hand: once a patchset has a
+`patchset_metadata` row from the prepare task, its detail page offers a
+**Request review** button (`POST /review-requests/<root>`) that enqueues
+the review work-item. Review is **not** auto-enqueued — that keeps a
+gather run from flooding the queue. Train work-items are not auto-enqueued
+either: training is session-driven (Sessions page → session-draft).
 
 ## The merge gate — dispositioning proposals
 
@@ -202,9 +204,10 @@ are tunable but rarely changed.
 
 | Symptom | Likely cause | First check |
 |---|---|---|
-| Patchsets gathering but no reviews enqueued | List-tag filter has no enabled tags matching | Settings → enable relevant list tags |
+| Patchsets gathered/prepared but no reviews | Review is operator-triggered, not automatic | Request a review from the patchset detail page (prepare must be complete) |
+| Patchsets not gathering at all | List-tag filter has no enabled tags matching | Settings → enable relevant list tags |
 | Reviews enqueued but stuck at `claimable` | No nodes accepting `review` work | Node health; node's declared `task_types` |
-| Reviews enqueued but no prepare completed | Prepare task blocking | Prepare node logs and `task_types` |
+| "Request review" button stays dimmed | Prepare not yet complete for the patchset | Prepare node logs and `task_types` |
 | Many `unappliable` outcomes | Patch reconstruction issue or wrong list scope | Spot-check `unappliable` records' `reason` fields |
 | Many `deferred` outcomes | Base-tree access issue on prepare/review nodes | Prepare or review node git fetch logs |
 | Eligibility-flag count growing, no draft running | Outstanding draft task blocked | Queue → `draft` items in `claimed` state |
