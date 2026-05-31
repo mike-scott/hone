@@ -257,7 +257,14 @@ $defs:
         minLength: 1
       code_snippet:
         type: string
-        description: A short excerpt of the problematic code.
+        description: >-
+          A short excerpt of the problematic code as a unified diff hunk:
+          a `diff --git a/<file> b/<file>` header, an `@@ … @@` hunk line,
+          then the relevant context/`+`/`-` lines. hone-core renders it
+          with the same per-line diff styling as the patch thread, so a
+          well-formed hunk reads just like a patch. Use context-only lines
+          (leading space) when the concern is about existing code with no
+          change to propose; use `-`/`+` lines when proposing a change.
 
   concern:
     type: object

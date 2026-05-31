@@ -1255,8 +1255,12 @@ operations:
       (a tag from `report_finalization.severity_scale.levels[].tag`);
       `is_preexisting` (true exactly when the finding originates from the
       `preexisting-issues` check); `patch_scope` (kind + patches +
-      spans_lines_in_diff); `locations` (file, plus function and a short snippet
-      where known).
+      spans_lines_in_diff); `locations` (file, plus function and a short
+      `code_snippet` where known — emitted as a unified diff hunk: a
+      `diff --git a/<file> b/<file>` header, an `@@ … @@` line, then the
+      relevant context/`+`/`-` lines, so it renders just like a patch.
+      Context-only lines for an observation about existing code; `-`/`+`
+      lines when proposing a concrete change).
 
       ### Adversarial self-review
 
