@@ -245,7 +245,9 @@ def test_run_once_releases_an_unsupported_task_type_without_crashing(
             self.released = []
 
         def claim(self):
-            return {"claim_id": "c1", "task_type": "review"}   # unsupported
+            # `train` is not in SUPPORTED_TASK_TYPES (prepare, review),
+            # so it exercises the unsupported-type guard.
+            return {"claim_id": "c1", "task_type": "train"}   # unsupported
 
         def release_claim(self, claim_id, reason):
             self.released.append((claim_id, reason))
@@ -264,7 +266,7 @@ def test_run_once_releases_an_unsupported_task_type_without_crashing(
     assert len(cli.released) == 1
     claim_id, reason = cli.released[0]
     assert claim_id == "c1"
-    assert "review" in reason
+    assert "train" in reason
 
 
 def test_run_once_propagates_original_exception_even_if_release_fails(

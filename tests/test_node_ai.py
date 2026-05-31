@@ -273,10 +273,11 @@ def _patch_popen(monkeypatch, *, events=(), returncode=0, stderr="",
 
     class _FakePopen:
         def __init__(self, cmd, stdin=None, stdout=None, stderr=None,
-                     text=False):
+                     text=False, cwd=None):
             if file_not_found:
                 raise FileNotFoundError("claude")
             state["cmd"] = cmd
+            state["cwd"] = cwd
             self.stdin = _Stdin()
             self.stdout = gen_stdout()
             self.stderr = iter([stderr_out] if stderr_out else [])

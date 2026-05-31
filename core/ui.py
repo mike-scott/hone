@@ -730,7 +730,7 @@ async def patchset_detail(request: Request, root_message_id: str,
     return templates.TemplateResponse(request, "patchset.html", ctx)
 
 
-@router.post("/patchsets/{root_message_id:path}/review")
+@router.post("/review-requests/{root_message_id:path}")
 async def request_review(request: Request, root_message_id: str):
     """Operator-triggered review enqueue. Review is not auto-enqueued
        (a gather run would flood the queue); the operator requests one
@@ -740,12 +740,13 @@ async def request_review(request: Request, root_message_id: str):
        no-op. Redirect-after-POST back to the detail page (the button
        dims once the review item exists)."""
     db = request.app.state.db
-    try:
-        core_db.maybe_enqueue_review(db, root_message_id)
-    except KeyError:
+    # maybe_enqueue_review returns None (not KeyError) for an unknown or
+    # not-yet-gathered patchset, so check existence explicitly to 404.
+    if core_db.get_patchset(db, root_message_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND,
                             f"no patchset with root_message_id "
                             f"{root_message_id!r}")
+    core_db.maybe_enqueue_review(db, root_message_id)
     return RedirectResponse(f"/patchsets/{quote(root_message_id)}",
                              status_code=303)
 

@@ -74,16 +74,24 @@ def test_gather_does_not_auto_enqueue_a_review(db):
     """Review is operator-triggered, not auto-enqueued at gather time —
        even with a patchset_metadata row present (the old enqueue gate),
        a gather pass enqueues only prepare, never review."""
+    # First pass creates the patchset row + its patch message.
+    gather._gather_source(db, _FakeModule([
+        _patch_ref("<p1@x>", cursor="1"),
+        _msg_ref("<m1@x>", root="<p1@x>", cursor="2"),
+    ]))
+    # Simulate prepare having completed — this is the metadata row that
+    # used to arm the review auto-enqueue gate (FK requires the patchset
+    # to exist first, hence after the gather above).
     core_db.upsert_patchset_metadata(
         db, "<p1@x>", mode="heuristic",
         tree_state={}, subsystem={}, patch_size={}, maintainer={},
         patch_type={}, review_intensity={"bucket_overall": "light"},
         preparation_notes={"mode": "heuristic"})
-    refs = [
-        _patch_ref("<p1@x>", cursor="1"),
-        _msg_ref("<m1@x>", root="<p1@x>", cursor="2"),
-    ]
-    gather._gather_source(db, _FakeModule(refs))
+    # A further gather pass (another patch message landing) must still
+    # enqueue no review, even though the metadata gate is now satisfied.
+    gather._gather_source(db, _FakeModule([
+        _msg_ref("<m2@x>", root="<p1@x>", cursor="3"),
+    ]))
     n_reviews = db.execute(
         "SELECT COUNT(*) FROM work_items WHERE type=?",
         (core_db.WORK_ITEM_TYPE_REVIEW,)).fetchone()[0]

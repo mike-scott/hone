@@ -35,7 +35,7 @@
      is in flight; otherwise a dimmed button states why. #}
   {% if review_request.available %}
   <form method="post"
-        action="/patchsets/{{ patchset.root_message_id | urlencode }}/review"
+        action="/review-requests/{{ patchset.root_message_id | urlencode }}"
         class="m-0">
     <button type="submit" class="btn btn-sm btn-primary">
       <i class="bi bi-play-circle me-1"></i>Request review

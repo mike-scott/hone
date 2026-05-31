@@ -127,7 +127,7 @@ def test_review_button_offered_once_prepared(ctx):
     _plant_patchset(ctx.db)                       # plants patchset_metadata
     body = ctx.client.get(f"/patchsets/{quote('r1@x')}").text
     assert "Request review" in body
-    assert f'action="/patchsets/{quote("r1@x")}/review"' in body
+    assert f'action="/review-requests/{quote("r1@x")}"' in body
 
 
 def test_review_button_disabled_before_prepare(ctx):
@@ -145,12 +145,14 @@ def test_request_review_enqueues_and_dims_button(ctx):
        the detail page), and the button then reads 'Review queued' and is
        disabled — the dim-once-present behaviour."""
     _plant_patchset(ctx.db)
-    r = ctx.client.post(f"/patchsets/{quote('r1@x')}/review",
+    r = ctx.client.post(f"/review-requests/{quote('r1@x')}",
                         follow_redirects=False)
     assert r.status_code == 303
+    # rows are keyed on the normalized message-id (norm_msgid strips the
+    # angle brackets), so query the bare form.
     n = ctx.db.execute(
         "SELECT COUNT(*) FROM work_items WHERE type=? AND root_message_id=?",
-        (core_db.WORK_ITEM_TYPE_REVIEW, "<r1@x>")).fetchone()[0]
+        (core_db.WORK_ITEM_TYPE_REVIEW, "r1@x")).fetchone()[0]
     assert n == 1
     body = ctx.client.get(f"/patchsets/{quote('r1@x')}").text
     assert "Review queued" in body
@@ -161,18 +163,18 @@ def test_request_review_is_idempotent(ctx):
     """A double-submit (or a patchset that already has a review) is a safe
        no-op — still exactly one review work-item."""
     _plant_patchset(ctx.db)
-    ctx.client.post(f"/patchsets/{quote('r1@x')}/review",
+    ctx.client.post(f"/review-requests/{quote('r1@x')}",
                     follow_redirects=False)
-    ctx.client.post(f"/patchsets/{quote('r1@x')}/review",
+    ctx.client.post(f"/review-requests/{quote('r1@x')}",
                     follow_redirects=False)
     n = ctx.db.execute(
         "SELECT COUNT(*) FROM work_items WHERE type=? AND root_message_id=?",
-        (core_db.WORK_ITEM_TYPE_REVIEW, "<r1@x>")).fetchone()[0]
+        (core_db.WORK_ITEM_TYPE_REVIEW, "r1@x")).fetchone()[0]
     assert n == 1
 
 
 def test_request_review_404_for_unknown_root(ctx):
-    r = ctx.client.post(f"/patchsets/{quote('nope@x')}/review",
+    r = ctx.client.post(f"/review-requests/{quote('nope@x')}",
                         follow_redirects=False)
     assert r.status_code == 404
 
