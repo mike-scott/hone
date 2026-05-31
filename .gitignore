@@ -14,3 +14,6 @@ docker-compose.override.yml
 # hone-core DB/identity backups produced by core/scripts/backup.sh —
 # local operational artifacts, never committed.
 core/backups/
+
+# hone-node simulator data dir (scripts/run-node-sim.sh)
+.sim/
