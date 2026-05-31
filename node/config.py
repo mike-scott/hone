@@ -48,6 +48,9 @@ class Config:
     backoff_initial:    float  # initial transient-failure backoff, seconds
     backoff_max:        float  # maximum transient-failure backoff, seconds
     heartbeat_interval: int    # seconds between claim heartbeats
+    cli_timeout:        int    # HONE_CLI_TIMEOUT — max seconds for one
+                                # `claude` CLI turn before the watchdog kills
+                                # the wedged subprocess (cli backend only)
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -91,4 +94,5 @@ class Config:
             backoff_initial    = float(os.environ.get("HONE_BACKOFF_INITIAL", "1")),
             backoff_max        = float(os.environ.get("HONE_BACKOFF_MAX", "300")),
             heartbeat_interval = int(os.environ.get("HONE_HEARTBEAT_INTERVAL", "300")),
+            cli_timeout        = int(os.environ.get("HONE_CLI_TIMEOUT", "600")),
         )

@@ -91,3 +91,16 @@ def test_claude_backends_enum_documents_supported_values():
     """The exported tuple is what node.config validates against; keep
        it in lockstep with the operator-facing .env.example docs."""
     assert CLAUDE_BACKENDS == ("sdk", "cli")
+
+
+def test_cli_timeout_defaults_to_600(monkeypatch):
+    _set_minimum(monkeypatch, HONE_CLAUDE_BACKEND="cli")
+    assert Config.from_env().cli_timeout == 600
+
+
+def test_cli_timeout_overridden_by_env(monkeypatch):
+    """HONE_CLI_TIMEOUT overrides the 600s default — the knob an operator
+       turns when a node's agentic review turns legitimately run long."""
+    _set_minimum(monkeypatch, HONE_CLAUDE_BACKEND="cli",
+                 HONE_CLI_TIMEOUT="1800")
+    assert Config.from_env().cli_timeout == 1800

@@ -299,8 +299,9 @@ def _cli_failure_text(stderr, result_event, trace):
     return " ".join(parts)
 
 
-# claude CLI invocation timeout in seconds. Long enough to swallow a
-# full Claude turn (large prompt + large response), short enough that a
+# Default claude CLI invocation timeout in seconds — overridable per node
+# via HONE_CLI_TIMEOUT (cfg.cli_timeout). Long enough to swallow a full
+# Claude turn (large prompt + large response), short enough that a
 # truly-wedged subprocess won't pin the node forever.
 _CLI_TIMEOUT_SECONDS = 600
 
@@ -429,10 +430,13 @@ def _call_claude_cli(cfg, system, user_text, *, model, tools=None, cwd=None):
 
     done = threading.Event()
     timed_out = threading.Event()
+    # Per-call timeout: HONE_CLI_TIMEOUT (cfg.cli_timeout) overrides the
+    # module default. getattr keeps test cfgs that omit the field working.
+    timeout = getattr(cfg, "cli_timeout", None) or _CLI_TIMEOUT_SECONDS
 
     def watchdog():
         while not done.wait(_HEARTBEAT_SECONDS):
-            if time.monotonic() - started >= _CLI_TIMEOUT_SECONDS:
+            if time.monotonic() - started >= timeout:
                 timed_out.set()
                 proc.kill()
                 return
@@ -483,7 +487,7 @@ def _call_claude_cli(cfg, system, user_text, *, model, tools=None, cwd=None):
     if timed_out.is_set():
         _record_outcome("connection")
         raise CallClaudeError(
-            f"`claude` CLI timed out after {_CLI_TIMEOUT_SECONDS}s "
+            f"`claude` CLI timed out after {timeout}s "
             "— the subprocess was wedged.",
             category="connection", trace=trace,
             duration_ms=duration_ms, model=model_used) from None
