@@ -242,7 +242,11 @@ PREPARE_METADATA = {
 }
 
 
-def test_prepare_prepared_writes_metadata_and_fires_review_enqueue(client):
+def test_prepare_prepared_writes_metadata_without_review_enqueue(client):
+    """A prepared record writes the patchset_metadata row but does NOT
+       auto-enqueue a review — review is operator-triggered per patchset
+       (core/ui.py → request_review), so a gather/prepare run never floods
+       the queue with reviews."""
     body = {"task_type": "prepare", "worker_id": "1",
             "outcome": "prepared",
             "model": "claude-opus-4-7", "usage": USAGE,
@@ -253,7 +257,9 @@ def test_prepare_prepared_writes_metadata_and_fires_review_enqueue(client):
     assert client.state.patchset_metadata_written is not None
     root, mode, fields = client.state.patchset_metadata_written
     assert root == "<r1@x>" and mode == "heuristic"
-    assert client.state.review_re_enqueued == "<r1@x>"
+    # No auto review enqueue on prepare completion (the manual trigger is
+    # the only path now).
+    assert client.state.review_re_enqueued is None
     # Version is read off the work_items row (FAKE_MV), not the record.
     assert fields["methodology_version"] == FAKE_MV
 

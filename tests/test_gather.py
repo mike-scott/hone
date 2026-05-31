@@ -70,6 +70,26 @@ def test_gather_ingests_a_patchset_and_messages(db):
     assert len(core_db.comments_for_patch(db, "<m1@x>")) == 1
 
 
+def test_gather_does_not_auto_enqueue_a_review(db):
+    """Review is operator-triggered, not auto-enqueued at gather time —
+       even with a patchset_metadata row present (the old enqueue gate),
+       a gather pass enqueues only prepare, never review."""
+    core_db.upsert_patchset_metadata(
+        db, "<p1@x>", mode="heuristic",
+        tree_state={}, subsystem={}, patch_size={}, maintainer={},
+        patch_type={}, review_intensity={"bucket_overall": "light"},
+        preparation_notes={"mode": "heuristic"})
+    refs = [
+        _patch_ref("<p1@x>", cursor="1"),
+        _msg_ref("<m1@x>", root="<p1@x>", cursor="2"),
+    ]
+    gather._gather_source(db, _FakeModule(refs))
+    n_reviews = db.execute(
+        "SELECT COUNT(*) FROM work_items WHERE type=?",
+        (core_db.WORK_ITEM_TYPE_REVIEW,)).fetchone()[0]
+    assert n_reviews == 0
+
+
 def test_comment_landing_does_not_auto_enqueue_a_train(db):
     """Training is exclusively session-driven; a comment landing at
        gather time upserts the message but generates no work-item."""

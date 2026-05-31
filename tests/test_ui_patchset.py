@@ -119,6 +119,64 @@ def test_patchset_detail_404_for_unknown_root(ctx):
     assert r.status_code == 404
 
 
+# --- manual review trigger ------------------------------------------------
+
+def test_review_button_offered_once_prepared(ctx):
+    """A prepared patchset with no review yet shows the active Request
+       review button (a POST form to the review endpoint)."""
+    _plant_patchset(ctx.db)                       # plants patchset_metadata
+    body = ctx.client.get(f"/patchsets/{quote('r1@x')}").text
+    assert "Request review" in body
+    assert f'action="/patchsets/{quote("r1@x")}/review"' in body
+
+
+def test_review_button_disabled_before_prepare(ctx):
+    """Without a patchset_metadata row (prepare not done), the button is
+       disabled — review can't be enqueued until prepare lands."""
+    core_db.upsert_patchset(ctx.db, "<r1@x>", subject="[PATCH] x",
+                             n_patches=1, submitter_email="a@x")
+    body = ctx.client.get(f"/patchsets/{quote('r1@x')}").text
+    assert "Awaiting prepare" in body
+    assert "disabled" in body
+
+
+def test_request_review_enqueues_and_dims_button(ctx):
+    """POSTing the review request enqueues a review work-item (303 back to
+       the detail page), and the button then reads 'Review queued' and is
+       disabled — the dim-once-present behaviour."""
+    _plant_patchset(ctx.db)
+    r = ctx.client.post(f"/patchsets/{quote('r1@x')}/review",
+                        follow_redirects=False)
+    assert r.status_code == 303
+    n = ctx.db.execute(
+        "SELECT COUNT(*) FROM work_items WHERE type=? AND root_message_id=?",
+        (core_db.WORK_ITEM_TYPE_REVIEW, "<r1@x>")).fetchone()[0]
+    assert n == 1
+    body = ctx.client.get(f"/patchsets/{quote('r1@x')}").text
+    assert "Review queued" in body
+    assert "Request review" not in body           # active button gone
+
+
+def test_request_review_is_idempotent(ctx):
+    """A double-submit (or a patchset that already has a review) is a safe
+       no-op — still exactly one review work-item."""
+    _plant_patchset(ctx.db)
+    ctx.client.post(f"/patchsets/{quote('r1@x')}/review",
+                    follow_redirects=False)
+    ctx.client.post(f"/patchsets/{quote('r1@x')}/review",
+                    follow_redirects=False)
+    n = ctx.db.execute(
+        "SELECT COUNT(*) FROM work_items WHERE type=? AND root_message_id=?",
+        (core_db.WORK_ITEM_TYPE_REVIEW, "<r1@x>")).fetchone()[0]
+    assert n == 1
+
+
+def test_request_review_404_for_unknown_root(ctx):
+    r = ctx.client.post(f"/patchsets/{quote('nope@x')}/review",
+                        follow_redirects=False)
+    assert r.status_code == 404
+
+
 # --- AI review producer attribution --------------------------------------
 
 def _approved_node(db, name):

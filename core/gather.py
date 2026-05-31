@@ -72,14 +72,15 @@ def _ingest_ref(db, module, ref):
        under ('patchsets' | 'messages' | 'skipped'). Raises on ingest
        failure.
 
-       After upserting, fire the auto-enqueue triggers:
+       After upserting, fire the auto-enqueue trigger:
        - a new patchset enqueues a `prepare` work-item (one per root
-         Message-ID);
-       - a complete patchset (all patch messages present AND the prepare
-         task has produced a patchset_metadata row) enqueues a `review`.
-       The prepare→review ordering is enforced inside
-       core_db.maybe_enqueue_review (it short-circuits when no
-       patchset_metadata row exists).
+         Message-ID).
+       Review is NOT auto-enqueued — an operator requests it per patchset
+       from the detail page (core/ui.py → request_review), so a gather
+       run (potentially 100k patchsets) never floods the queue with
+       reviews. The gate still lives in core_db.maybe_enqueue_review
+       (prepare's patchset_metadata row + every patch present), which the
+       manual trigger reuses.
 
        Comments are upserted into `messages` but trigger no work-items;
        training is session-driven and creates train work-items at session
@@ -108,12 +109,10 @@ def _ingest_ref(db, module, ref):
             series_version=ref.series_version)
         if ref.list_tags:
             core_db.set_patchset_tags(db, ref.root_message_id, ref.list_tags)
-        # Every non-skipped patchset gets a prepare; the review enqueue
-        # gates on the prepare's patchset_metadata row existing, so just
-        # re-checking review here is a no-op pre-prepare and a real
-        # enqueue once prepare lands + every patch is in the corpus.
+        # Every non-skipped patchset gets a prepare. Review is operator-
+        # triggered per patchset (not auto-enqueued), so nothing else
+        # fires here.
         core_db.maybe_enqueue_prepare(db, ref.root_message_id)
-        core_db.maybe_enqueue_review(db, ref.root_message_id)
         return "patchsets"
     if isinstance(ref, gather_api.MessageRef):
         core_db.upsert_message(
@@ -125,13 +124,10 @@ def _ingest_ref(db, module, ref):
             author_name=ref.author_name or None,
             author_email=ref.author_email or None,
             subject=ref.subject or None, sent=ref.sent)
-        if ref.type == core_db.MSG_TYPE_PATCH:
-            # adding a patch may complete the patchset; the gate inside
-            # maybe_enqueue_review also requires the prepare task to have
-            # produced a patchset_metadata row.
-            core_db.maybe_enqueue_review(db, ref.root_message_id)
-        # Comments are inert at gather time — they're the corpus a future
-        # training session will draw from.
+        # A landing patch message may complete the patchset, but review is
+        # operator-triggered, not auto-enqueued — nothing fires here.
+        # Comments are inert at gather time too; they're the corpus a
+        # future training session will draw from.
         return "messages"
     raise TypeError(f"{module.name}: unknown ref type {type(ref).__name__}")
 

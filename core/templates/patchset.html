@@ -28,7 +28,29 @@
 <div class="row g-4">
   <div class="col-lg-8">
 
-<h2 class="h5">AI review</h2>
+<div class="d-flex align-items-center justify-content-between">
+  <h2 class="h5 mb-0">AI review</h2>
+  {# Manual review trigger — review is operator-requested, not auto-
+     enqueued. Offered only when prepare is done and no review exists or
+     is in flight; otherwise a dimmed button states why. #}
+  {% if review_request.available %}
+  <form method="post"
+        action="/patchsets/{{ patchset.root_message_id | urlencode }}/review"
+        class="m-0">
+    <button type="submit" class="btn btn-sm btn-primary">
+      <i class="bi bi-play-circle me-1"></i>Request review
+    </button>
+  </form>
+  {% else %}
+  {% set _label = {"queued":       "Review queued",
+                   "done":         "Review complete",
+                   "needs-prepare":"Awaiting prepare"} %}
+  <button type="button" class="btn btn-sm btn-outline-secondary" disabled
+          title="{% if review_request.reason == 'needs-prepare' %}a prepare task must complete before a review can be requested{% elif review_request.reason == 'queued' %}a review work-item already exists for this patchset{% else %}this patchset already has a completed review{% endif %}">
+    <i class="bi bi-play-circle me-1"></i>{{ _label.get(review_request.reason, "Request review") }}
+  </button>
+  {% endif %}
+</div>
 {% if ai_review %}
 <p class="text-muted small mb-2">
   Reviewed {{ ai_review.reviewed_display }}

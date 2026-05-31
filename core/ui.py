@@ -664,9 +664,12 @@ def _patchset_view(db, root):
 
     work_item_back_qs = "?back=" + quote(f"/patchsets/{root}", safe="")
     work_items = []
+    has_review_item = False
     for w in core_db.work_items_for_patchset(db, root):
         type_name  = core_db.WORK_ITEM_TYPE_NAMES.get(w["type"], "?")
         state_name = core_db.WORK_ITEM_STATE_NAMES.get(w["state"], "?")
+        if w["type"] == core_db.WORK_ITEM_TYPE_REVIEW:
+            has_review_item = True
         work_items.append({
             "id":            w["id"],
             "type":          type_name,
@@ -684,6 +687,21 @@ def _patchset_view(db, root):
             "detail_url":    f"/work-items/{w['id']}{work_item_back_qs}",
         })
 
+    # Review-request availability for the manual trigger. Review is no
+    # longer auto-enqueued (see gather._ingest_ref); the operator asks for
+    # it here. The button is offered only when prepare has produced the
+    # patchset_metadata row (the enqueue gate) and there isn't already a
+    # review work-item or a completed ai_review — so it dims once a review
+    # exists or is in flight. `reason` explains a disabled button.
+    if has_review_item:
+        review_request = {"available": False, "reason": "queued"}
+    elif ai_review is not None:
+        review_request = {"available": False, "reason": "done"}
+    elif metadata is None:
+        review_request = {"available": False, "reason": "needs-prepare"}
+    else:
+        review_request = {"available": True, "reason": None}
+
     return {
         "patchset":   patchset,
         "tags":       tags,
@@ -691,6 +709,7 @@ def _patchset_view(db, root):
         "ai_review":  ai_review,
         "messages":   messages,
         "work_items": work_items,
+        "review_request": review_request,
     }
 
 
@@ -709,6 +728,26 @@ async def patchset_detail(request: Request, root_message_id: str,
     ctx = _patchset_view(request.app.state.db, root_message_id)
     ctx["back_url"] = _safe_back(back)
     return templates.TemplateResponse(request, "patchset.html", ctx)
+
+
+@router.post("/patchsets/{root_message_id:path}/review")
+async def request_review(request: Request, root_message_id: str):
+    """Operator-triggered review enqueue. Review is not auto-enqueued
+       (a gather run would flood the queue); the operator requests one
+       patchset at a time here. Reuses core_db.maybe_enqueue_review — the
+       same prepare-gated, idempotent enqueue the pipeline used to call —
+       so a double-click or a patchset that already has a review is a safe
+       no-op. Redirect-after-POST back to the detail page (the button
+       dims once the review item exists)."""
+    db = request.app.state.db
+    try:
+        core_db.maybe_enqueue_review(db, root_message_id)
+    except KeyError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND,
+                            f"no patchset with root_message_id "
+                            f"{root_message_id!r}")
+    return RedirectResponse(f"/patchsets/{quote(root_message_id)}",
+                             status_code=303)
 
 
 # --- node health ----------------------------------------------------------
