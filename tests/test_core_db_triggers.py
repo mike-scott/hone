@@ -392,3 +392,44 @@ def test_release_claim_returns_lapsed_for_unknown_id(db):
     """An unknown claim_id (already reclaimed by lease expiry, or
        never issued) returns 'lapsed' — symmetric with submit_result."""
     assert core_db.release_claim(db, "no-such-claim") == "lapsed"
+
+
+# --- deferred re-arm (claim picks up lease-elapsed deferred items) ----------
+
+def test_claim_rearms_a_lease_elapsed_deferred_item(db):
+    """A deferred work item re-arms once its lease elapses: claim_work_item
+       re-offers it just like a lease-expired claim. (A deferred review whose
+       base wasn't fetchable should be retried later — e.g. once the tree has
+       advanced — not stuck forever.)"""
+    core_db.add_methodology_version(db, {"name": "test", "version": 1})
+    _planted_patchset(db, "<ps-d@x>", n_patches=1)
+    core_db.maybe_enqueue_prepare(db, "<ps-d@x>")
+    c = core_db.claim_work_item(db, "node-x", methodology_version=1)
+    # node defers it (base tree unobtainable); submit_work_result leaves
+    # lease_expires intact, so push it into the past to simulate elapse.
+    core_db.submit_work_result(db, c["claim_id"],
+                               state=core_db.WORK_ITEM_STATE_DEFERRED,
+                               record={"outcome": "deferred"})
+    db.execute("UPDATE work_items SET lease_expires=? WHERE claim_id=?",
+               (1, c["claim_id"]))
+    again = core_db.claim_work_item(db, "node-y", methodology_version=1)
+    assert again is not None and again["id"] == c["id"]
+    row = db.execute("SELECT state, claimed_by FROM work_items WHERE id=?",
+                     (c["id"],)).fetchone()
+    assert row["state"] == core_db.WORK_ITEM_STATE_CLAIMED
+    assert row["claimed_by"] == "node-y"
+
+
+def test_claim_does_not_rearm_a_deferred_item_before_lease_elapses(db):
+    """A still-within-lease deferred item is held, not re-offered — the
+       lease is the backoff that stops a deferred review hot-looping."""
+    core_db.add_methodology_version(db, {"name": "test", "version": 1})
+    _planted_patchset(db, "<ps-e@x>", n_patches=1)
+    core_db.maybe_enqueue_prepare(db, "<ps-e@x>")
+    c = core_db.claim_work_item(db, "node-x", methodology_version=1,
+                                lease_seconds=1800)
+    core_db.submit_work_result(db, c["claim_id"],
+                               state=core_db.WORK_ITEM_STATE_DEFERRED,
+                               record={"outcome": "deferred"})
+    # lease_expires is still ~30min out (untouched by the defer submit)
+    assert core_db.claim_work_item(db, "node-y", methodology_version=1) is None

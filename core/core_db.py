@@ -1500,7 +1500,8 @@ def claim_work_item(db, worker_id, *, methodology_version, types=None,
         f"methodology_version=? "
         f"WHERE id=("
         f"  SELECT id FROM work_items "
-        f"  WHERE (state=? OR (state=? AND lease_expires<=?)) "
+        f"  WHERE (state=? "
+        f"         OR (state IN (?, ?) AND lease_expires<=?)) "
         f"  {type_clause}"
         f"  ORDER BY enqueued_at, id LIMIT 1) "
         f"RETURNING claim_id, id, type, root_message_id, message_id, "
@@ -1508,7 +1509,8 @@ def claim_work_item(db, worker_id, *, methodology_version, types=None,
         f"training_session_id, session_role, stratum_label",
         (WORK_ITEM_STATE_CLAIMED, claim_id, worker_id, now,
          now + lease_seconds, now, methodology_version,
-         WORK_ITEM_STATE_CLAIMABLE, WORK_ITEM_STATE_CLAIMED, now,
+         WORK_ITEM_STATE_CLAIMABLE,
+         WORK_ITEM_STATE_CLAIMED, WORK_ITEM_STATE_DEFERRED, now,
          *type_params)).fetchone()
     db.commit()
     return dict(row) if row else None
