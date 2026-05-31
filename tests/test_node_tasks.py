@@ -74,14 +74,6 @@ def test_supported_task_types_all_have_handlers():
     assert "prepare" in tasks.SUPPORTED_TASK_TYPES
 
 
-def test_review_handler_raises_until_ai_integration_lands(monkeypatch):
-    # the dispatch + claim shape are wired; the AI call is explicitly missing
-    with pytest.raises(NotImplementedError):
-        tasks.handle_review_task(None, None,
-                                 {"task_type": "review",
-                                   "methodology_version": 1})
-
-
 def test_train_handler_raises_until_ai_integration_lands():
     with pytest.raises(NotImplementedError):
         tasks.handle_train_task(None, None,
@@ -185,10 +177,10 @@ def _fake_call_claude(response_text, *, trace=None):
        path returns it."""
     calls = []
     def _stub(cfg, system, user_text, *, model=None, max_tokens=None,
-              tools=None):
+              tools=None, cwd=None):
         calls.append({"system": system, "user_text": user_text,
                        "model": model, "max_tokens": max_tokens,
-                       "tools": tools})
+                       "tools": tools, "cwd": cwd})
         out = {"text":  response_text,
                "model": "claude-opus-4-7",
                "usage": {"input_tokens": 1000,
@@ -489,3 +481,180 @@ def test_prepare_records_no_base_fallback_from_subject(monkeypatch):
         "tree": "net-next", "strategy": "tip-at-submission",
         "as_of": 1773000000}
     _validate_record(record)
+
+
+# --- review handler -------------------------------------------------------
+
+# A review claim as core/api.py:_build_review_payload compiles it: the full
+# `core` slice + operations.review.{guidance, return}, the patchset with a
+# resolved base_commit, the prepare metadata (carrying the base_tree hint),
+# and the patch messages (raw lore emails).
+_REVIEW_CLAIM = {
+    "claim_id":            "c-2",
+    "task_type":           "review",
+    "lease_expires_at":    1779360000,
+    "methodology_version": 7,
+    "methodology": {
+        "core": {
+            "principles": [_PRINCIPLE],
+            "stages": [{"id": "2", "title": "Manual semantic review",
+                         "applies": "Any patch touching C code.",
+                         "body": "Build the call graph; apply the checks."}],
+            "checks": [{"id": "concurrency", "title": "Concurrency / locking",
+                         "body": "Search the whole driver for the field."}],
+            "report_finalization": {
+                "body": "Severity is impact x reachability.",
+                "severity_scale": {"levels": [
+                    {"tag": "major", "blocks_merge": True,
+                     "meaning": "A genuine functional defect."}]}}},
+        "operations": {"review": {
+            "guidance": "Drive the methodology over the applied tree.",
+            "return":   "Return raw JSON only — no prose, no fences."}},
+    },
+    "patchset": {
+        "root_message_id": "r2@x",
+        "subject":         "[PATCH] drm/msm: fix locking",
+        "base_commit":     "abc123def456",
+        "n_patches":       1},
+    "patchset_metadata": {"tree_state": {"base_tree": "mainline"}},
+    "patches": [{"message_id": "p2@x",
+                  "type":       "patch",
+                  "part_index": 1,
+                  "subject":    "[PATCH] drm/msm: fix locking",
+                  "body":       "From: a@x\nSubject: [PATCH] drm/msm: fix\n\n"
+                                "diff --git a/x.c b/x.c\n@@ -1 +1 @@\n-a\n+b\n"}],
+}
+
+
+# A schema-valid `reviewed` body as Claude would return it (one concern +
+# the required self_review_record).
+_STUB_REVIEW_BODY = {
+    "concerns": [{
+        "concern_id":            "rev-c-1",
+        "stage_id":              "2",
+        "candidate_or_check_id": "concurrency",
+        "text":                  "Field foo is read without holding the lock.",
+        "severity":              "major",
+        "is_preexisting":        False,
+        "patch_scope":           {"kind": "patch", "patches": ["p2@x"],
+                                   "spans_lines_in_diff": [1, 1]},
+        "locations":             [{"file": "x.c",
+                                    "function_symbol": "foo_probe"}]}],
+    "self_review_record": {"summary": "checked 1 concern; held up",
+                            "challenges": []},
+}
+
+
+def _review_cfg(tmp_path, backend="cli"):
+    return SimpleNamespace(node_name="fake-node",
+                            anthropic_api_key="sk-test",
+                            anthropic_model="claude-sonnet-4-6",
+                            claude_backend=backend,
+                            scratch_dir=str(tmp_path),
+                            cgit_trees=cgit.DEFAULT_TREES)
+
+
+def _stub_refrepo(monkeypatch):
+    """Stub refrepo so review tests stay hermetic (no real git). Returns the
+       list cleanup() is called with, so a test can assert teardown."""
+    cleaned = []
+    monkeypatch.setattr("node.refrepo.prepare",
+                        lambda base, wt, base_tree=None: (wt, "fetched"))
+    monkeypatch.setattr("node.refrepo.cleanup",
+                        lambda *wts: cleaned.extend(wts))
+    return cleaned
+
+
+def test_review_handler_emits_schema_valid_reviewed_record(monkeypatch,
+                                                            tmp_path):
+    cleaned = _stub_refrepo(monkeypatch)
+    monkeypatch.setattr("node.tasks._apply_series",
+                        lambda wt, patches: (True, None))
+    stub, calls = _fake_call_claude(json.dumps(_STUB_REVIEW_BODY))
+    monkeypatch.setattr("node.ai.call_claude", stub)
+
+    record = tasks.handle_review_task(_review_cfg(tmp_path), None,
+                                      _REVIEW_CLAIM)
+
+    _validate_record(record)
+    assert record["outcome"] == "reviewed"
+    assert record["concerns"][0]["candidate_or_check_id"] == "concurrency"
+    assert record["self_review_record"]["summary"]
+    # agentic: read-only tools, rooted in the prepared worktree
+    assert calls[0]["tools"] == tasks._REVIEW_TOOLS
+    assert calls[0]["cwd"] and calls[0]["cwd"].endswith("review-r2_x")
+    # the methodology rode in the system prompt; the diffs in the user msg
+    assert "Concurrency / locking" in calls[0]["system"]
+    assert "diff --git" in calls[0]["user_text"]
+    assert cleaned == [calls[0]["cwd"]]          # worktree torn down
+
+
+def test_review_handler_unappliable_when_series_wont_apply(monkeypatch,
+                                                            tmp_path):
+    _stub_refrepo(monkeypatch)
+    monkeypatch.setattr("node.tasks._apply_series",
+                        lambda wt, patches: (False, "git am failed: conflict"))
+    monkeypatch.setattr(
+        "node.ai.call_claude",
+        lambda *a, **k: pytest.fail("claude must not run on an unappliable "
+                                    "series"))
+
+    record = tasks.handle_review_task(_review_cfg(tmp_path), None,
+                                      _REVIEW_CLAIM)
+
+    _validate_record(record)
+    assert record["outcome"] == "unappliable"
+    assert "conflict" in record["reason"]
+    assert "concerns" not in record
+
+
+def test_review_handler_deferred_when_no_base(tmp_path):
+    claim = dict(_REVIEW_CLAIM)
+    claim["patchset"] = dict(claim["patchset"])
+    claim["patchset"]["base_commit"] = None
+
+    record = tasks.handle_review_task(_review_cfg(tmp_path), None, claim)
+
+    _validate_record(record)
+    assert record["outcome"] == "deferred"
+    assert "base_commit" in record["reason"]
+
+
+def test_review_handler_deferred_when_base_unobtainable(monkeypatch,
+                                                         tmp_path):
+    def _boom(base, wt, base_tree=None):
+        raise RuntimeError(f"base {base} not found in any remote")
+    monkeypatch.setattr("node.refrepo.prepare", _boom)
+
+    record = tasks.handle_review_task(_review_cfg(tmp_path), None,
+                                      _REVIEW_CLAIM)
+
+    _validate_record(record)
+    assert record["outcome"] == "deferred"
+    assert "unobtainable" in record["reason"]
+
+
+def test_review_handler_requires_cli_backend(tmp_path):
+    # Agentic review needs the CLI tool surface; an sdk-backend node that
+    # somehow claims review work must fail loudly, not produce a tree-blind
+    # "review".
+    with pytest.raises(RuntimeError, match="cli"):
+        tasks.handle_review_task(_review_cfg(tmp_path, backend="sdk"),
+                                 None, _REVIEW_CLAIM)
+
+
+def test_review_handler_defers_on_offcontract_response(monkeypatch, tmp_path):
+    _stub_refrepo(monkeypatch)
+    monkeypatch.setattr("node.tasks._apply_series",
+                        lambda wt, patches: (True, None))
+    # concerns present but self_review_record missing → off-contract; the
+    # handler defers (re-arm) rather than emit a record hone-core would 422.
+    stub, _calls = _fake_call_claude(json.dumps({"concerns": []}))
+    monkeypatch.setattr("node.ai.call_claude", stub)
+
+    record = tasks.handle_review_task(_review_cfg(tmp_path), None,
+                                      _REVIEW_CLAIM)
+
+    _validate_record(record)
+    assert record["outcome"] == "deferred"
+    assert "self_review_record" in record["reason"]

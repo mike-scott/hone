@@ -148,7 +148,7 @@ def _heartbeat(label, started):
 
 
 def call_claude(cfg, system, user_text, *, model=None,
-                max_tokens=DEFAULT_MAX_TOKENS, tools=None):
+                max_tokens=DEFAULT_MAX_TOKENS, tools=None, cwd=None):
     """Call Claude and return the response, dispatching on
        cfg.claude_backend:
 
@@ -163,6 +163,12 @@ def call_claude(cfg, system, user_text, *, model=None,
        tools, which is how the (tree-free) prepare task keeps the model from
        running Bash/git to probe for a kernel tree. This is enforced by the
        CLI, independent of what the prompt says.
+
+       `cwd` sets the CLI subprocess's working directory, so the agent's
+       file tools (Read / Grep / Glob / Bash) are rooted there — the review
+       task points it at the prepared worktree at the patch's base commit.
+       Only meaningful on the CLI path with tools enabled; the SDK path has
+       no filesystem reach and ignores it.
 
        Both backends return the same shape:
          {
@@ -182,7 +188,7 @@ def call_claude(cfg, system, user_text, *, model=None,
     resolved = model or cfg.anthropic_model or None
     if cfg.claude_backend == "cli":
         return _call_claude_cli(cfg, system, user_text, model=resolved,
-                                tools=tools)
+                                tools=tools, cwd=cwd)
     return _call_claude_sdk(cfg, system, user_text, model=resolved,
                              max_tokens=max_tokens)
 
@@ -366,7 +372,7 @@ def _trace_tool_results(ev, trace):
                                    else None})
 
 
-def _call_claude_cli(cfg, system, user_text, *, model, tools=None):
+def _call_claude_cli(cfg, system, user_text, *, model, tools=None, cwd=None):
     """`claude` CLI subprocess path — uses the OAuth session in
        $HOME/.claude rather than ANTHROPIC_API_KEY. Pipes user_text through
        stdin (avoids the ARG_MAX cap on multi-thousand-line prompts); the
@@ -401,16 +407,16 @@ def _call_claude_cli(cfg, system, user_text, *, model, tools=None):
         cmd += ["--allowedTools", ",".join(tools)]   # [] → "" → no tools
     if chosen:
         cmd += ["--model", chosen]
-    log.info("claude CLI → model=%s system=%d user=%d chars tools=%s (stream)",
-              chosen, len(system), len(user_text),
-              "default" if tools is None else (tools or "none"))
+    log.info("claude CLI → model=%s system=%d user=%d chars tools=%s cwd=%s "
+             "(stream)", chosen, len(system), len(user_text),
+              "default" if tools is None else (tools or "none"), cwd or ".")
     log.debug("claude CLI → system: %s", system)
     log.debug("claude CLI → user:   %s", user_text)
     started = time.monotonic()
     try:
         proc = subprocess.Popen(
             cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True)
+            stderr=subprocess.PIPE, text=True, cwd=cwd)
     except FileNotFoundError:
         # `claude` binary isn't in PATH. This is configuration-fatal —
         # same operator-feedback shape as a wrong API key.

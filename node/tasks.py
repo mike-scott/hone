@@ -13,8 +13,11 @@ import email
 import email.utils
 import json
 import logging
+import os
+import re
+import subprocess
 
-from node import ai, cgit, tier0
+from node import ai, cgit, refrepo, tier0
 from node.client import HoneCoreClient
 from node.config import Config
 
@@ -28,7 +31,20 @@ log = logging.getLogger("hone.node.tasks")
 # hone-core at enrollment and on every claim, so the queue is filtered to work
 # this node can do — without it the node would be handed review/train/draft
 # work and crash. Add a type here as its handler lands.
-SUPPORTED_TASK_TYPES = ("prepare",)
+SUPPORTED_TASK_TYPES = ("prepare", "review")
+
+
+# The CLI tools the review agent is allowed — read-only code exploration of
+# the prepared worktree, nothing else. Read (whole functions), Grep (the
+# methodology's "search the whole driver for this field" — the core of the
+# concurrency / object-lifetime checks), Glob (find files). Deliberately NO
+# Bash and NO WebFetch/WebSearch: the review is blind (no external lookup of
+# the patch's mailing-list discussion) and needs no shell — `git apply`/`am`
+# is done by the handler before the model runs, and the diffs ride in the
+# prompt. Enforced by the CLI's --allowedTools allowlist independent of the
+# prompt. (Granting scoped git via Bash(git …) is a possible later
+# enhancement; omitted now to keep the blind-review guarantee airtight.)
+_REVIEW_TOOLS = ["Read", "Grep", "Glob"]
 
 
 # The structured-metadata fields the prepare schema requires on a
@@ -311,9 +327,163 @@ def handle_prepare_task(cfg: Config, client: HoneCoreClient,
              "meta": resolver_meta}
 
 
+# --- review: worktree staging + series apply -------------------------------
+
+def _review_worktree_dir(cfg: Config, root: str) -> str:
+    """A per-review scratch worktree path, derived from the root Message-ID.
+       Sanitised (Message-IDs carry @, <>, etc.) and length-bounded so it's
+       a safe directory name under the node's scratch volume."""
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", root or "anon")[:120]
+    return os.path.join(cfg.scratch_dir, f"review-{safe}")
+
+
+def _apply_series(wt: str, patches: list) -> tuple:
+    """Apply the patch series into the worktree with `git am`, so the model
+       reads the *post-apply* (series-tip) code. Returns (True, None) on
+       success or (False, reason) when the series will not apply — the
+       Stage-0 'applies cleanly' gate, surfaced as outcome=unappliable.
+
+       Only diff-bearing patch messages are applied (the cover letter has
+       no diff), ordered by part_index. The bodies are full RFC 5322
+       emails (what lore stored), which is exactly what `git am` consumes;
+       a throwaway committer identity is supplied via `-c` since `am`
+       records commits on the detached worktree HEAD."""
+    diffs = sorted((p for p in patches
+                    if p.get("type") == "patch" and p.get("body")),
+                   key=lambda p: (p.get("part_index") or 0))
+    if not diffs:
+        return (False, "review payload carried no patch messages to apply")
+    mbox = "\n".join(p["body"] for p in diffs)
+    r = subprocess.run(
+        ["git", "-c", "user.name=hone-node", "-c", "user.email=hone@invalid",
+         "-C", wt, "am", "--keep-cr"],
+        input=mbox, capture_output=True, text=True)
+    if r.returncode != 0:
+        # Leave no half-applied state behind for the (disposable) worktree.
+        subprocess.run(["git", "-C", wt, "am", "--abort"],
+                       capture_output=True, text=True)
+        detail = (r.stderr or r.stdout or "").strip()
+        return (False, f"git am failed: {detail[:500]}")
+    return (True, None)
+
+
+# --- review: prompt assembly -----------------------------------------------
+
+def _render_core_reference(core: dict) -> str:
+    """Render the compiled `core` methodology block (stages, checks,
+       candidates, documentation_review, report_finalization + the severity
+       scale) into the review system prompt. The checks already carry the
+       appended concern-return contract (core/api.py:_compile_methodology
+       footers them for the review slice)."""
+    out = []
+    for s in (core.get("stages") or []):
+        out.append(f"\n\n### Stage {s.get('id')}: {s.get('title', '')}")
+        if s.get("applies"):
+            out.append(f"\n_Applies: {s['applies']}_")
+        out.append(f"\n{s.get('body', '')}")
+    checks = core.get("checks") or []
+    if checks:
+        out.append("\n\n## Stage-2 checks (unordered set)")
+        for c in checks:
+            out.append(f"\n\n### {c.get('title', c.get('id', ''))} "
+                       f"(id: {c.get('id')})\n{c.get('body', '')}")
+    cands = core.get("candidates") or []
+    if cands:
+        out.append("\n\n## Candidate practices (experimental — apply like "
+                   "checks)")
+        for c in cands:
+            out.append(f"\n\n### {c.get('title', c.get('id', ''))} "
+                       f"(id: {c.get('id')})\n{c.get('body', '')}")
+    doc = core.get("documentation_review")
+    if doc:
+        out.append(f"\n\n## {doc.get('title', 'Documentation review')}\n"
+                   f"{doc.get('body', '')}")
+    rf = core.get("report_finalization")
+    if rf:
+        out.append(f"\n\n## Report finalization\n{rf.get('body', '')}")
+        for lv in ((rf.get("severity_scale") or {}).get("levels") or []):
+            out.append(f"\n- **{lv.get('tag')}** "
+                       f"(blocks_merge={lv.get('blocks_merge')}): "
+                       f"{(lv.get('meaning') or '').strip()}")
+    return "".join(out)
+
+
+def _build_review_system(claim: dict) -> str:
+    """The review system prompt: the governing principles (hard
+       requirements), the review operation guidance (how to drive the
+       methodology), then the substantive methodology itself (stages,
+       checks, rubric) from the compiled `core` slice."""
+    methodology = claim.get("methodology", {}) or {}
+    core = methodology.get("core") or {}
+    guidance = ((methodology.get("operations") or {})
+                .get("review") or {}).get("guidance", "")
+    blocks = []
+    principles = core.get("principles") or []
+    if principles:
+        blocks.append("=== GOVERNING PRINCIPLES (hard requirements) ===")
+        for p in principles:
+            blocks.append(f"\n## {p.get('title', p.get('id', ''))}\n"
+                          f"{p.get('body', '')}")
+    blocks.append("\n\n=== REVIEW OPERATION GUIDANCE ===\n")
+    blocks.append(guidance)
+    blocks.append("\n\n=== METHODOLOGY ===")
+    blocks.append(_render_core_reference(core))
+    return "".join(blocks)
+
+
+def _build_review_user_text(claim: dict) -> str:
+    """The review user message: the patchset + its prepare metadata as
+       context, the patch diffs (what the series changes), and the review
+       return contract. The series is already applied in the model's cwd
+       worktree, so the prompt tells it the files it reads there are the
+       post-apply tip and the diffs below are the change."""
+    patchset = claim.get("patchset") or {}
+    meta_block = claim.get("patchset_metadata") or {}
+    diffs = sorted((p for p in (claim.get("patches") or [])
+                    if p.get("type") == "patch" and p.get("body")),
+                   key=lambda p: (p.get("part_index") or 0))
+    return_contract = ((claim.get("methodology") or {})
+                       .get("operations") or {}).get("review", {}).get(
+                           "return", "")
+    parts = [
+        "You are reviewing a Linux kernel patchset. The full series is "
+        "already applied in your working directory (your cwd), on top of "
+        "its base commit — so the files you Read/Grep there are the "
+        "post-apply (series-tip) code. Build the call graph and read whole "
+        "functions from that tree. The diffs below are exactly what the "
+        f"series changed; the base commit is {patchset.get('base_commit')}."
+        "\n\n=== PATCHSET (context) ===\n",
+        json.dumps({"patchset": patchset,
+                    "patchset_metadata": meta_block}, indent=2),
+        "\n\n=== PATCH DIFFS (the change under review) ===\n"]
+    for p in diffs:
+        parts.append(f"\n--- patch {p.get('part_index')}: "
+                     f"{p.get('subject', '')} ---\n{p.get('body', '')}\n")
+    parts.append("\n\n=== RETURN CONTRACT ===\n")
+    parts.append(return_contract)
+    return "".join(parts)
+
+
+def _review_failure(cfg: Config, outcome: str, reason: str,
+                    meta: dict = None) -> dict:
+    """A reason-only review record for the non-success outcomes
+       (`unappliable` / `deferred`) — no concerns, no self_review_record,
+       per the review_record schema's oneOf."""
+    rec = {"task_type": "review",
+           "worker_id": _worker_id(cfg),
+           "model":     getattr(cfg, "anthropic_model", "") or "",
+           "usage":     {"input_tokens": 0, "output_tokens": 0,
+                         "duration_ms": 0},
+           "outcome":   outcome,
+           "reason":    reason}
+    if meta:
+        rec["meta"] = meta
+    return rec
+
+
 def handle_review_task(cfg: Config, client: HoneCoreClient,
                        claim: dict) -> dict:
-    """`review` task: an AI patchset review.
+    """`review` task: a blind, agentic AI patchset review.
 
     Claim payload carries:
       - methodology_version, methodology (compiled doc with core +
@@ -322,22 +492,119 @@ def handle_review_task(cfg: Config, client: HoneCoreClient,
       - patchset_metadata (the prepare-task output: subsystem,
         patch_size, maintainer, patch_type, review_intensity, tree_state)
       - patches: [{message_id, part_index, body}, …]  — the patch messages
-        only, with no review comments interleaved
+        only (raw lore emails), no review comments interleaved
 
     The handler:
-      1. Stages the base tree (refrepo.prepare) and confirms the patches
-         apply (`git apply --check`); on failure → outcome=unappliable.
-      2. Calls the Claude API with the methodology guidance + the patches,
-         requesting the structured `concerns` return (each concern carries
-         concern_id, stage_id, candidate_or_check_id, severity,
-         is_preexisting, patch_scope, locations).
-      3. Validates the response against the methodology's review return spec.
-      4. Returns the review completion record.
+      1. Stages a worktree at the base commit (refrepo.prepare, honouring
+         the prepare phase's base_tree hint) and applies the series into it
+         with `git am` — the Stage-0 apply gate. Apply failure →
+         outcome=unappliable; base tree unobtainable → deferred.
+      2. Calls Claude (CLI backend) with the methodology as the system
+         prompt and the patch diffs as the user message, rooted (cwd) in
+         the worktree with read-only tools (Read/Grep/Glob) so it reads the
+         post-apply code to drive the stage/check methodology.
+      3. Shapes the structured `concerns[]` + `self_review_record` into a
+         `reviewed` record. Off-contract or unparseable output → deferred
+         (re-arm) rather than emitting an invalid record.
 
-    TODO: stages 1–3. For now the dispatch + shape are wired; the AI call
-    raises so the integration is explicitly missing rather than silently
-    returning empty."""
-    raise NotImplementedError("review: AI integration not yet wired")
+    The worktree is always cleaned up (finally)."""
+    # Agentic review needs the CLI backend's tool access (Read/Grep/Glob in
+    # the worktree); the SDK path has no tools. A review-capable node must
+    # run HONE_CLAUDE_BACKEND=cli — surface a misconfiguration loudly rather
+    # than silently produce a tree-blind "review".
+    if getattr(cfg, "claude_backend", None) != "cli":
+        raise RuntimeError(
+            "review requires HONE_CLAUDE_BACKEND=cli (agentic tree access); "
+            f"node is configured for "
+            f"{getattr(cfg, 'claude_backend', None)!r}")
+
+    patchset = claim.get("patchset") or {}
+    root = patchset.get("root_message_id")
+    base = patchset.get("base_commit")
+    if not base:
+        return _review_failure(
+            cfg, "deferred",
+            "no base_commit on the patchset — cannot stage a worktree to "
+            "review against")
+
+    base_tree = ((claim.get("patchset_metadata") or {})
+                 .get("tree_state") or {}).get("base_tree")
+    wt = _review_worktree_dir(cfg, root)
+    try:
+        refrepo.prepare(base, wt, base_tree=base_tree)
+    except Exception as exc:                       # RuntimeError + git errors
+        log.warning("review: base tree %s unobtainable — deferring: %s",
+                    (base or "")[:12], exc)
+        return _review_failure(
+            cfg, "deferred",
+            f"base tree {(base or '')[:12]} unobtainable: {exc}")
+
+    try:
+        applied, fail = _apply_series(wt, claim.get("patches") or [])
+        if not applied:
+            log.info("review: series does not apply — unappliable: %s", fail)
+            return _review_failure(cfg, "unappliable", fail)
+
+        system = _build_review_system(claim)
+        user_text = _build_review_user_text(claim)
+        try:
+            response = ai.call_claude(cfg, system, user_text,
+                                      tools=_REVIEW_TOOLS, cwd=wt)
+        except ai.CallClaudeError as exc:
+            # The call ran but produced no usable answer. Defer (re-arm) —
+            # a transient (rate/connection) retry may succeed — carrying the
+            # partial trace + failure context for the operator. Auth failures
+            # take the configuration-fatal CallClaudeAuthError path instead.
+            log.warning("review: Claude call failed (%s) — deferring: %s",
+                        exc.category, exc)
+            return _review_failure(
+                cfg, "deferred",
+                f"claude call failed ({exc.category}): {exc}",
+                meta={"trace": _cap_trace(exc.trace),
+                      "claude_error": {
+                          "category":   exc.category,
+                          "returncode": exc.returncode,
+                          "stderr": (exc.stderr or "").strip()[
+                              :_RAW_RESPONSE_CAP]}})
+
+        header = {"task_type": "review",
+                  "worker_id": _worker_id(cfg),
+                  "model":     response["model"],
+                  "usage":     response["usage"]}
+        meta = {"trace": _cap_trace(response.get("trace"))}
+        try:
+            body = ai.parse_json_response(response["text"])
+        except ValueError as exc:
+            log.warning("review: malformed JSON — deferring: %s", exc)
+            raw = response.get("text") or ""
+            return {**header, "outcome": "deferred",
+                    "reason": f"review response was not valid JSON: {exc}",
+                    "meta": {**meta,
+                             "raw_response":        raw[:_RAW_RESPONSE_CAP],
+                             "raw_response_length": len(raw),
+                             "raw_response_truncated":
+                                 len(raw) > _RAW_RESPONSE_CAP}}
+        # A `reviewed` record needs both concerns[] and self_review_record
+        # (schema oneOf). If the model omitted either, the output is
+        # off-contract — defer (re-arm) rather than emit an invalid record
+        # that hone-core would 422 and the runner would mislabel.
+        if "concerns" not in body or "self_review_record" not in body:
+            log.warning("review: response missing concerns[] or "
+                        "self_review_record — deferring")
+            return {**header, "outcome": "deferred",
+                    "reason": "review response missing concerns[] or "
+                              "self_review_record",
+                    "meta": {**meta,
+                             "raw_response":
+                                 (response.get("text") or "")[
+                                     :_RAW_RESPONSE_CAP]}}
+        return {**header,
+                "outcome": "reviewed",
+                "concerns": body.get("concerns") or [],
+                "self_review_record": body.get("self_review_record"),
+                "meta": meta}
+    finally:
+        refrepo.cleanup(wt)
 
 
 def handle_train_task(cfg: Config, client: HoneCoreClient,
