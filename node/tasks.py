@@ -353,7 +353,13 @@ def _apply_series(wt: str, patches: list) -> tuple:
                    key=lambda p: (p.get("part_index") or 0))
     if not diffs:
         return (False, "review payload carried no patch messages to apply")
-    mbox = "\n".join(p["body"] for p in diffs)
+    # The bodies are raw RFC 5322 emails (no mbox "From " separators), so
+    # joining them with a newline yields ONE message to `git am` — it
+    # applies only the first patch and silently drops the rest. Frame each
+    # body as an mbox entry with a "From " separator line so `git am`
+    # splits the series into its N messages and applies all of them.
+    mbox = "".join(f"From mboxrd@hone Thu Jan  1 00:00:00 1970\n"
+                   f"{p['body'].rstrip(chr(10))}\n\n" for p in diffs)
     r = subprocess.run(
         ["git", "-c", "user.name=hone-node", "-c", "user.email=hone@invalid",
          "-C", wt, "am", "--keep-cr"],
@@ -471,7 +477,12 @@ def _review_failure(cfg: Config, outcome: str, reason: str,
        per the review_record schema's oneOf."""
     rec = {"task_type": "review",
            "worker_id": _worker_id(cfg),
-           "model":     getattr(cfg, "anthropic_model", "") or "",
+           # A failure before any Claude call (e.g. no base_commit) has no
+           # model to report, but the schema requires a non-empty model
+           # (minLength: 1) — fall back to the node's default model rather
+           # than "" so the record validates instead of wedging the node on
+           # its own failure report.
+           "model":     getattr(cfg, "anthropic_model", "") or ai.DEFAULT_MODEL,
            "usage":     {"input_tokens": 0, "output_tokens": 0,
                          "duration_ms": 0},
            "outcome":   outcome,

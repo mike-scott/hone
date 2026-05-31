@@ -5,6 +5,7 @@ are validated against common/schema/completion-record.schema.yaml so a
 shape regression is caught here, before submission to hone-core."""
 import json
 import os
+import subprocess
 from types import SimpleNamespace
 
 import jsonschema
@@ -634,6 +635,25 @@ def test_review_handler_deferred_when_base_unobtainable(monkeypatch,
     assert "unobtainable" in record["reason"]
 
 
+def test_review_failure_record_has_a_valid_model_when_unset(tmp_path):
+    """A node with no ANTHROPIC_MODEL (cfg.anthropic_model == "") must still
+       emit a schema-valid failure record — `model` has minLength: 1, so an
+       empty model would 422 and wedge the node on its own failure report
+       (the sim hit exactly this). _review_failure falls back to
+       ai.DEFAULT_MODEL."""
+    cfg = _review_cfg(tmp_path)
+    cfg.anthropic_model = ""                      # unset, as in the sim
+    claim = dict(_REVIEW_CLAIM)
+    claim["patchset"] = dict(claim["patchset"])
+    claim["patchset"]["base_commit"] = None       # defer before any AI call
+
+    record = tasks.handle_review_task(cfg, None, claim)
+
+    _validate_record(record)                      # would raise on model: ""
+    assert record["outcome"] == "deferred"
+    assert record["model"] == ai.DEFAULT_MODEL and record["model"]
+
+
 def test_review_handler_requires_cli_backend(tmp_path):
     # Agentic review needs the CLI tool surface; an sdk-backend node that
     # somehow claims review work must fail loudly, not produce a tree-blind
@@ -658,3 +678,64 @@ def test_review_handler_defers_on_offcontract_response(monkeypatch, tmp_path):
     _validate_record(record)
     assert record["outcome"] == "deferred"
     assert "self_review_record" in record["reason"]
+
+
+# --- _apply_series: the real git am framing (no monkeypatch) ---------------
+
+def _git(*args, cwd):
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                    "-C", cwd, *args], check=True, capture_output=True,
+                   text=True)
+
+
+def _authored_series(src, n):
+    """Author `n` sequential commits on top of a base in `src`, then return
+       their raw RFC 5322 email bodies — exactly the shape lore stores and
+       the claim payload carries (no mbox 'From ' separator line)."""
+    _git("init", "-q", cwd=src)
+    open(os.path.join(src, "f.txt"), "w").write("L0\n")
+    _git("add", "f.txt", cwd=src)
+    _git("commit", "-qm", "base", cwd=src)
+    for i in range(1, n + 1):
+        open(os.path.join(src, "f.txt"), "w").write(
+            "L0\n" + "".join(f"ADD{j}\n" for j in range(1, i + 1)))
+        _git("commit", "-qam", f"patch {i}", cwd=src)
+    out = subprocess.run(
+        ["git", "-C", src, "format-patch", f"-{n}", "--stdout"],
+        check=True, capture_output=True, text=True).stdout
+    # Split format-patch's mbox stream back into per-message raw bodies,
+    # dropping the leading mbox "From <sha> …" line so each looks like the
+    # raw email the node receives in its claim payload.
+    bodies = []
+    for chunk in out.split("\nFrom "):
+        chunk = chunk if chunk.startswith("From ") else "From " + chunk
+        bodies.append(chunk.split("\n", 1)[1])
+    return bodies
+
+
+def test_apply_series_applies_every_patch_in_a_multi_patch_series(tmp_path):
+    """Regression: the bodies are raw emails with no mbox separators, so a
+       naive newline-join is one message to `git am` — only patch 1 applies
+       and the rest are silently dropped. _apply_series must frame them as
+       an mbox so all N patches land."""
+    src = str(tmp_path / "src")
+    os.mkdir(src)
+    bodies = _authored_series(src, 3)
+    patches = [{"type": "patch", "part_index": i + 1, "body": b}
+               for i, b in enumerate(bodies)]
+
+    wt = str(tmp_path / "wt")
+    os.mkdir(wt)
+    _git("init", "-q", cwd=wt)
+    open(os.path.join(wt, "f.txt"), "w").write("L0\n")
+    _git("add", "f.txt", cwd=wt)
+    _git("commit", "-qm", "base", cwd=wt)
+
+    ok, reason = tasks._apply_series(wt, patches)
+    assert ok, reason
+    log = subprocess.run(["git", "-C", wt, "log", "--oneline"],
+                         capture_output=True, text=True).stdout
+    for i in (1, 2, 3):
+        assert f"patch {i}" in log, f"patch {i} missing — only some applied"
+    # the cumulative effect of all three patches is on disk
+    assert open(os.path.join(wt, "f.txt")).read() == "L0\nADD1\nADD2\nADD3\n"
