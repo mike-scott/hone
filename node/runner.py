@@ -16,7 +16,7 @@ import anthropic
 import httpx
 
 from common.version import __version__ as VERSION
-from node import health, tasks
+from node import health, refrepo, tasks
 from node.ai import CallClaudeAuthError
 from node.client import EnrollmentError, HoneCoreClient, SchemaRejectedError
 from node.config import Config
@@ -153,12 +153,23 @@ def bootstrap(cfg: Config, client: HoneCoreClient) -> None:
     is not already — this blocks until an operator approves it, and retries
     with backoff if hone-core is unreachable.
 
-    TODO: build / update the reference kernel repo (node.refrepo) under
-    cfg.repo_dir; fetch the current methodology (client.get_methodology()).
+    Then initializes the reference kernel repo (node.refrepo) — an empty
+    git repo with the named-trees remotes registered; base commits fetch on
+    demand at review time. Tree-bound work (`review`) needs it; a prepare-only
+    node (Tier-0/1 are tree-free) would not, but this node supports review so
+    it is initialized unconditionally. Pure local init (no network), so it
+    runs outside the backoff wrapper; idempotent, so a restart reuses the
+    volume.
+
+    TODO: fetch the current methodology (client.get_methodology()). Not yet
+    blocking — the claim payload already carries the compiled methodology.
     """
     _with_backoff(cfg, "enrollment", client.ensure_enrolled)
-    log.info("bootstrap — reference repo + methodology not yet implemented "
-             "(repo_dir=%s)", cfg.repo_dir)
+    if "review" in tasks.SUPPORTED_TASK_TYPES:
+        refrepo.ensure_repo()
+        log.info("bootstrap — reference repo ready (repo_dir=%s)", cfg.repo_dir)
+    else:
+        log.info("bootstrap — no tree-bound task types; skipping reference repo")
 
 
 def run_once(cfg: Config, client: HoneCoreClient) -> bool:

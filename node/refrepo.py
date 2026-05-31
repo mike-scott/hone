@@ -60,6 +60,36 @@ def _ensure_remote(name):
         _git("remote", "add", name, REMOTES[name])
 
 
+def is_initialized():
+    """True if REPO is already a git repository (a restarted node reuses
+       the volume rather than re-initializing)."""
+    return os.path.isdir(REPO) and _git("rev-parse", "--git-dir").returncode == 0
+
+
+def ensure_repo():
+    """Initialize the reference repo if absent, idempotently. Creates an
+       empty repo at REPO and registers every named-trees remote; base
+       commits are fetched on demand by prepare() (no clone here, so
+       startup is instant and disk stays minimal — the first review for a
+       given base pays its one-time fetch). A no-op when REPO already
+       holds a git repository, so a node restart reuses its volume.
+
+       Returns REPO. Raises RuntimeError if `git init` fails."""
+    if is_initialized():
+        # Reconcile remotes anyway — the registry may have grown since the
+        # volume was first initialized; _ensure_remote only adds missing ones.
+        for name in REMOTES:
+            _ensure_remote(name)
+        return REPO
+    os.makedirs(REPO, exist_ok=True)
+    r = _git("init", "--quiet")
+    if r.returncode != 0:
+        raise RuntimeError(f"git init {REPO} failed: {r.stderr.strip()}")
+    for name in REMOTES:
+        _ensure_remote(name)
+    return REPO
+
+
 def base_of(patch_file):
     """The base-commit: trailer of a patch file, or None."""
     try:
