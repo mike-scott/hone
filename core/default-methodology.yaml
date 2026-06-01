@@ -1257,13 +1257,19 @@ operations:
       (a tag from `report_finalization.severity_scale.levels[].tag`);
       `is_preexisting` (true exactly when the finding originates from the
       `preexisting-issues` check); `patch_scope` (kind + patches +
-      spans_lines_in_diff); `locations` (file, plus function and a short
-      `code_snippet` where known — a **quotation** of the problematic code,
-      framed as a unified diff hunk so it renders like a patch: a
-      `diff --git a/<file> b/<file>` header, an `@@ … @@` line, then the
-      cited lines as context (leading space). It is a citation, not a fix:
-      do **not** author `+`/`-` lines to propose an edit — use `-`/`+` only
-      to reproduce the patch's own hunk verbatim).
+      `spans_lines_in_diff` — for a finding scoped to a single patch
+      (`kind: patch`) this is **required** and is how hone-core renders the
+      cited hunk: give `[start, end]`, 0-indexed from the patch's first
+      `diff --git` line, bounding the lines you are quoting. hone-core
+      slices that range out of the patch's own body and renders it as a
+      patch, so you never transcribe diff text yourself); `locations`
+      (file, plus function where known. Citations render **only** from
+      `spans_lines_in_diff`. For a finding about code that is **not in this
+      patch's diff** — a pre-existing issue in surrounding code, or a callee
+      read for context — there is no hunk to slice, so name the problem in
+      `text` and let `file`/`function_symbol` locate it. Do **not**
+      hand-author diff text: `code_snippet` is not rendered, and the
+      suggested change is one prose sentence in `text`).
 
       ### Adversarial self-review
 

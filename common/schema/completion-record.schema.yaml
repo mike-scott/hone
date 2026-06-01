@@ -239,9 +239,15 @@ $defs:
               type: integer
               minimum: 0
         description: >-
-          [start, end] line range within the relevant patch's diff,
-          or null if the concern is not line-scoped (a series-level
-          observation, e.g.).
+          [start, end] line range of the cited hunk, 0-indexed from the
+          relevant patch's first `diff --git` line in the header-stripped
+          patch body (the same content hone-core renders for the thread).
+          Required for a finding scoped to a single patch (`kind: patch`):
+          hone-core slices these lines out of the patch's own body and
+          renders them as the patch citation, so the reviewer never
+          transcribes diff text. Null when the concern is not line-scoped
+          (a series-level observation) or references code outside this
+          patch's diff.
 
   concern_location:
     type: object
@@ -258,15 +264,14 @@ $defs:
       code_snippet:
         type: string
         description: >-
-          A short QUOTATION of the problematic code, framed as a unified
-          diff hunk so hone-core renders it with the same per-line styling
-          as the patch thread: a `diff --git a/<file> b/<file>` header, an
-          `@@ … @@` hunk line, then the relevant lines as context (leading
-          space). This is a citation, not a fix — do NOT author `+`/`-`
-          lines to propose an edit. Use `-`/`+` ONLY to reproduce the
-          patch's own hunk verbatim when quoting what the patch itself
-          changed. Any suggested change belongs in the concern's `text` as
-          prose, never as an invented diff here.
+          Optional and NOT rendered. hone-core renders citations only by
+          slicing the patch's own bytes via `patch_scope.spans_lines_in_diff`
+          — it never displays a snippet authored here. For a finding about
+          code outside this patch's diff (a pre-existing issue, or a callee
+          read for context) there is no hunk to slice: describe it in the
+          concern's `text` and locate it with `file` and `function_symbol`.
+          Prefer leaving this unset. (Retained, optional, for backward
+          compatibility with older review records.)
 
   concern:
     type: object

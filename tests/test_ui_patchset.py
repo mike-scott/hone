@@ -245,65 +245,106 @@ def test_ai_review_skips_attribution_when_node_id_is_null(ctx):
 
 # --- AI review concern rendering (diff-style snippets) --------------------
 
-def test_ai_review_renders_concern_snippet_as_diff(ctx):
-    """A concern's code_snippet is rendered through the same diff component
-       the thread's patch messages use (.patch-body + per-line .pl-* spans
-       from core/patchview.py), so the operator reads it just like a patch
-       diff. When the snippet carries real diff markers (a hunk), the
-       +/- lines pick up the add/del wash."""
-    _plant_patchset(ctx.db)
-    # patchview enters diff mode on a `diff --git` line; the hunk header
-    # then governs +/- classification — same as a real patch message.
-    snippet = ("diff --git a/drivers/net/foo.c b/drivers/net/foo.c\n"
-               "@@ -1,1 +1,2 @@\n"
-               "-\tkfree(dev);\n"
-               "+\tkfree(dev);\n"
-               "+\tdev = NULL;")
-    concern = {
-        "concern_id": "rev-c-001",
-        "stage_id": "2",
-        "candidate_or_check_id": "use-after-free",
-        "text": "possible use-after-free of dev",
-        "severity": "major",
-        "is_preexisting": False,
-        "patch_scope": {"kind": "patch", "patches": ["<p1@x>"]},
-        "locations": [{
-            "file": "drivers/net/foo.c",
-            "function_symbol": "foo_probe",
-            "code_snippet": snippet,
-        }],
-    }
-    core_db.upsert_ai_review(ctx.db, "<r1@x>", concerns=[concern],
-                              model="m")
-    body = ctx.client.get(f"/patchsets/{quote('r1@x')}").text
-    # Reuses the diff component's wrapper + per-line classes.
-    assert 'class="patch-body' in body
-    assert "pl-add" in body and "pl-del" in body and "pl-hunk" in body
-    # The location pointer and concern text render alongside the snippet.
-    assert "drivers/net/foo.c" in body
-    assert "foo_probe" in body
-    assert "use-after-free of dev" in body
-
-
-def test_ai_review_snippet_without_diff_markers_still_uses_diff_component(ctx):
-    """A bare code excerpt (no @@ hunk) carries no +/- changes, so it
-       renders as plain per-line spans inside the same .patch-body
-       component — consistent treatment, honest colouring (the classifier
-       only washes +/- lines that sit inside a hunk)."""
+def test_ai_review_null_span_concern_renders_label_only(ctx):
+    """A concern with no spans_lines_in_diff (a pre-existing or out-of-diff
+       reference) has no hunk to slice, so it renders its prose and the
+       file/function pointer only — never a model-authored code_snippet,
+       which can fabricate a diff that isn't in the patch."""
     _plant_patchset(ctx.db)
     concern = {
         "concern_id": "rev-c-002", "stage_id": "1",
-        "candidate_or_check_id": "null-check", "text": "missing NULL check",
+        "candidate_or_check_id": "stale-doc",
+        "text": "kerneldoc names the wrong struct",
         "severity": "minor", "is_preexisting": True,
-        "patch_scope": {"kind": "patch", "patches": ["<p1@x>"]},
+        "patch_scope": {"kind": "patch", "patches": ["<p1@x>"],
+                        "spans_lines_in_diff": None},
+        # A model-authored snippet must NOT render — only the span does.
         "locations": [{"file": "drivers/net/foo.c",
-                       "code_snippet": "\tif (!dev)\n\t\treturn -ENOMEM;"}],
+                       "function_symbol": "foo_reset",
+                       "code_snippet": "@@ -7,1 +7,1 @@ FABRICATED\n+nonsense"}],
     }
     core_db.upsert_ai_review(ctx.db, "<r1@x>", concerns=[concern], model="m")
     body = ctx.client.get(f"/patchsets/{quote('r1@x')}").text
-    assert 'class="patch-body' in body
-    assert "pl-plain" in body                       # rendered, not coloured
-    assert "missing NULL check" in body
+    assert "kerneldoc names the wrong struct" in body      # prose
+    assert "drivers/net/foo.c" in body                     # file pointer
+    assert "foo_reset" in body                             # function pointer
+    assert "FABRICATED" not in body and "nonsense" not in body   # snippet dropped
+
+
+def test_reconstruct_hunk_slices_cited_lines_from_the_patch_body():
+    """_reconstruct_hunk cites the patch's OWN bytes: given a line span
+       (0-indexed from the patch's first `diff --git` line) it returns the
+       enclosing file + hunk headers and the cited lines verbatim, so the
+       citation can't drift from what the patch actually says."""
+    patch = (
+        "Fix a leak in foo_probe\n"
+        "\n"
+        "diff --git a/drivers/net/foo.c b/drivers/net/foo.c\n"   # origin: line 2
+        "index 1111..2222 100644\n"
+        "--- a/drivers/net/foo.c\n"
+        "+++ b/drivers/net/foo.c\n"
+        "@@ -10,6 +10,7 @@ int foo_probe(struct device *dev)\n"
+        " \tint ret;\n"
+        " \n"
+        " \tret = init(dev);\n"
+        "+\tif (ret)\n"                  # content line 10 -> span start 8
+        "+\t\treturn ret;\n"             # content line 11 -> span end   9
+        " \treturn 0;\n"
+        " }")
+    assert ui._reconstruct_hunk(patch, [8, 9]) == (
+        "diff --git a/drivers/net/foo.c b/drivers/net/foo.c\n"
+        "@@ -10,6 +10,7 @@ int foo_probe(struct device *dev)\n"
+        "+\tif (ret)\n"
+        "+\t\treturn ret;")
+    # Unresolvable spans fall back to None (caller uses any code_snippet).
+    assert ui._reconstruct_hunk(patch, [8, 999]) is None
+    assert ui._reconstruct_hunk(patch, None) is None
+    assert ui._reconstruct_hunk("", [0, 1]) is None
+
+
+def test_ai_review_line_scoped_concern_renders_from_patch_not_model_text(ctx):
+    """A line-scoped concern (`kind: patch` + `spans_lines_in_diff`) is
+       rendered by slicing the patch's own diff, so a model that mis-
+       transcribes the hunk in `code_snippet` can't corrupt the citation:
+       the real hunk header renders and the model's wrong one never does."""
+    _plant_patchset(ctx.db)
+    patch = (
+        "Fix a leak in foo_probe\n"
+        "\n"
+        "diff --git a/drivers/net/foo.c b/drivers/net/foo.c\n"
+        "index 1111..2222 100644\n"
+        "--- a/drivers/net/foo.c\n"
+        "+++ b/drivers/net/foo.c\n"
+        "@@ -10,6 +10,7 @@ int foo_probe(struct device *dev)\n"
+        " \tint ret;\n"
+        " \n"
+        " \tret = init(dev);\n"
+        "+\tif (ret)\n"
+        "+\t\treturn ret;\n"
+        " \treturn 0;\n"
+        " }")
+    core_db.upsert_message(ctx.db, "<p1@x>", root_message_id="<r1@x>",
+                            type=core_db.MSG_TYPE_PATCH, body=patch,
+                            part_index=1, subject="[PATCH 1/1] frob",
+                            author_email="alice@example.com")
+    concern = {
+        "concern_id": "rev-c-001", "stage_id": "2",
+        "candidate_or_check_id": "unchecked-init",
+        "text": "init() return value goes unchecked",
+        "severity": "major", "is_preexisting": False,
+        "patch_scope": {"kind": "patch", "patches": ["<p1@x>"],
+                        "spans_lines_in_diff": [8, 9]},
+        # The model mis-transcribes the hunk — this snippet must be ignored.
+        "locations": [{"file": "drivers/net/foo.c",
+                       "function_symbol": "foo_probe",
+                       "code_snippet": "@@ -99,9 +99,9 @@ WRONG\n+bogus"}],
+    }
+    core_db.upsert_ai_review(ctx.db, "<r1@x>", concerns=[concern], model="m")
+    body = ctx.client.get(f"/patchsets/{quote('r1@x')}").text
+    assert "@@ -10,6 +10,7 @@" in body            # the patch's real hunk
+    assert "@@ -99,9 +99,9 @@" not in body         # the model's bad transcription
+    assert "WRONG" not in body and "bogus" not in body
+    assert "init() return value goes unchecked" in body
 
 
 # --- queue row → detail wiring --------------------------------------------

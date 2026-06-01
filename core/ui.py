@@ -615,6 +615,43 @@ def _safe_back(back):
     return "/"
 
 
+def _reconstruct_hunk(patch_body, span):
+    """Slice a concern's cited lines straight out of the patch's own diff,
+       so the rendered citation is the patch's bytes — not the model's
+       transcription of them (which drifts: wrong `@@` line numbers, invented
+       `+`/`-` lines). `span` is [start, end], 0-indexed from the patch's first
+       `diff --git` line in the header-stripped body — the same content
+       patchview renders for the thread. We re-attach the enclosing file +
+       `@@` headers so patchview's classifier has its diff/hunk state and
+       colours the +/- lines. Returns a unified-diff string, or None when the
+       span can't be resolved (no diff, out of range, no enclosing hunk) — the
+       caller then falls back to any model-authored `code_snippet`."""
+    if not patch_body or not span:
+        return None
+    _, content = patchview.split_headers(patch_body)
+    lines = content.strip("\n").split("\n")
+    origin = next((i for i, l in enumerate(lines)
+                   if l.startswith("diff --git")), None)
+    if origin is None:
+        return None
+    start, end = origin + span[0], origin + span[1]
+    if not 0 <= start <= end < len(lines):
+        return None
+    # Nearest enclosing file + hunk headers at or above the cited range.
+    hunk = next((i for i in range(start, origin - 1, -1)
+                 if lines[i].startswith("@@")), None)
+    filehdr = next((i for i in range(start, origin - 1, -1)
+                    if lines[i].startswith("diff --git")), None)
+    if hunk is None or filehdr is None:
+        return None
+    body = lines[max(hunk + 1, start):end + 1]
+    while body and not body[0].strip():     # trim a leading blank context line
+        body.pop(0)
+    if not body:
+        return None
+    return "\n".join([lines[filehdr], lines[hunk], *body])
+
+
 def _patchset_view(db, root):
     """Build the per-patchset detail render context — patchset header,
        list tags, prepare-derived metadata, ai_review concerns, work-item
@@ -631,6 +668,10 @@ def _patchset_view(db, root):
 
     tags = core_db.tags_for_patchset(db, root)
     metadata = core_db.get_patchset_metadata(db, root)
+    # Raw message bodies, indexed by Message-Id — both the thread render below
+    # and the deterministic concern-citation slicing draw from these.
+    raw_messages = list(core_db.messages_for_patchset(db, root))
+    patch_bodies = {m["message_id"]: m["body"] for m in raw_messages}
     ai_review = core_db.get_ai_review(db, root)
     if ai_review is not None:
         # Surface the producing node's human handle next to the
@@ -645,24 +686,40 @@ def _patchset_view(db, root):
                 if ai_review["node_id"] else None)
         ai_review["producer_label"] = (
             node.get("name") or f"id {node['id']}") if node else None
-        # Render each concern location's code_snippet through the SAME
-        # per-line diff classifier the thread's patch messages use
-        # (patchview), so a snippet picks up the .patch-body .pl-* colours
-        # — hunk/file markers muted, +/- lines on the add/del wash — and
-        # reads "just like a patch diff". The classifier only washes +/-
-        # lines that sit inside a hunk, so a bare excerpt renders as honest
-        # plain lines in the same component. The snippet is short, untrusted
-        # node output; patchview HTML-escapes each line, so snippet_html is
-        # safe to mark |safe in the template.
+        # Render each concern's cited code through the SAME per-line diff
+        # classifier the thread's patch messages use (patchview), so the
+        # citation picks up the .patch-body .pl-* colours and reads "just
+        # like a patch diff". We cite ONLY by slicing the hunk out of the
+        # patch's own body, keyed by a line-scoped finding's
+        # `spans_lines_in_diff` — the citation is then the patch's exact
+        # bytes, immune to the model mis-transcribing diff lines. A finding
+        # with no span (a pre-existing or out-of-diff reference) has no hunk
+        # to slice, so it renders as prose + the file/function pointer only;
+        # a model-authored `code_snippet` is never shown — it can fabricate a
+        # diff that isn't in the patch. patchview HTML-escapes each line, so
+        # snippet_html is safe |safe.
         for c in ai_review["concerns"]:
+            ps = c.get("patch_scope") or {}
+            span = ps.get("spans_lines_in_diff")
+            patches = ps.get("patches") or []
+            cited = None
+            if span and ps.get("kind") == "patch" and len(patches) == 1:
+                # patch_bodies is keyed by the stored (normalised) Message-Id;
+                # normalise the concern's id too so a node that emits it
+                # bracketed still resolves.
+                body = patch_bodies.get(core_db.norm_msgid(patches[0]))
+                cited = _reconstruct_hunk(body, span)
             for loc in c.get("locations") or []:
-                snippet = loc.get("code_snippet")
+                # The deterministic slice carries its own `diff --git a/<file>`
+                # header; show it on the location it quotes. Every other
+                # location renders label-only (snippet_html stays None).
+                file = loc.get("file") or ""
                 loc["snippet_html"] = (
-                    patchview.render(snippet, is_patch=True).body_html
-                    if snippet else None)
+                    patchview.render(cited, is_patch=True).body_html
+                    if cited and file and file in cited else None)
 
     messages = []
-    for m in core_db.messages_for_patchset(db, root):
+    for m in raw_messages:
         type_name = core_db.MSG_TYPE_NAMES.get(m["type"], "?")
         rendered = patchview.render(m["body"] or "", is_patch=type_name == "patch")
         messages.append({
