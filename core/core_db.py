@@ -1087,6 +1087,35 @@ def get_ai_review(db, root_message_id, *,
     return r
 
 
+def delete_review(db, root_message_id):
+    """Operator-triggered removal of a patchset's AI review together with
+       the review work-item(s) that produced it — so the operator can wipe
+       a bad review and request a fresh one. Deletes, in FK order: any
+       review_evaluations that reference the review rows (foreign_keys is
+       ON, no cascade), then the ai_reviews row(s) for this patchset (all
+       sources), then its WORK_ITEM_TYPE_REVIEW work-items.
+
+       Keyed on root_message_id (the operator acts from the patchset page).
+       Returns 'ok' when an ai_review was removed, or 'unknown' when the
+       patchset has no ai_review — an idempotent no-op, so a double-click
+       is safe."""
+    root = norm_msgid(root_message_id)
+    ids = [r["id"] for r in db.execute(
+        "SELECT id FROM ai_reviews WHERE root_message_id=?", (root,))]
+    if not ids:
+        return "unknown"
+    log.info("delete_review: patchset %s — removing %d ai_review(s) "
+             "and its review work-items", root, len(ids))
+    marks = ",".join("?" * len(ids))
+    db.execute(f"DELETE FROM review_evaluations WHERE ai_review_id IN ({marks})",
+               ids)
+    db.execute("DELETE FROM ai_reviews WHERE root_message_id=?", (root,))
+    db.execute("DELETE FROM work_items WHERE root_message_id=? AND type=?",
+               (root, WORK_ITEM_TYPE_REVIEW))
+    db.commit()
+    return "ok"
+
+
 # ===========================================================================
 # Patchset metadata  (the prepare task's structured output; corpus group)
 # ===========================================================================

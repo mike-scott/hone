@@ -322,3 +322,88 @@ def test_queue_row_links_to_the_work_item_detail_page(ctx):
                        f'?back={quote("/queue?type=review&state=claimable", safe="")}')
     assert expected_detail in body
     assert f'data-href="{expected_detail}"' in body
+
+
+# --- delete review (button + endpoint) ------------------------------------
+
+def _planted_review(db, root="<r1@x>"):
+    """Plant a patchset, enqueue its review work-item, and record an
+       ai_review — the state the Delete-review control acts on."""
+    _plant_patchset(db, root)
+    core_db.maybe_enqueue_review(db, root)
+    core_db.upsert_ai_review(db, root, concerns=[], model="m")
+
+
+def test_delete_review_button_shown_when_ai_review_exists(ctx):
+    _planted_review(ctx.db)
+    body = ctx.client.get(f"/patchsets/{quote('r1@x')}").text
+    assert "Delete review" in body
+    # root_message_id is stored normalized (brackets stripped), so the
+    # delete form posts to the normalized id.
+    assert f"/review-requests/{quote('r1@x', safe='')}/delete" in body
+
+
+def test_delete_review_button_absent_without_ai_review(ctx):
+    _plant_patchset(ctx.db)
+    body = ctx.client.get(f"/patchsets/{quote('r1@x')}").text
+    assert "Delete review" not in body
+
+
+def test_post_delete_review_removes_ai_review_and_work_item(ctx):
+    _planted_review(ctx.db)
+    r = ctx.client.post(
+        f"/review-requests/{quote('<r1@x>', safe='')}/delete",
+        follow_redirects=False)
+    assert r.status_code == 303
+    assert core_db.get_ai_review(ctx.db, "<r1@x>") is None
+    rows = ctx.db.execute(
+        "SELECT COUNT(*) c FROM work_items WHERE root_message_id=? AND type=?",
+        ("<r1@x>", core_db.WORK_ITEM_TYPE_REVIEW)).fetchone()
+    assert rows["c"] == 0
+
+
+def test_post_delete_review_rearms_request_button(ctx):
+    _planted_review(ctx.db)
+    ctx.client.post(f"/review-requests/{quote('<r1@x>', safe='')}/delete",
+                    follow_redirects=False)
+    body = ctx.client.get(f"/patchsets/{quote('r1@x')}").text
+    assert "Request review" in body
+    assert "Delete review" not in body
+
+
+def test_post_delete_review_unknown_patchset_404(ctx):
+    r = ctx.client.post(
+        f"/review-requests/{quote('<nope@x>', safe='')}/delete",
+        follow_redirects=False)
+    assert r.status_code == 404
+
+
+def test_post_delete_review_without_review_is_safe_noop(ctx):
+    _plant_patchset(ctx.db)
+    r = ctx.client.post(
+        f"/review-requests/{quote('<r1@x>', safe='')}/delete",
+        follow_redirects=False)
+    assert r.status_code == 303
+
+
+def test_delete_review_clears_dependent_evaluations(ctx):
+    """A review evaluated by a training session has review_evaluations rows
+       with a NOT-NULL FK to ai_reviews; delete_review must clear them first
+       (foreign_keys is ON, no cascade) rather than hit a constraint error."""
+    db = ctx.db
+    _plant_patchset(db)
+    rid = core_db.upsert_ai_review(db, "<r1@x>", concerns=[], model="m")
+    now = 1700000000
+    db.execute("INSERT INTO training_sessions (created_at, state, profile) "
+               "VALUES (?, ?, ?)", (now, 1, "standard"))
+    sid = db.execute("SELECT id FROM training_sessions").fetchone()["id"]
+    db.execute("INSERT INTO review_evaluations "
+               "(root_message_id, ai_review_id, session_id, evaluated_at) "
+               "VALUES (?, ?, ?, ?)",
+               (core_db.norm_msgid("<r1@x>"), rid, sid, now))
+    db.commit()
+
+    assert core_db.delete_review(db, "<r1@x>") == "ok"
+    assert core_db.get_ai_review(db, "<r1@x>") is None
+    assert db.execute("SELECT COUNT(*) AS c FROM review_evaluations "
+                      "WHERE ai_review_id=?", (rid,)).fetchone()["c"] == 0

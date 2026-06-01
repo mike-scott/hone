@@ -745,6 +745,30 @@ async def patchset_detail(request: Request, root_message_id: str,
     return templates.TemplateResponse(request, "patchset.html", ctx)
 
 
+@router.post("/review-requests/{root_message_id:path}/delete")
+async def delete_review(request: Request, root_message_id: str):
+    """Operator-triggered deletion of a patchset's AI review and the review
+       work-item(s) that produced it — the "Delete review" button on the
+       detail page POSTs here. Reuses core_db.delete_review, which removes
+       the ai_review, any review_evaluations referencing it, and the review
+       work-items, so the manual trigger re-arms ("Request review" reappears
+       once nothing review-related remains). 404 only when the patchset is
+       unknown; a patchset with no review is a safe no-op. Redirect-after-
+       POST back to the detail page.
+
+       Registered before the catch-all request_review route below so this
+       more specific `/delete` suffix wins — the `:path` converter there
+       would otherwise greedily swallow `<root>/delete`."""
+    db = request.app.state.db
+    if core_db.get_patchset(db, root_message_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND,
+                            f"no patchset with root_message_id "
+                            f"{root_message_id!r}")
+    core_db.delete_review(db, root_message_id)
+    return RedirectResponse(f"/patchsets/{quote(root_message_id)}",
+                             status_code=303)
+
+
 @router.post("/review-requests/{root_message_id:path}")
 async def request_review(request: Request, root_message_id: str):
     """Operator-triggered review enqueue. Review is not auto-enqueued

@@ -32,7 +32,10 @@
   <h2 class="h5 mb-0">AI review</h2>
   {# Manual review trigger — review is operator-requested, not auto-
      enqueued. Offered only when prepare is done and no review exists or
-     is in flight; otherwise a dimmed button states why. #}
+     is in flight; otherwise a dimmed button states why. When a review
+     exists, a Delete button sits beside it: it drops the ai_review and
+     its review work-item so a fresh review can be requested. #}
+  <div class="d-flex gap-2">
   {% if review_request.available %}
   <form method="post"
         action="/review-requests/{{ patchset.root_message_id | urlencode }}"
@@ -50,6 +53,18 @@
     <i class="bi bi-play-circle me-1"></i>{{ _label.get(review_request.reason, "Request review") }}
   </button>
   {% endif %}
+  {% if ai_review %}
+  <form method="post"
+        action="/review-requests/{{ patchset.root_message_id | urlencode }}/delete"
+        class="m-0"
+        onsubmit="return confirm('Delete this AI review and its review work-item? This cannot be undone.');">
+    <button type="submit" class="btn btn-sm btn-outline-danger"
+            title="delete the AI review and the review work-item that produced it">
+      <i class="bi bi-trash me-1"></i>Delete review
+    </button>
+  </form>
+  {% endif %}
+  </div>
 </div>
 {% if ai_review %}
 <p class="text-muted small mb-2">
