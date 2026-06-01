@@ -372,7 +372,7 @@ def test_claim_serves_a_review_task_with_full_core_and_patchset_metadata(ctx):
     """A review claim payload carries the patchset_metadata produced by
        prepare and gets the full `core` block (not narrowed)."""
     core_db.upsert_patchset(ctx.db, "<r1@x>", subject="[PATCH 1/1] x",
-                             n_patches=1)
+                             n_patches=1, sent=1_700_000_000)
     _plant_metadata(ctx.db, "<r1@x>")
     core_db.upsert_message(ctx.db, "<p1@x>", root_message_id="<r1@x>",
                            type=core_db.MSG_TYPE_PATCH, body="diff",
@@ -386,6 +386,8 @@ def test_claim_serves_a_review_task_with_full_core_and_patchset_metadata(ctx):
     assert payload["patchset_metadata"]["subsystem"] == {
         "primary": "drivers/net"}
     assert payload["patchset_metadata"]["patch_size"] == {"bucket": "small"}
+    # submission time rides along for the node's tip-at-submission fallback
+    assert payload["patchset"]["sent"] == 1_700_000_000
 
 
 def test_claim_serves_a_train_task_with_session_fields_and_named_comment(ctx):

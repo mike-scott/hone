@@ -610,15 +610,108 @@ def test_review_handler_unappliable_when_series_wont_apply(monkeypatch,
 
 
 def test_review_handler_deferred_when_no_base(tmp_path):
+    """No declared base, no recorded fallback, and no submission time to
+       anchor the linux-next default → defer (nothing to stage against).
+       _REVIEW_CLAIM's patchset carries no `sent`."""
     claim = dict(_REVIEW_CLAIM)
     claim["patchset"] = dict(claim["patchset"])
-    claim["patchset"]["base_commit"] = None
+    claim["patchset"]["base_commit"] = None        # no fallback, no sent
 
     record = tasks.handle_review_task(_review_cfg(tmp_path), None, claim)
 
     _validate_record(record)
     assert record["outcome"] == "deferred"
     assert "base_commit" in record["reason"]
+
+
+def test_review_handler_defaults_to_linux_next_tip_when_no_fallback(
+        monkeypatch, tmp_path):
+    """No declared base and no recorded base_fallback, but the patchset has
+       a submission time: the handler resolves linux-next's tip-at-submission
+       as a last resort and reviews against it."""
+    seen = {}
+    monkeypatch.setattr(
+        "node.refrepo.resolve_tip",
+        lambda tree, as_of: seen.update(tree=tree, as_of=as_of)
+        or "beef00ddcafe")
+    prepared = {}
+    monkeypatch.setattr(
+        "node.refrepo.prepare",
+        lambda base, wt, base_tree=None: prepared.update(
+            base=base, base_tree=base_tree) or (wt, "fetched"))
+    monkeypatch.setattr("node.refrepo.cleanup", lambda *wts: None)
+    monkeypatch.setattr("node.tasks._apply_series",
+                        lambda wt, patches: (True, None))
+    stub, _ = _fake_call_claude(json.dumps(_STUB_REVIEW_BODY))
+    monkeypatch.setattr("node.ai.call_claude", stub)
+
+    claim = dict(_REVIEW_CLAIM)
+    claim["patchset"] = {**claim["patchset"], "base_commit": None,
+                          "sent": 1_700_000_000}
+    claim["patchset_metadata"] = {"tree_state": {"base_resolution": "no_base"}}
+
+    record = tasks.handle_review_task(_review_cfg(tmp_path), None, claim)
+
+    _validate_record(record)
+    assert record["outcome"] == "reviewed"
+    assert seen == {"tree": "linux-next", "as_of": 1_700_000_000}
+    assert prepared == {"base": "beef00ddcafe", "base_tree": "linux-next"}
+
+
+def _no_base_with_fallback_claim(tree="net-next", as_of=1_700_000_000):
+    """A review claim with no declared base but a recorded tip-at-submission
+       fallback — the state the resolve_tip path acts on."""
+    claim = dict(_REVIEW_CLAIM)
+    claim["patchset"] = {**claim["patchset"], "base_commit": None}
+    claim["patchset_metadata"] = {"tree_state": {
+        "base_resolution": "no_base",
+        "base_fallback": {"tree": tree, "strategy": "tip-at-submission",
+                          "as_of": as_of}}}
+    return claim
+
+
+def test_review_handler_resolves_tip_at_submission_fallback(monkeypatch,
+                                                            tmp_path):
+    """No declared base, but the fallback resolves: the handler turns the
+       tip-at-submission hint into a concrete commit, stages it (passing the
+       fallback tree as the fetch hint), and reviews normally."""
+    prepared = {}
+    monkeypatch.setattr("node.refrepo.resolve_tip",
+                        lambda tree, as_of: "fa11bacc0de0")
+    monkeypatch.setattr(
+        "node.refrepo.prepare",
+        lambda base, wt, base_tree=None: prepared.update(
+            base=base, base_tree=base_tree) or (wt, "fetched"))
+    monkeypatch.setattr("node.refrepo.cleanup", lambda *wts: None)
+    monkeypatch.setattr("node.tasks._apply_series",
+                        lambda wt, patches: (True, None))
+    stub, calls = _fake_call_claude(json.dumps(_STUB_REVIEW_BODY))
+    monkeypatch.setattr("node.ai.call_claude", stub)
+
+    record = tasks.handle_review_task(_review_cfg(tmp_path), None,
+                                      _no_base_with_fallback_claim())
+
+    _validate_record(record)
+    assert record["outcome"] == "reviewed"
+    # staged the resolved tip, hinting the fallback tree to the fetcher
+    assert prepared == {"base": "fa11bacc0de0", "base_tree": "net-next"}
+
+
+def test_review_handler_defers_when_fallback_unresolvable(monkeypatch,
+                                                          tmp_path):
+    """No declared base and the fallback can't be resolved (tree unreachable
+       / no commit predates submission) → defer, never call Claude."""
+    monkeypatch.setattr("node.refrepo.resolve_tip", lambda tree, as_of: None)
+    monkeypatch.setattr(
+        "node.ai.call_claude",
+        lambda *a, **k: pytest.fail("claude must not run without a base"))
+
+    record = tasks.handle_review_task(_review_cfg(tmp_path), None,
+                                      _no_base_with_fallback_claim())
+
+    _validate_record(record)
+    assert record["outcome"] == "deferred"
+    assert "fallback" in record["reason"]
 
 
 def test_review_handler_deferred_when_base_unobtainable(monkeypatch,

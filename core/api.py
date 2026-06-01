@@ -567,6 +567,11 @@ def _build_review_payload(db, work_item, methodology_version, methodology):
             "patchset": {"root_message_id": patchset.get("root_message_id"),
                           "subject":         patchset.get("subject"),
                           "base_commit":     patchset.get("base_commit"),
+                          # submission time — the node's tip-at-submission
+                          # fallback resolves a tree tip as of this instant
+                          # when no base is declared (and no base_fallback
+                          # was recorded at prepare).
+                          "sent":            patchset.get("sent"),
                           "submitter_email": patchset.get("submitter_email"),
                           "n_patches":       patchset.get("n_patches")},
             "patchset_metadata": {

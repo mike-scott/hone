@@ -143,6 +143,33 @@ def prepare(commit, wt_dir, *, base_tree=None):
     return wt_dir, status
 
 
+def resolve_tip(tree, as_of):
+    """Resolve a tree's tip-at-`as_of` to a concrete commit SHA — the
+       no_base fallback the prepare phase records (tier0 emits
+       {tree, strategy:'tip-at-submission', as_of} when a patch declares no
+       base-commit: trailer but its subject prefix names a known tree).
+       Fetches the named remote and returns the newest commit dated at or
+       before `as_of` (the series' submission unix time), approximating the
+       tree state the submitter likely worked from. The resolved SHA is then
+       handed to prepare() like any declared base.
+
+       Returns the SHA, or None when `tree` isn't a known remote, the fetch
+       fails, or no commit predates `as_of` — the caller then defers the
+       review. `as_of` is a unix timestamp; `@<ts>` is git's unix-time date
+       form for --before."""
+    if tree not in REMOTES or as_of is None:
+        return None
+    _ensure_remote(tree)
+    if _git("fetch", "--quiet", tree).returncode != 0:
+        return None
+    # --remotes=<tree> seeds rev-list with that remote's tracking branches;
+    # --before + -n1 then yields the newest commit at or before submission.
+    r = _git("rev-list", "-n", "1", f"--before=@{int(as_of)}",
+             f"--remotes={tree}")
+    sha = r.stdout.strip()
+    return sha or None
+
+
 def cleanup(*wt_dirs):
     """Remove prepared worktree(s) and prune dangling worktree refs."""
     for wt in wt_dirs:

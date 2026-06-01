@@ -103,3 +103,60 @@ def test_prepare_raises_when_no_remote_has_the_commit(monkeypatch):
     with pytest.raises(RuntimeError, match="not found"):
         refrepo.prepare("deadbeef", "/tmp/wt")
     assert len(fetched) == len(refrepo.REMOTES)       # tried every remote
+
+
+# --- resolve_tip (no_base tip-at-submission fallback) ----------------------
+
+def _mock_git_tip(*, fetch_rc=0, rev_list_out="", rev_list_rc=0, calls=None):
+    """A refrepo._git replacement for resolve_tip: records the git
+       subcommands it sees and returns canned results for fetch / rev-list."""
+    def fake_git(*args):
+        if calls is not None:
+            calls.append(args)
+        if args and args[0] == "fetch":
+            return SimpleNamespace(returncode=fetch_rc, stdout="", stderr="")
+        if args and args[0] == "rev-list":
+            return SimpleNamespace(returncode=rev_list_rc,
+                                    stdout=rev_list_out, stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    return fake_git
+
+
+def test_resolve_tip_returns_newest_commit_before_submission(monkeypatch):
+    calls = []
+    monkeypatch.setattr(refrepo, "_git",
+                        _mock_git_tip(rev_list_out="cafef00d1234\n", calls=calls))
+    sha = refrepo.resolve_tip("net-next", 1_700_000_000)
+    assert sha == "cafef00d1234"
+    # fetched the named tree, then asked for the tip at/-before submission
+    assert ("fetch", "--quiet", "net-next") in calls
+    rl = [c for c in calls if c[0] == "rev-list"][0]
+    assert "--before=@1700000000" in rl and "--remotes=net-next" in rl
+
+
+def test_resolve_tip_none_for_unknown_tree(monkeypatch):
+    # an unknown tree is never fetched — guard short-circuits
+    monkeypatch.setattr(refrepo, "_git",
+                        lambda *a: pytest_fail_git())
+    assert refrepo.resolve_tip("some-vendor-tree", 1_700_000_000) is None
+
+
+def test_resolve_tip_none_when_no_timestamp(monkeypatch):
+    monkeypatch.setattr(refrepo, "_git", lambda *a: pytest_fail_git())
+    assert refrepo.resolve_tip("mainline", None) is None
+
+
+def test_resolve_tip_none_when_fetch_fails(monkeypatch):
+    monkeypatch.setattr(refrepo, "_git", _mock_git_tip(fetch_rc=1))
+    assert refrepo.resolve_tip("mainline", 1_700_000_000) is None
+
+
+def test_resolve_tip_none_when_no_commit_predates_submission(monkeypatch):
+    # rev-list succeeds but finds nothing at/-before the submission instant
+    monkeypatch.setattr(refrepo, "_git",
+                        _mock_git_tip(rev_list_out="\n"))
+    assert refrepo.resolve_tip("mainline", 1_700_000_000) is None
+
+
+def pytest_fail_git():
+    raise AssertionError("_git must not be called on the guard path")

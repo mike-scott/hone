@@ -46,6 +46,13 @@ SUPPORTED_TASK_TYPES = ("prepare", "review")
 # enhancement; omitted now to keep the blind-review guarantee airtight.)
 _REVIEW_TOOLS = ["Read", "Grep", "Glob"]
 
+# Last-resort tip-at-submission tree when a base-less patchset carries no
+# recorded base_fallback. linux-next merges the subsystem trees daily, so
+# its tip at submission time most closely tracks whatever a submitter built
+# against; it's also the registry's lead probe tree (node/cgit.py), so it's
+# the one most likely already fetched.
+_DEFAULT_FALLBACK_TREE = "linux-next"
+
 
 # The structured-metadata fields the prepare schema requires on a
 # `prepared` record (per common/schema/completion-record.schema.yaml).
@@ -508,8 +515,11 @@ def handle_review_task(cfg: Config, client: HoneCoreClient,
     The handler:
       1. Stages a worktree at the base commit (refrepo.prepare, honouring
          the prepare phase's base_tree hint) and applies the series into it
-         with `git am` — the Stage-0 apply gate. Apply failure →
-         outcome=unappliable; base tree unobtainable → deferred.
+         with `git am` — the Stage-0 apply gate. When the patchset declares
+         no base, falls back to the prepare phase's recorded tip-at-
+         submission hint (tree_state.base_fallback), resolving it to a
+         concrete commit. Apply failure → outcome=unappliable; base tree
+         unobtainable or no resolvable base → deferred.
       2. Calls Claude (CLI backend) with the methodology as the system
          prompt and the patch diffs as the user message, rooted (cwd) in
          the worktree with read-only tools (Read/Grep/Glob) so it reads the
@@ -532,14 +542,36 @@ def handle_review_task(cfg: Config, client: HoneCoreClient,
     patchset = claim.get("patchset") or {}
     root = patchset.get("root_message_id")
     base = patchset.get("base_commit")
+    tree_state = ((claim.get("patchset_metadata") or {})
+                  .get("tree_state") or {})
+    base_tree = tree_state.get("base_tree")
     if not base:
-        return _review_failure(
-            cfg, "deferred",
-            "no base_commit on the patchset — cannot stage a worktree to "
-            "review against")
+        # No declared base-commit: trailer. Resolve a tip-at-submission
+        # base — the newest commit of a tree as of the series' submission
+        # time. Prefer the prepare phase's recorded fallback (the tree its
+        # subject prefix named); failing that, fall back to linux-next,
+        # which merges the subsystem trees daily and so most closely tracks
+        # what a submitter built against. Either way resolve_tip turns the
+        # (tree, as_of) into a concrete SHA; if neither yields one there's
+        # no tree to stage, so defer.
+        fb = tree_state.get("base_fallback") or {}
+        fb_tree, as_of = fb.get("tree"), fb.get("as_of")
+        if not (fb_tree and as_of is not None):
+            # No recorded fallback — try linux-next at submission time.
+            fb_tree, as_of = _DEFAULT_FALLBACK_TREE, patchset.get("sent")
+        base = (refrepo.resolve_tip(fb_tree, as_of)
+                if fb_tree and as_of is not None else None)
+        if not base:
+            return _review_failure(
+                cfg, "deferred",
+                "no base_commit on the patchset and no resolvable "
+                "tip-at-submission fallback — cannot stage a worktree to "
+                "review against")
+        # Stage against the fallback tree; resolve_tip already fetched it.
+        base_tree = fb_tree
+        log.info("review: no declared base — using %s tip-at-submission "
+                 "%s for %s", fb_tree, base[:12], root)
 
-    base_tree = ((claim.get("patchset_metadata") or {})
-                 .get("tree_state") or {}).get("base_tree")
     wt = _review_worktree_dir(cfg, root)
     try:
         refrepo.prepare(base, wt, base_tree=base_tree)
