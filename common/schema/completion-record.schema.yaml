@@ -258,13 +258,15 @@ $defs:
       code_snippet:
         type: string
         description: >-
-          A short excerpt of the problematic code as a unified diff hunk:
-          a `diff --git a/<file> b/<file>` header, an `@@ … @@` hunk line,
-          then the relevant context/`+`/`-` lines. hone-core renders it
-          with the same per-line diff styling as the patch thread, so a
-          well-formed hunk reads just like a patch. Use context-only lines
-          (leading space) when the concern is about existing code with no
-          change to propose; use `-`/`+` lines when proposing a change.
+          A short QUOTATION of the problematic code, framed as a unified
+          diff hunk so hone-core renders it with the same per-line styling
+          as the patch thread: a `diff --git a/<file> b/<file>` header, an
+          `@@ … @@` hunk line, then the relevant lines as context (leading
+          space). This is a citation, not a fix — do NOT author `+`/`-`
+          lines to propose an edit. Use `-`/`+` ONLY to reproduce the
+          patch's own hunk verbatim when quoting what the patch itself
+          changed. Any suggested change belongs in the concern's `text` as
+          prose, never as an invented diff here.
 
   concern:
     type: object
@@ -312,7 +314,13 @@ $defs:
       text:
         type: string
         minLength: 1
-        description: The concern's full body — the maintainer-facing prose.
+        description: >-
+          The concern's body — the maintainer-facing prose. Be concise:
+          state what is wrong, why it matters, and the reachability you
+          assume, in a few sentences. Any suggested change is one prose
+          sentence, never a code rewrite (cite the code in
+          `locations[].code_snippet`). Prefer one tight paragraph over an
+          essay.
       severity:
         $ref: "#/$defs/severity"
       is_preexisting:

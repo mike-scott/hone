@@ -1251,16 +1251,19 @@ operations:
       (the firing check or candidate — after a Stage C merge, the primary
       root-cause check); optionally `contributing_check_ids` (set **only** on a
       cross-check merge — see Stage C); `text` (the maintainer-facing prose:
-      what is wrong, why it matters, a concrete suggested change); `severity`
+      what is wrong, why it matters, the reachability you assume — **concise**,
+      a few sentences; any suggested change is one prose sentence, never a
+      code rewrite); `severity`
       (a tag from `report_finalization.severity_scale.levels[].tag`);
       `is_preexisting` (true exactly when the finding originates from the
       `preexisting-issues` check); `patch_scope` (kind + patches +
       spans_lines_in_diff); `locations` (file, plus function and a short
-      `code_snippet` where known — emitted as a unified diff hunk: a
+      `code_snippet` where known — a **quotation** of the problematic code,
+      framed as a unified diff hunk so it renders like a patch: a
       `diff --git a/<file> b/<file>` header, an `@@ … @@` line, then the
-      relevant context/`+`/`-` lines, so it renders just like a patch.
-      Context-only lines for an observation about existing code; `-`/`+`
-      lines when proposing a concrete change).
+      cited lines as context (leading space). It is a citation, not a fix:
+      do **not** author `+`/`-` lines to propose an edit — use `-`/`+` only
+      to reproduce the patch's own hunk verbatim).
 
       ### Adversarial self-review
 
