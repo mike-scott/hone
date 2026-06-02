@@ -1,5 +1,6 @@
 """Tests for the per-patchset detail page (core/ui.py GET /patchsets/{root})
 and the work-queue's row → detail wiring."""
+import re
 from types import SimpleNamespace
 from urllib.parse import quote
 
@@ -243,13 +244,131 @@ def test_ai_review_skips_attribution_when_node_id_is_null(ctx):
     assert "&lt;deleted&gt;" not in body
 
 
-# --- AI review concern rendering (diff-style snippets) --------------------
+# --- AI review inline rendering -------------------------------------------
 
-def test_ai_review_null_span_concern_renders_label_only(ctx):
-    """A concern with no spans_lines_in_diff (a pre-existing or out-of-diff
-       reference) has no hunk to slice, so it renders its prose and the
-       file/function pointer only — never a model-authored code_snippet,
-       which can fabricate a diff that isn't in the patch."""
+# A real-shaped single-patch body; content line indices (0-based, after the
+# blank that ends the commit message) put the first `diff --git` at 2, so the
+# two added lines are diff-relative span [8, 9].
+_PATCH_BODY = (
+    "Fix a leak in foo_probe\n"
+    "\n"
+    "diff --git a/drivers/net/foo.c b/drivers/net/foo.c\n"
+    "index 1111..2222 100644\n"
+    "--- a/drivers/net/foo.c\n"
+    "+++ b/drivers/net/foo.c\n"
+    "@@ -10,6 +10,7 @@ int foo_probe(struct device *dev)\n"
+    " \tint ret;\n"
+    " \n"
+    " \tret = init(dev);\n"
+    "+\tif (ret)\n"
+    "+\t\treturn ret;\n"
+    " \treturn 0;\n"
+    " }")
+
+
+def test_annotate_patch_injects_comment_after_the_cited_line():
+    """_annotate_patch lays the patch's full diff out as line rows and drops a
+       concern's comment immediately after the last line of its span (anchor =
+       first `diff --git` + span end). An unanchorable span (null / out of
+       range) is returned separately to pin at the card's foot."""
+    anchored = {"severity": "major", "text": "anchored",
+                "patch_scope": {"spans_lines_in_diff": [8, 9]}}
+    loose = {"severity": "nit", "text": "loose",
+             "patch_scope": {"spans_lines_in_diff": None}}
+    rows, unanchored = ui._annotate_patch(_PATCH_BODY, [anchored, loose])
+    flat = [("concern", r["concern"]["text"]) if "concern" in r
+            else ("line", r["line"]) for r in rows]
+    # The comment row immediately follows the "+\t\treturn ret;" line.
+    i = next(k for k, (kind, v) in enumerate(flat)
+             if kind == "line" and "return ret;" in v)
+    assert flat[i + 1] == ("concern", "anchored")
+    assert [u["text"] for u in unanchored] == ["loose"]
+
+
+def test_severity_counts_tally_new_and_preexisting():
+    """_severity_counts returns all five levels in order; patch-introduced and
+       pre-existing findings are counted separately (pre is parenthesised in
+       the header). Unknown severities are ignored."""
+    concerns = [
+        {"severity": "major", "is_preexisting": False},
+        {"severity": "minor", "is_preexisting": False},
+        {"severity": "minor", "is_preexisting": True},
+        {"severity": "bogus", "is_preexisting": False},   # ignored
+    ]
+    rows = ui._severity_counts(concerns)
+    assert [r["severity"] for r in rows] == \
+        ["critical", "major", "moderate", "minor", "nit"]
+    by = {r["severity"]: r for r in rows}
+    assert (by["major"]["new"], by["major"]["pre"]) == (1, 0)
+    assert (by["minor"]["new"], by["minor"]["pre"]) == (1, 1)
+    assert (by["critical"]["new"], by["critical"]["pre"]) == (0, 0)
+
+
+def test_ai_review_renders_concern_inline_with_result_header(ctx):
+    """A line-scoped concern renders inside the patch's annotated diff
+       (.patch-review), severity-coloured, and is tallied in the "Result:"
+       header — patch-introduced bare, pre-existing parenthesised. The full
+       patch hunk shows; a mis-transcribed code_snippet never does."""
+    _plant_patchset(ctx.db)
+    core_db.upsert_message(ctx.db, "<p1@x>", root_message_id="<r1@x>",
+                            type=core_db.MSG_TYPE_PATCH, body=_PATCH_BODY,
+                            part_index=1, subject="[PATCH 1/1] frob",
+                            author_email="alice@example.com")
+    concerns = [
+        {"concern_id": "rev-c-001", "stage_id": "2",
+         "candidate_or_check_id": "unchecked-init",
+         "text": "init() return value goes unchecked",
+         "severity": "major", "is_preexisting": False,
+         "patch_scope": {"kind": "patch", "patches": ["<p1@x>"],
+                         "spans_lines_in_diff": [8, 9]},
+         # The model mis-transcribes the hunk — this must never be shown.
+         "locations": [{"file": "drivers/net/foo.c", "function_symbol": "foo_probe",
+                        "code_snippet": "@@ -99,9 +99,9 @@ WRONG\n+bogus"}]},
+        {"concern_id": "rev-c-002", "stage_id": "2",
+         "candidate_or_check_id": "style",
+         "text": "patch-introduced minor",
+         "severity": "minor", "is_preexisting": False,
+         "patch_scope": {"kind": "patch", "patches": ["<p1@x>"],
+                         "spans_lines_in_diff": [8, 9]},
+         "locations": []},
+        {"concern_id": "rev-c-003", "stage_id": "2",
+         "candidate_or_check_id": "style",
+         "text": "pre-existing style nit nearby",
+         "severity": "minor", "is_preexisting": True,
+         "patch_scope": {"kind": "patch", "patches": ["<p1@x>"],
+                         "spans_lines_in_diff": [8, 9]},
+         "locations": []},
+    ]
+    core_db.upsert_ai_review(ctx.db, "<r1@x>", concerns=concerns, model="m")
+    body = ctx.client.get(f"/patchsets/{quote('r1@x')}").text
+    # Per-patch finding tally on the title line (inside <summary>, right of the
+    # subject): colourised counts (not badges), patch-introduced bare and
+    # pre-existing parenthesised ("minor 1 (1)"). No "Result:" label.
+    counts = re.search(r'<span class="finding-counts">(.*?)</summary>',
+                       body, re.S).group(1)
+    assert "Result:" not in body
+    assert "sev-badge" not in counts
+    assert re.search(r'class="sev-major[^"]*">major <span class="sev-count">1</span>', counts)
+    assert re.search(r'class="sev-minor[^"]*">minor <span class="sev-count">1</span> '
+                     r'\(<span class="sev-count">1</span>\)', counts)
+    # Concern rendered inline in the annotated patch, severity-coloured.
+    assert 'class="patch-body patch-review' in body
+    assert "init() return value goes unchecked" in body
+    assert "sev-major" in body
+    # Review patch is an expandable thread-style item, open when it has
+    # findings, with the same "patch" type badge the thread uses.
+    assert re.search(r'<details class="list-group-item" open>.*?text-bg-primary">patch<',
+                     body, re.S)
+    # The complete patch hunk shows; the bad transcription never does.
+    assert "@@ -10,6 +10,7 @@" in body
+    assert "@@ -99,9 +99,9 @@" not in body
+    assert "WRONG" not in body and "bogus" not in body
+
+
+def test_ai_review_null_span_concern_pins_at_card_foot(ctx):
+    """A concern with no spans_lines_in_diff can't be line-anchored, so it
+       renders in the card's "Not line-anchored" foot — prose and the
+       file/function pointer only, never a model-authored code_snippet."""
     _plant_patchset(ctx.db)
     concern = {
         "concern_id": "rev-c-002", "stage_id": "1",
@@ -258,93 +377,58 @@ def test_ai_review_null_span_concern_renders_label_only(ctx):
         "severity": "minor", "is_preexisting": True,
         "patch_scope": {"kind": "patch", "patches": ["<p1@x>"],
                         "spans_lines_in_diff": None},
-        # A model-authored snippet must NOT render — only the span does.
         "locations": [{"file": "drivers/net/foo.c",
                        "function_symbol": "foo_reset",
                        "code_snippet": "@@ -7,1 +7,1 @@ FABRICATED\n+nonsense"}],
     }
     core_db.upsert_ai_review(ctx.db, "<r1@x>", concerns=[concern], model="m")
     body = ctx.client.get(f"/patchsets/{quote('r1@x')}").text
-    assert "kerneldoc names the wrong struct" in body      # prose
-    assert "drivers/net/foo.c" in body                     # file pointer
-    assert "foo_reset" in body                             # function pointer
-    assert "FABRICATED" not in body and "nonsense" not in body   # snippet dropped
+    assert "Not line-anchored" in body
+    assert "kerneldoc names the wrong struct" in body
+    assert "drivers/net/foo.c" in body and "foo_reset" in body
+    assert "FABRICATED" not in body and "nonsense" not in body
 
 
-def test_reconstruct_hunk_slices_cited_lines_from_the_patch_body():
-    """_reconstruct_hunk cites the patch's OWN bytes: given a line span
-       (0-indexed from the patch's first `diff --git` line) it returns the
-       enclosing file + hunk headers and the cited lines verbatim, so the
-       citation can't drift from what the patch actually says."""
-    patch = (
-        "Fix a leak in foo_probe\n"
-        "\n"
-        "diff --git a/drivers/net/foo.c b/drivers/net/foo.c\n"   # origin: line 2
-        "index 1111..2222 100644\n"
-        "--- a/drivers/net/foo.c\n"
-        "+++ b/drivers/net/foo.c\n"
-        "@@ -10,6 +10,7 @@ int foo_probe(struct device *dev)\n"
-        " \tint ret;\n"
-        " \n"
-        " \tret = init(dev);\n"
-        "+\tif (ret)\n"                  # content line 10 -> span start 8
-        "+\t\treturn ret;\n"             # content line 11 -> span end   9
-        " \treturn 0;\n"
-        " }")
-    assert ui._reconstruct_hunk(patch, [8, 9]) == (
-        "diff --git a/drivers/net/foo.c b/drivers/net/foo.c\n"
-        "@@ -10,6 +10,7 @@ int foo_probe(struct device *dev)\n"
-        "+\tif (ret)\n"
-        "+\t\treturn ret;")
-    # Unresolvable spans fall back to None (caller uses any code_snippet).
-    assert ui._reconstruct_hunk(patch, [8, 999]) is None
-    assert ui._reconstruct_hunk(patch, None) is None
-    assert ui._reconstruct_hunk("", [0, 1]) is None
-
-
-def test_ai_review_line_scoped_concern_renders_from_patch_not_model_text(ctx):
-    """A line-scoped concern (`kind: patch` + `spans_lines_in_diff`) is
-       rendered by slicing the patch's own diff, so a model that mis-
-       transcribes the hunk in `code_snippet` can't corrupt the citation:
-       the real hunk header renders and the model's wrong one never does."""
+def test_ai_review_with_no_concerns_shows_green_result(ctx):
+    """A patch with no findings shows a green "No concerns found" on its title
+       line instead of a row of zero counts. No "Result:" label."""
     _plant_patchset(ctx.db)
-    patch = (
-        "Fix a leak in foo_probe\n"
-        "\n"
-        "diff --git a/drivers/net/foo.c b/drivers/net/foo.c\n"
-        "index 1111..2222 100644\n"
-        "--- a/drivers/net/foo.c\n"
-        "+++ b/drivers/net/foo.c\n"
-        "@@ -10,6 +10,7 @@ int foo_probe(struct device *dev)\n"
-        " \tint ret;\n"
-        " \n"
-        " \tret = init(dev);\n"
-        "+\tif (ret)\n"
-        "+\t\treturn ret;\n"
-        " \treturn 0;\n"
-        " }")
-    core_db.upsert_message(ctx.db, "<p1@x>", root_message_id="<r1@x>",
-                            type=core_db.MSG_TYPE_PATCH, body=patch,
-                            part_index=1, subject="[PATCH 1/1] frob",
-                            author_email="alice@example.com")
+    core_db.upsert_ai_review(ctx.db, "<r1@x>", concerns=[], model="m")
+    body = ctx.client.get(f"/patchsets/{quote('r1@x')}").text
+    assert "No concerns found" in body
+    assert "text-success" in body
+    assert "Result:" not in body
+    assert "critical 0" not in body          # no zero counts when clean
+
+
+def test_tickcode_wraps_backtick_spans_and_escapes_the_rest():
+    """_tickcode turns `…` runs into inline <code> (backticks dropped) while
+       HTML-escaping the surrounding untrusted prose; an unpaired backtick is
+       left literal."""
+    out = str(ui._tickcode("set `foo()` not <bar> & a lone ` tick"))
+    assert "<code>foo()</code>" in out
+    assert "&lt;bar&gt;" in out and "<bar>" not in out
+    assert "&amp;" in out
+    assert "lone ` tick" in out          # unpaired backtick untouched
+
+
+def test_concern_backticks_render_as_inline_code(ctx):
+    """A concern's `backtick` spans render as highlighted inline code with the
+       backticks removed."""
+    _plant_patchset(ctx.db)
     concern = {
-        "concern_id": "rev-c-001", "stage_id": "2",
-        "candidate_or_check_id": "unchecked-init",
-        "text": "init() return value goes unchecked",
-        "severity": "major", "is_preexisting": False,
+        "concern_id": "rev-c-001", "stage_id": "1",
+        "candidate_or_check_id": "qualifier",
+        "text": "the `static` qualifier contradicts the kerneldoc",
+        "severity": "minor", "is_preexisting": False,
         "patch_scope": {"kind": "patch", "patches": ["<p1@x>"],
-                        "spans_lines_in_diff": [8, 9]},
-        # The model mis-transcribes the hunk — this snippet must be ignored.
-        "locations": [{"file": "drivers/net/foo.c",
-                       "function_symbol": "foo_probe",
-                       "code_snippet": "@@ -99,9 +99,9 @@ WRONG\n+bogus"}],
+                        "spans_lines_in_diff": None},
+        "locations": [],
     }
     core_db.upsert_ai_review(ctx.db, "<r1@x>", concerns=[concern], model="m")
     body = ctx.client.get(f"/patchsets/{quote('r1@x')}").text
-    assert "@@ -10,6 +10,7 @@" in body            # the patch's real hunk
-    assert "@@ -99,9 +99,9 @@" not in body         # the model's bad transcription
-    assert "WRONG" not in body and "bogus" not in body
-    assert "init() return value goes unchecked" in body
+    assert "<code>static</code>" in body
+    assert "`static`" not in body
 
 
 # --- queue row → detail wiring --------------------------------------------

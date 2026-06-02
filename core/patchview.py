@@ -93,13 +93,12 @@ def _preamble_class(line: str) -> str:
     return "plain"
 
 
-def _diff_html(content: str) -> str:
-    """Walk the body classifying each line. A hunk's `@@ -a,b +c,d @@`
-       header gives the old/new line budget; we spend it on the body lines
-       so we know when the hunk ends. Outside a hunk a `-`/`+` line is a
-       file marker or the trailing `-- ` signature — never a +/- change —
-       which is what keeps the signature out of the deletion colour."""
-    out = []
+def _classify(content: str):
+    """Walk the body yielding (css_class, line) for each line. A hunk's
+       `@@ -a,b +c,d @@` header gives the old/new line budget; we spend it on
+       the body lines so we know when the hunk ends. Outside a hunk a `-`/`+`
+       line is a file marker or the trailing `-- ` signature — never a +/-
+       change — which is what keeps the signature out of the deletion colour."""
     in_diff = False
     old_rem = new_rem = 0                  # unspent old/new lines in the hunk
     for line in content.split("\n"):
@@ -125,9 +124,31 @@ def _diff_html(content: str) -> str:
                    else "meta")                           # incl. the "-- " sig
         else:
             cls = _preamble_class(line)
-        text = html.escape(line) or _BLANK
-        out.append(f'<span class="pl pl-{cls}">{text}</span>')
-    return "".join(out)
+        yield cls, line
+
+
+def _span(cls: str, line: str) -> str:
+    return f'<span class="pl pl-{cls}">{html.escape(line) or _BLANK}</span>'
+
+
+def _diff_html(content: str) -> str:
+    return "".join(_span(cls, line) for cls, line in _classify(content))
+
+
+def diff_line_spans(body: str):
+    """Render a patch body to per-line classified spans for the inline-review
+       view, returning (origin, spans). `spans[i]` is the markup for content
+       line i (same classes as `render(is_patch=True)`); `origin` is the index
+       of the first `diff --git` line — the 0-point a concern's
+       `spans_lines_in_diff` counts from — or None when the body has no diff."""
+    _, content = split_headers(body)
+    content = content.strip("\n")
+    spans, origin = [], None
+    for i, (cls, line) in enumerate(_classify(content)):
+        if origin is None and line.startswith("diff --git"):
+            origin = i
+        spans.append(_span(cls, line))
+    return origin, spans
 
 
 def _prose_html(content: str) -> str:

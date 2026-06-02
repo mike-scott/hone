@@ -11,3 +11,47 @@
                         background: rgba(var(--bs-info-rgb), .10); }
 .patch-body .pl-meta  { color: var(--bs-secondary-color); }
 .patch-body .pl-quote { color: var(--bs-secondary-color); font-style: italic; }
+
+/* --- AI inline review -------------------------------------------------- */
+/* Severity spectrum, critical (red) → nit (grey). Each level sets --sev,
+   which colours its count badge, its inline-comment badge, and the left
+   edge + faint wash of the comment box. */
+.sev-critical { --sev: #d92d20; }
+.sev-major    { --sev: #e8743b; }
+.sev-moderate { --sev: #d6a55c; }
+.sev-minor    { --sev: #9aa0a6; }
+.sev-nit      { --sev: #c0c4c8; }
+
+/* Severity badge on an inline comment box. */
+.sev-badge { display: inline-block; padding: .15em .5em; border-radius: .375rem;
+             font-size: .75rem; font-weight: 600; line-height: 1.25;
+             white-space: nowrap; background: var(--sev, #888); color: #fff; }
+/* Lighter levels need dark text for contrast. */
+.sev-moderate.sev-badge, .sev-minor.sev-badge, .sev-nit.sev-badge { color: #1a1a1a; }
+
+/* Per-patch finding tally on the title line: only the count is colourised
+   (its severity --sev), not a badge; the label stays in body text. The
+   severities sit close together. */
+.finding-counts { display: inline-flex; flex-wrap: wrap; gap: .5rem;
+                  font-size: .85rem; }
+.sev-count { color: var(--sev, inherit); font-weight: 700; }
+
+/* The annotated patch is a <div> (not <pre>) so comment boxes can interleave
+   the diff lines: the container collapses inter-element whitespace while each
+   code line keeps its own whitespace via white-space: pre. */
+.patch-review { font-family: var(--bs-font-monospace, monospace);
+                white-space: normal; overflow: auto; max-height: 40rem; }
+.patch-review .pl { white-space: pre; padding: 0 .5rem; }
+
+.concern { white-space: normal; margin: .4rem .5rem; padding: .4rem .6rem;
+           border-left: 4px solid var(--sev, #888); border-radius: .25rem;
+           background: rgba(127, 127, 127, .08);
+           background: color-mix(in srgb, var(--sev, #888) 12%, transparent);
+           font-family: var(--bs-body-font-family); }
+.concern-head { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center;
+                margin-bottom: .25rem; }
+.concern-text { font-size: .875rem; white-space: pre-wrap; }
+/* `backtick` spans in concern prose -> lightly highlighted inline code. */
+.concern-text code { padding: .05em .35em; border-radius: .25rem; color: inherit;
+                     background: rgba(127, 127, 127, .18);
+                     background: color-mix(in srgb, var(--bs-body-color) 12%, transparent); }

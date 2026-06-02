@@ -12,11 +12,15 @@ is still TODO; these routes are currently unauthenticated, like the rest of
 the UI skeleton.
 """
 import datetime
+import html
 import json
 import logging
 import os
+import re
 import time
 from urllib.parse import quote
+
+from markupsafe import Markup
 
 log = logging.getLogger("hone.ui")
 
@@ -31,6 +35,32 @@ from core import core_db, gather, methodology_format, patchview, runtime_config
 _HERE = os.path.dirname(os.path.abspath(__file__))
 templates = Jinja2Templates(directory=os.path.join(_HERE, "templates"))
 templates.env.globals["version"] = VERSION   # rendered in the base footer
+
+
+def _asset_v(filename):
+    """Cache-busting token for a /static asset: its mtime. StaticFiles serves
+       no Cache-Control, so browsers heuristically reuse a cached copy — append
+       `?v={{ asset_v('app.css') }}` so a changed file always reloads."""
+    try:
+        return int(os.path.getmtime(os.path.join(_HERE, "static", filename)))
+    except OSError:
+        return VERSION
+
+
+templates.env.globals["asset_v"] = _asset_v
+
+
+_TICKED = re.compile(r"`([^`\n]+)`")
+
+
+def _tickcode(text):
+    """Render concern prose: HTML-escape the (untrusted) model text, then turn
+       Markdown-style `…` spans into inline <code> with the backticks dropped.
+       Escaping first means the wrapped run is already safe."""
+    return Markup(_TICKED.sub(r"<code>\1</code>", html.escape(text or "")))
+
+
+templates.env.filters["tickcode"] = _tickcode
 
 router = APIRouter(tags=["ui"])
 
@@ -615,41 +645,59 @@ def _safe_back(back):
     return "/"
 
 
-def _reconstruct_hunk(patch_body, span):
-    """Slice a concern's cited lines straight out of the patch's own diff,
-       so the rendered citation is the patch's bytes — not the model's
-       transcription of them (which drifts: wrong `@@` line numbers, invented
-       `+`/`-` lines). `span` is [start, end], 0-indexed from the patch's first
-       `diff --git` line in the header-stripped body — the same content
-       patchview renders for the thread. We re-attach the enclosing file +
-       `@@` headers so patchview's classifier has its diff/hunk state and
-       colours the +/- lines. Returns a unified-diff string, or None when the
-       span can't be resolved (no diff, out of range, no enclosing hunk) — the
-       caller then falls back to any model-authored `code_snippet`."""
-    if not patch_body or not span:
-        return None
-    _, content = patchview.split_headers(patch_body)
-    lines = content.strip("\n").split("\n")
-    origin = next((i for i, l in enumerate(lines)
-                   if l.startswith("diff --git")), None)
-    if origin is None:
-        return None
-    start, end = origin + span[0], origin + span[1]
-    if not 0 <= start <= end < len(lines):
-        return None
-    # Nearest enclosing file + hunk headers at or above the cited range.
-    hunk = next((i for i in range(start, origin - 1, -1)
-                 if lines[i].startswith("@@")), None)
-    filehdr = next((i for i in range(start, origin - 1, -1)
-                    if lines[i].startswith("diff --git")), None)
-    if hunk is None or filehdr is None:
-        return None
-    body = lines[max(hunk + 1, start):end + 1]
-    while body and not body[0].strip():     # trim a leading blank context line
-        body.pop(0)
-    if not body:
-        return None
-    return "\n".join([lines[filehdr], lines[hunk], *body])
+# AI-review severities, highest first — the order the per-patch finding-count
+# header lists them, and a red→grey spectrum (see the .sev-* rules in app.css).
+_SEVERITY_ORDER = ("critical", "major", "moderate", "minor", "nit")
+
+
+def _concern_view(c):
+    """A concern flattened for the inline-review template: its severity (which
+       names the `sev-<tag>` colour for its badge + comment-box edge), the
+       pre-existing flag, the prose, and the file/function pointers."""
+    return {
+        "severity":      c.get("severity") or "nit",
+        "is_preexisting": bool(c.get("is_preexisting")),
+        "stage_id":      c.get("stage_id"),
+        "candidate_or_check_id": c.get("candidate_or_check_id"),
+        "text":          c.get("text") or "",
+        "locations":     c.get("locations") or [],
+    }
+
+
+def _severity_counts(concerns):
+    """Per-severity finding tally for a patch header, in `_SEVERITY_ORDER`.
+       `new` is patch-introduced; `pre` is pre-existing (shown parenthesised)."""
+    counts = {s: {"new": 0, "pre": 0} for s in _SEVERITY_ORDER}
+    for c in concerns:
+        sev = c.get("severity")
+        if sev in counts:
+            counts[sev]["pre" if c.get("is_preexisting") else "new"] += 1
+    return [{"severity": s, "new": counts[s]["new"], "pre": counts[s]["pre"]}
+            for s in _SEVERITY_ORDER]
+
+
+def _annotate_patch(body, concerns):
+    """Inline-review render of one patch: its complete diff as classified line
+       rows, with each concern's comment injected just below the last line of
+       its `spans_lines_in_diff` (0-indexed from the patch's first `diff --git`
+       line). A concern whose span can't be anchored (null, or out of range) is
+       returned separately to pin at the card's foot. Returns (rows, unanchored)
+       where a row is {"line": span_html} or {"concern": view}."""
+    origin, spans = patchview.diff_line_spans(body)
+    by_index, unanchored = {}, []
+    for c in concerns:
+        span = (c.get("patch_scope") or {}).get("spans_lines_in_diff")
+        anchor = origin + span[1] if (span and origin is not None) else None
+        if anchor is not None and 0 <= anchor < len(spans):
+            by_index.setdefault(anchor, []).append(_concern_view(c))
+        else:
+            unanchored.append(_concern_view(c))
+    rows = []
+    for i, span in enumerate(spans):
+        rows.append({"line": span})
+        for view in by_index.get(i, []):
+            rows.append({"concern": view})
+    return rows, unanchored
 
 
 def _patchset_view(db, root):
@@ -668,10 +716,11 @@ def _patchset_view(db, root):
 
     tags = core_db.tags_for_patchset(db, root)
     metadata = core_db.get_patchset_metadata(db, root)
-    # Raw message bodies, indexed by Message-Id — both the thread render below
-    # and the deterministic concern-citation slicing draw from these.
+    # Read the thread once — both the thread render below and the inline-review
+    # per-patch annotation draw from these raw bodies.
     raw_messages = list(core_db.messages_for_patchset(db, root))
-    patch_bodies = {m["message_id"]: m["body"] for m in raw_messages}
+    review_patches = []      # per-patch inline-annotated diffs (see below)
+    series_concerns = []     # concerns not scoped to a single patch in-thread
     ai_review = core_db.get_ai_review(db, root)
     if ai_review is not None:
         # Surface the producing node's human handle next to the
@@ -686,37 +735,40 @@ def _patchset_view(db, root):
                 if ai_review["node_id"] else None)
         ai_review["producer_label"] = (
             node.get("name") or f"id {node['id']}") if node else None
-        # Render each concern's cited code through the SAME per-line diff
-        # classifier the thread's patch messages use (patchview), so the
-        # citation picks up the .patch-body .pl-* colours and reads "just
-        # like a patch diff". We cite ONLY by slicing the hunk out of the
-        # patch's own body, keyed by a line-scoped finding's
-        # `spans_lines_in_diff` — the citation is then the patch's exact
-        # bytes, immune to the model mis-transcribing diff lines. A finding
-        # with no span (a pre-existing or out-of-diff reference) has no hunk
-        # to slice, so it renders as prose + the file/function pointer only;
-        # a model-authored `code_snippet` is never shown — it can fabricate a
-        # diff that isn't in the patch. patchview HTML-escapes each line, so
-        # snippet_html is safe |safe.
+        # Build the inline-review view: each patch's complete diff with its
+        # concerns injected at the line they sit on (anchored by
+        # `spans_lines_in_diff`), under a per-patch finding-count header. A
+        # concern is tied to a patch by its patch_scope (`kind: patch` + a
+        # single Message-Id, normalised to match the stored id); series- and
+        # cross-patch concerns — and any whose patch isn't in the thread —
+        # collect in a series-wide block instead.
+        patch_msgs = [m for m in raw_messages
+                      if core_db.MSG_TYPE_NAMES.get(m["type"]) == "patch"]
+        by_patch = {m["message_id"]: [] for m in patch_msgs}
         for c in ai_review["concerns"]:
             ps = c.get("patch_scope") or {}
-            span = ps.get("spans_lines_in_diff")
             patches = ps.get("patches") or []
-            cited = None
-            if span and ps.get("kind") == "patch" and len(patches) == 1:
-                # patch_bodies is keyed by the stored (normalised) Message-Id;
-                # normalise the concern's id too so a node that emits it
-                # bracketed still resolves.
-                body = patch_bodies.get(core_db.norm_msgid(patches[0]))
-                cited = _reconstruct_hunk(body, span)
-            for loc in c.get("locations") or []:
-                # The deterministic slice carries its own `diff --git a/<file>`
-                # header; show it on the location it quotes. Every other
-                # location renders label-only (snippet_html stays None).
-                file = loc.get("file") or ""
-                loc["snippet_html"] = (
-                    patchview.render(cited, is_patch=True).body_html
-                    if cited and file and file in cited else None)
+            tgt = (core_db.norm_msgid(patches[0])
+                   if ps.get("kind") == "patch" and len(patches) == 1 else None)
+            if tgt in by_patch:
+                by_patch[tgt].append(c)
+            else:
+                series_concerns.append(_concern_view(c))
+        for m in patch_msgs:
+            cs = by_patch[m["message_id"]]
+            rows, unanchored = _annotate_patch(m["body"] or "", cs)
+            type_name = core_db.MSG_TYPE_NAMES.get(m["type"], "?")
+            review_patches.append({
+                "message_id":   m["message_id"],
+                "type":         type_name,
+                "type_badge":   _MSG_TYPE_BADGE.get(type_name, "text-bg-light"),
+                "subject":      m["subject"],
+                "part_index":   m["part_index"],
+                "has_concerns": bool(cs),
+                "counts":       _severity_counts(cs),
+                "rows":         rows,
+                "unanchored":   unanchored,
+            })
 
     messages = []
     for m in raw_messages:
@@ -779,6 +831,8 @@ def _patchset_view(db, root):
         "tags":       tags,
         "metadata":   metadata,
         "ai_review":  ai_review,
+        "review_patches":  review_patches,
+        "series_concerns": series_concerns,
         "messages":   messages,
         "work_items": work_items,
         "review_request": review_request,

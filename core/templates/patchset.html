@@ -2,6 +2,21 @@
 {% block title %}{{ patchset.subject or patchset.root_message_id }} · hone-core{% endblock %}
 {% block content %}
 
+{# One AI-review concern: a severity-coloured comment box (the left edge and
+   wash track the severity via .sev-* / --sev in app.css). Used inline between
+   diff lines, and in the un-anchored / series-wide blocks. c.text is model
+   output — Jinja autoescapes it. #}
+{% macro concern_box(c) %}
+<div class="concern sev-{{ c.severity }}">
+  <div class="concern-head">
+    <span class="sev-badge sev-{{ c.severity }}">{{ c.severity }}</span>
+    {% if c.is_preexisting %}<span class="badge text-bg-light border">pre-existing</span>{% endif %}
+    {% for loc in c.locations %}<code class="small text-muted">{{ loc.file }}{% if loc.function_symbol %} · {{ loc.function_symbol }}{% endif %}</code>{% endfor %}
+  </div>
+  <div class="concern-text">{{ c.text | tickcode }}</div>
+</div>
+{% endmacro %}
+
 {# Back link — the opener can pass `?back=<their-url>` so the operator
    returns exactly where they left off (queue filter + page intact). The
    anchor is rendered server-side; no JS history dance, so reload-safe
@@ -75,43 +90,54 @@
   · {{ ai_review.concerns|length }} concern{{ '' if ai_review.concerns|length == 1 else 's' }}
   · model <code>{{ ai_review.model or "—" }}</code>
 </p>
-{% if ai_review.concerns %}
-<table class="table table-sm align-middle">
-  <thead>
-    <tr><th>Severity</th><th>Stage</th><th>Source</th><th>Concern</th>
-        <th>Scope</th></tr>
-  </thead>
-  <tbody>
-  {% for c in ai_review.concerns %}
-    <tr>
-      <td><span class="badge text-bg-warning">{{ c.severity }}</span></td>
-      <td><code class="small">{{ c.stage_id }}</code></td>
-      <td><code class="small">{{ c.candidate_or_check_id }}</code></td>
-      <td>
-        {{ c.text }}
-        {# Quoted source for each location, rendered with the same
-           per-line diff treatment as the thread's patch messages
-           (core/patchview.py → .patch-body .pl-* in app.css). snippet_html
-           is server-rendered, pre-escaped, per-line classified markup. #}
-        {% for loc in c.locations %}
-        <div class="small text-muted mt-2">
-          <code>{{ loc.file }}{% if loc.function_symbol %} · {{ loc.function_symbol }}{% endif %}</code>
-        </div>
-        {% if loc.snippet_html %}
-        <pre class="patch-body small bg-body-tertiary p-2 rounded mt-1"
-             style="max-height: 20rem; overflow: auto;">{{ loc.snippet_html|safe }}</pre>
+{# Series-wide concerns: not scoped to a single patch in the thread
+   (cover-letter / ordering / cross-patch findings). #}
+{% if series_concerns %}
+<div class="mb-3">
+  <h3 class="h6 text-muted mb-2">Series-wide</h3>
+  {% for c in series_concerns %}{{ concern_box(c) }}{% endfor %}
+</div>
+{% endif %}
+{# One expandable item per patch, matching the Thread list below: a type
+   badge ("patch"/"cover"), the part as plain text, then the subject. The body
+   is the complete diff with each concern injected inline at its line;
+   un-anchorable concerns pin at the foot. Patches with findings open by
+   default. The finding tally is summarised once above, not repeated here. #}
+{% if review_patches %}
+<div class="list-group mb-4">
+{% for p in review_patches %}
+  <details class="list-group-item"{% if p.has_concerns %} open{% endif %}>
+    <summary class="d-flex flex-wrap gap-2 align-items-center">
+      <span class="badge {{ p.type_badge }}">{{ p.type }}</span>
+      {% if p.part_index is not none %}
+      <span class="text-muted small">part {{ p.part_index }}</span>
+      {% endif %}
+      <span class="flex-grow-1">{{ p.subject or "(no subject)" }}</span>
+      {# Per-patch finding tally, right-aligned on the title line: colourised
+         counts (patch-introduced bare, pre-existing parenthesised), or a green
+         "No concerns found". #}
+      <span class="finding-counts">
+        {% if p.has_concerns %}
+          {% for x in p.counts %}<span class="sev-{{ x.severity }}">{{ x.severity }} <span class="sev-count">{{ x.new }}</span>{% if x.pre %} (<span class="sev-count">{{ x.pre }}</span>){% endif %}</span>{% endfor %}
+        {% else %}
+          <span class="text-success fw-semibold">No concerns found</span>
         {% endif %}
-        {% endfor %}
-      </td>
-      <td class="small text-muted">
-        {{ c.patch_scope.kind if c.patch_scope else "—" }}
-        {% if c.is_preexisting %}<em>(pre-existing)</em>{% endif %}
-      </td>
-    </tr>
-  {% endfor %}
-  </tbody>
-</table>
-{% else %}
+      </span>
+    </summary>
+    <div class="mt-2">
+      <div class="patch-body patch-review small bg-body-tertiary rounded py-2">{% for row in p.rows %}{% if row.line %}{{ row.line|safe }}{% else %}{{ concern_box(row.concern) }}{% endif %}{% endfor %}</div>
+      {% if p.unanchored %}
+      <div class="mt-2">
+        <div class="small text-muted mb-1">Not line-anchored</div>
+        {% for c in p.unanchored %}{{ concern_box(c) }}{% endfor %}
+      </div>
+      {% endif %}
+    </div>
+  </details>
+{% endfor %}
+</div>
+{% endif %}
+{% if not review_patches and not series_concerns %}
 <p class="text-muted small">Clean review — no concerns raised.</p>
 {% endif %}
 {% else %}
