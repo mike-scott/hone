@@ -145,13 +145,17 @@ def bucket_maintainer_entries(entries, *, recipients=None):
     maint, revs, lists, sections = [], [], [], []
     for e in entries:
         if e.role in _MAINTAINER_ROLES:
-            maint.append({"email": e.email, "name": e.name,
-                          "role": "maintainer"})
+            entry = {"email": e.email, "role": "maintainer"}
+            if e.name is not None:
+                entry["name"] = e.name
+            maint.append(entry)
             if e.subsystem:
                 sections.append(e.subsystem)
         elif e.role in _REVIEWER_ROLES:
-            revs.append({"email": e.email, "name": e.name,
-                         "role": "reviewer"})
+            entry = {"email": e.email, "role": "reviewer"}
+            if e.name is not None:
+                entry["name"] = e.name
+            revs.append(entry)
             if e.subsystem:
                 sections.append(e.subsystem)
         elif "list" in e.role:
