@@ -290,3 +290,43 @@ def test_post_release_deferred_unknown_id_404s(ctx):
     r = ctx.client.post("/work-items/999999/release-deferred",
                         follow_redirects=False)
     assert r.status_code == 404
+
+
+# --- unappliable badge → retry-unappliable action --------------------------
+
+def _unappliable_review(db):
+    """A review work item left in the UNAPPLIABLE state — returns its id."""
+    wid, claim = _claimed_review(db)
+    core_db.submit_work_result(db, claim["claim_id"],
+                               state=core_db.WORK_ITEM_STATE_UNAPPLIABLE,
+                               record={"outcome": "unappliable"})
+    return wid
+
+
+def test_unappliable_badge_offers_a_retry_action(ctx):
+    item_id = _unappliable_review(ctx.db)
+    body = ctx.client.get(f"/work-items/{item_id}").text
+    assert f'action="/work-items/{item_id}/retry-unappliable' in body
+
+
+def test_non_unappliable_badge_has_no_retry_action(ctx):
+    """A claimed item's badge is a plain span — no retry form."""
+    item_id, _ = _claimed_review(ctx.db)
+    body = ctx.client.get(f"/work-items/{item_id}").text
+    assert "/retry-unappliable" not in body
+
+
+def test_post_retry_unappliable_reverts_to_claimable(ctx):
+    item_id = _unappliable_review(ctx.db)
+    r = ctx.client.post(f"/work-items/{item_id}/retry-unappliable",
+                        follow_redirects=False)
+    assert r.status_code == 303
+    state = ctx.db.execute("SELECT state FROM work_items WHERE id=?",
+                           (item_id,)).fetchone()["state"]
+    assert state == core_db.WORK_ITEM_STATE_CLAIMABLE
+
+
+def test_post_retry_unappliable_unknown_id_404s(ctx):
+    r = ctx.client.post("/work-items/999999/retry-unappliable",
+                        follow_redirects=False)
+    assert r.status_code == 404

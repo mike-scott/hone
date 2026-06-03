@@ -479,3 +479,49 @@ def test_release_deferred_is_a_no_op_for_a_non_deferred_item(db):
 
 def test_release_deferred_unknown_id(db):
     assert core_db.release_deferred(db, 999999) == "unknown"
+
+
+# --- retry_unappliable (operator manual re-arm from the UI) -----------------
+
+def _unappliable_item(db, root="<ps-ru@x>"):
+    """Plant a patchset, enqueue+claim its prepare, and submit an unappliable
+       result — leaving one UNAPPLIABLE work item. Returns its id."""
+    core_db.add_methodology_version(db, {"name": "test", "version": 1})
+    _planted_patchset(db, root, n_patches=1)
+    core_db.maybe_enqueue_prepare(db, root)
+    c = core_db.claim_work_item(db, "node-x", methodology_version=1)
+    core_db.submit_work_result(db, c["claim_id"],
+                               state=core_db.WORK_ITEM_STATE_UNAPPLIABLE,
+                               record={"outcome": "unappliable"})
+    return c["id"]
+
+
+def test_retry_unappliable_reverts_to_claimable_and_clears_claim_fields(db):
+    item_id = _unappliable_item(db)
+    assert core_db.retry_unappliable(db, item_id) == "ok"
+    row = db.execute(
+        "SELECT state, claim_id, claimed_by, claimed_at, lease_expires, "
+        "heartbeat_at, methodology_version FROM work_items WHERE id=?",
+        (item_id,)).fetchone()
+    assert row["state"] == core_db.WORK_ITEM_STATE_CLAIMABLE
+    assert row["claim_id"] is None and row["claimed_by"] is None
+    assert row["claimed_at"] is None and row["lease_expires"] is None
+    assert row["heartbeat_at"] is None and row["methodology_version"] is None
+
+
+def test_retry_unappliable_is_a_no_op_for_a_non_unappliable_item(db):
+    """A claimed (or any non-unappliable) item is left untouched — guards a
+       double click after the row was already re-claimed."""
+    core_db.add_methodology_version(db, {"name": "test", "version": 1})
+    _planted_patchset(db, "<ps-ru2@x>", n_patches=1)
+    core_db.maybe_enqueue_prepare(db, "<ps-ru2@x>")
+    c = core_db.claim_work_item(db, "node-x", methodology_version=1)
+    assert core_db.retry_unappliable(db, c["id"]) == "not_unappliable"
+    row = db.execute("SELECT state, claimed_by FROM work_items WHERE id=?",
+                     (c["id"],)).fetchone()
+    assert row["state"] == core_db.WORK_ITEM_STATE_CLAIMED
+    assert row["claimed_by"] == "node-x"
+
+
+def test_retry_unappliable_unknown_id(db):
+    assert core_db.retry_unappliable(db, 999999) == "unknown"

@@ -1658,6 +1658,40 @@ def release_deferred(db, item_id):
     return "ok"
 
 
+def retry_unappliable(db, item_id):
+    """Operator-triggered retry of an UNAPPLIABLE work item — flip it
+       UNAPPLIABLE → CLAIMABLE so a node re-claims and re-attempts it.
+       The 'try again' button on the work-item detail page POSTs here.
+
+       A patchset goes UNAPPLIABLE when its series would not apply to the
+       base at submission time; a review re-claims against the *current*
+       tip-at-submission base, so a retry can succeed once the underlying
+       tree has moved on. Like release_deferred, the row is terminal and
+       unheld — there is no in-flight claim to disrupt — so we just clear
+       every claim-time field and re-arm it; the next claimer sees a fresh
+       row and overwrites the stale completion record on resubmission.
+
+       Keyed on `item_id` (the operator acts from the UI, holding the row
+       id). Returns 'ok' on re-arm, 'not_unappliable' when the row is in
+       any other state (idempotent no-op — a double click, or a row already
+       re-claimed), or 'unknown' when the id doesn't exist."""
+    row = db.execute("SELECT state FROM work_items WHERE id=?",
+                     (item_id,)).fetchone()
+    if row is None:
+        return "unknown"
+    if row["state"] != WORK_ITEM_STATE_UNAPPLIABLE:
+        return "not_unappliable"
+    log.info("retry_unappliable: work item %s → claimable", item_id)
+    db.execute(
+        "UPDATE work_items SET state=?, claim_id=NULL, claimed_by=NULL, "
+        "claimed_at=NULL, lease_expires=NULL, heartbeat_at=NULL, "
+        "methodology_version=NULL "
+        "WHERE id=?",
+        (WORK_ITEM_STATE_CLAIMABLE, item_id))
+    db.commit()
+    return "ok"
+
+
 def reclaim_expired(db):
     """Crash recovery: return lease-expired claims to their queues. Returns
        (work_items_reclaimed, draft_tasks_reclaimed)."""

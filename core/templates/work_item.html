@@ -20,6 +20,15 @@
     <button type="submit" class="badge border-0 {{ state_badge }} me-2"
             title="Release back to claimable">{{ state }} <i class="bi bi-arrow-repeat"></i></button>
   </form>
+  {% elif state == "unappliable" %}
+  {# An unappliable item is terminal and unheld — clicking the badge re-arms
+     it to claimable so a node re-attempts the apply against the current base. #}
+  <form method="post"
+        action="/work-items/{{ id }}/retry-unappliable{{ ('?back=' ~ (back_url | urlencode)) if back_url else '' }}"
+        class="d-inline">
+    <button type="submit" class="badge border-0 {{ state_badge }} me-2"
+            title="Try again — re-arm for review">{{ state }} <i class="bi bi-arrow-repeat"></i></button>
+  </form>
   {% else %}
   <span class="badge {{ state_badge }} me-2">{{ state }}</span>
   {% endif %}
