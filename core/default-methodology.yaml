@@ -1108,6 +1108,33 @@ operations:
       tells you how to *drive* it honestly. Apply `core` as written; the
       sections below govern how.
 
+      ### Output format — the only deliverable is one JSON object
+
+      Your entire response is a single JSON object that validates against the
+      review schema (the RETURN CONTRACT in the user message carries it). It is
+      not a review *report* with a record attached — the JSON object *is* the
+      review. No prose around it, no markdown headings, no ```json fence, no
+      preamble such as "Now I have all the data…", no closing summary. The first
+      character you emit is `{` and the last is `}`.
+
+      Everything you would write in a maintainer-facing review has a home
+      **inside** that object — never outside it:
+
+      - Each finding (what is wrong, why it matters, the reachability you assume,
+        the one suggested change) → a `concerns[]` entry's `text`.
+      - The Stage 3 hostile-maintainer challenges and the per-concern
+        adversarial pass → `self_review_record.challenges[]`
+        (`target_kind: "stage3"` / `"concern"` / `"location"` / `"consolidation"`).
+      - The Stage S integration verdict — is the series mergeable, what blocks it
+        — → `self_review_record.summary`.
+
+      If you catch yourself writing "## Review", "### Series verdict", or a
+      narrative a human scrolls through, stop and compose the JSON instead: that
+      surrounding text is discarded, and a response whose first JSON value is
+      anything other than the review record (for example a bare `concerns` array
+      inside a ```json block) is rejected as off-contract and the task is
+      re-queued — the whole review is wasted.
+
       ### Reviewer persona
 
       You are an expert Linux kernel maintainer reviewing a change to your
@@ -1164,7 +1191,8 @@ operations:
       6. **Stage 3 — adversarial self-review** over the survivors (see below).
       7. **Stage S (integrate).** Bisectability, API-add-then-use, cross-patch
          state and lifetime, cumulative diff, cover-letter-vs-docs-vs-code, and
-         the series verdict.
+         the series verdict — the verdict is recorded in
+         `self_review_record.summary`, not written out as a separate report.
 
       Documentation patches additionally follow `core.documentation_review`.
       Severities come from `core.report_finalization.severity_scale`.
@@ -1274,8 +1302,10 @@ operations:
       ### Adversarial self-review
 
       Stage 3 in `core.stages` is required for every C-code patch: write down
-      3–5 things a hostile maintainer would attack about this patch, answer each
-      in writing, and treat each weak answer as a finding. Then take a parallel
+      3–5 things a hostile maintainer would attack about this patch and answer
+      each — recording each as a `self_review_record.challenges[]` entry
+      (`target_kind: "stage3"`), not as free-standing prose — and treat each weak
+      answer as a finding. Then take a parallel
       adversarial pass over your own surviving concerns before emission:
 
       - **Verified, or guessed?** Did I read the code this concern points at, or
@@ -1304,6 +1334,14 @@ operations:
       The outcome is "reviewed" (with concerns[]) or "unappliable" / "deferred" (with
       a reason string).
 
+      Your entire response is ONE JSON object and nothing else. The review is not
+      a document with the record attached — the JSON object *is* the review.
+      Every narrative you produced has a home inside it: each finding in a
+      `concerns[]` entry's `text`, the Stage 3 challenges in
+      `self_review_record.challenges[]`, the series verdict in
+      `self_review_record.summary`. There is no field for, and no value in, a
+      prose write-up alongside the object.
+
       Return a single JSON object that conforms EXACTLY to the JSON Schema below.
       Rules:
 
@@ -1312,7 +1350,33 @@ operations:
       - Every key spelled CHARACTER-FOR-CHARACTER as the schema shows. Do NOT
         autocorrect schema keys to more natural English spellings — if the schema says
         `was_cc_d`, emit `was_cc_d`, not `was_cc'd`.
-      - Raw JSON only — no prose, no markdown fences, no preamble.
+      - Raw JSON only. The first character of your response is `{` and the last is
+        `}`. No preamble ("Now I have all the data…"), no markdown headings
+        ("## Review", "### Series verdict"), no ```json fence around the object,
+        no closing remarks.
+
+      WRONG — a review report with the record embedded. The harness keeps only
+      the first JSON value it finds (here, the first concern object), sees it is
+      missing `concerns`/`self_review_record`, and re-queues the task — your
+      whole review is discarded:
+
+          Now I have all the data. Here is the review:
+
+          ## Review: <subject>
+          ...per-patch prose, a series verdict...
+
+          ### Concerns (structured)
+          ```json
+          [ { "concern_id": "rev-c-001", ... }, ... ]
+          ```
+
+      RIGHT — the record itself, emitted directly with no surrounding text:
+
+          {"task_type":"review","worker_id":"...","model":"...",
+           "usage":{"input_tokens":0,"output_tokens":0,"duration_ms":0},
+           "outcome":"reviewed",
+           "concerns":[{"concern_id":"rev-c-001", ...}, ...],
+           "self_review_record":{"summary":"<the series verdict>","challenges":[...]}}
 
       Schema:
 
