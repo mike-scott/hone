@@ -38,6 +38,10 @@ def _anthropic_status_error(status, headers=None):
 class _Cfg:                       # only the fields _with_backoff reads
     backoff_initial = 0.001
     backoff_max = 0.01
+    # Large enough that the keep-alive thread never fires within a fast
+    # test's near-instant dispatch (the keep-alive test below uses its own
+    # tiny interval to exercise the firing path).
+    heartbeat_interval = 3600
 
 
 # --- _is_transient ---------------------------------------------------------
@@ -329,6 +333,97 @@ def test_run_once_does_not_release_on_a_successful_task(monkeypatch):
     assert runner.run_once(_Cfg, cli) is True
     assert cli.released_calls == 0
     assert cli.submitted == [("c1", {"outcome": "prepared"})]
+
+
+# --- keep-alive during a long task ----------------------------------------
+
+def test_run_once_keeps_the_node_alive_during_a_long_task(monkeypatch):
+    """While a handler blocks (a review can sit minutes in one Claude
+       call), a background keep-alive thread heartbeats the claim and
+       posts health — so the work-item lease doesn't lapse and the
+       operator UI doesn't mark the node stale. Both fire against the
+       held claim_id before the task returns."""
+    import threading
+
+    class _Cfg2:
+        backoff_initial = 0.001
+        backoff_max = 0.01
+        heartbeat_interval = 0.01            # fire fast for the test
+
+    beat_seen = threading.Event()
+
+    class _StubClient:
+        def __init__(self):
+            self.heartbeats = []
+            self.health_reports = 0
+
+        def claim(self):
+            return {"claim_id": "c1", "task_type": "review"}
+
+        def heartbeat(self, claim_id):
+            self.heartbeats.append(claim_id)
+            beat_seen.set()
+
+        def report_health(self, snapshot):
+            self.health_reports += 1
+
+        def submit_result(self, claim_id, record):
+            pass
+
+        def release_claim(self, *a, **kw):
+            raise AssertionError("a successful task must not release")
+
+    def slow_dispatch(cfg, client, claim):
+        # Block until the keep-alive thread has fired at least once, so
+        # the test deterministically exercises the heartbeat path.
+        assert beat_seen.wait(2.0), "keep-alive never heartbeated"
+        return {"outcome": "reviewed"}
+
+    monkeypatch.setattr(runner.health, "collect", lambda cfg: {"ok": True})
+    monkeypatch.setattr(runner.tasks, "dispatch", slow_dispatch)
+
+    cli = _StubClient()
+    assert runner.run_once(_Cfg2, cli) is True
+    assert cli.heartbeats and all(h == "c1" for h in cli.heartbeats)
+    assert cli.health_reports >= 1
+
+
+def test_keepalive_heartbeat_failure_does_not_break_the_task(monkeypatch):
+    """A blip on the keep-alive heartbeat is swallowed (logged, retried
+       next interval) and the task still completes — a flaky lease
+       endpoint must never fail an in-flight review."""
+    import threading
+
+    class _Cfg2:
+        backoff_initial = 0.001
+        backoff_max = 0.01
+        heartbeat_interval = 0.01
+
+    tried = threading.Event()
+
+    class _StubClient:
+        def claim(self):
+            return {"claim_id": "c1", "task_type": "review"}
+
+        def heartbeat(self, claim_id):
+            tried.set()
+            raise httpx.ConnectError("core unreachable")
+
+        def report_health(self, snapshot):
+            pass
+
+        def submit_result(self, claim_id, record):
+            pass
+
+    def slow_dispatch(cfg, client, claim):
+        assert tried.wait(2.0), "keep-alive never attempted a heartbeat"
+        return {"outcome": "reviewed"}
+
+    monkeypatch.setattr(runner.health, "collect", lambda cfg: {"ok": True})
+    monkeypatch.setattr(runner.tasks, "dispatch", slow_dispatch)
+
+    cli = _StubClient()
+    assert runner.run_once(_Cfg2, cli) is True
 
 
 # --- 422 schema-rejected fallback -----------------------------------------

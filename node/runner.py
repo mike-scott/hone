@@ -5,11 +5,13 @@ See ../docs/ARCHITECTURE.md (hone-node) and
 The loop, its idle pacing, and the transient-failure backoff are real;
 bootstrap (the reference repo / methodology) and task execution are stubs.
 """
+import contextlib
 import logging
 import os
 import random
 import signal
 import sys
+import threading
 import time
 
 import anthropic
@@ -172,6 +174,47 @@ def bootstrap(cfg: Config, client: HoneCoreClient) -> None:
         log.info("bootstrap — no tree-bound task types; skipping reference repo")
 
 
+@contextlib.contextmanager
+def _keepalive(cfg: Config, client: HoneCoreClient, claim_id: str):
+    """Keep this node fresh with hone-core while a long task runs.
+
+       A task handler — a review especially — can block for many minutes
+       inside a single Claude call, during which the claim loop sends
+       nothing to hone-core. Two things then drift: the work-item lease
+       creeps toward expiry (the work gets reclaimed out from under us),
+       and the operator UI marks the node stale (its `last_seen` ages past
+       `stale_after`). This daemon thread fills that silence — every
+       `cfg.heartbeat_interval` seconds it extends the claim's lease and
+       posts a health snapshot, so a node mid-review stays live in the UI
+       and holds its claim.
+
+       Best-effort and self-contained: each upstream call is wrapped so a
+       blip talking to hone-core never propagates into the task. The
+       handler doesn't touch `client`, so this thread has the HTTP client
+       to itself for the task's duration — no concurrent use to guard. A
+       daemon thread, so it can't keep the process alive; the stop is a
+       threading.Event set on block exit (mirrors node.ai._heartbeat)."""
+    done = threading.Event()
+
+    def beat():
+        while not done.wait(cfg.heartbeat_interval):
+            try:
+                client.heartbeat(claim_id)
+            except Exception:
+                log.warning("keep-alive heartbeat failed for %s "
+                            "(will retry next interval)", claim_id,
+                            exc_info=True)
+            _report_health_safely(cfg, client)
+
+    t = threading.Thread(target=beat, name="hone-keepalive", daemon=True)
+    t.start()
+    try:
+        yield
+    finally:
+        done.set()
+        t.join(timeout=5)
+
+
 def run_once(cfg: Config, client: HoneCoreClient) -> bool:
     """Claim and handle one task. Return True if work was done, False if
     the queue was empty.
@@ -217,9 +260,16 @@ def run_once(cfg: Config, client: HoneCoreClient) -> bool:
                           "lapse on its lease instead")
         return False
     try:
-        record = _with_backoff(
-            cfg, f"{claim.get('task_type')} task",
-            lambda: tasks.dispatch(cfg, client, claim))
+        # A long task (a review can block minutes in one Claude call)
+        # otherwise sends nothing to hone-core: the lease drifts toward
+        # expiry and the node shows stale. The keep-alive thread heartbeats
+        # the claim and posts health on cfg.heartbeat_interval until the
+        # task returns. It exits before submit_result below, so the main
+        # thread never shares the HTTP client with it.
+        with _keepalive(cfg, client, claim["claim_id"]):
+            record = _with_backoff(
+                cfg, f"{claim.get('task_type')} task",
+                lambda: tasks.dispatch(cfg, client, claim))
     except Exception as exc:
         # Non-transient task failure — _with_backoff has already
         # exhausted retries for the transient classes. Release the
