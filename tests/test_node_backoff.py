@@ -621,3 +621,67 @@ def test_maintain_swallows_errors(monkeypatch):
     monkeypatch.setattr(runner.refrepo, "sweep_worktrees",
                         lambda d: (_ for _ in ()).throw(RuntimeError("boom")))
     runner._maybe_maintain(_MaintCfg(), _maint_state())      # no exception
+
+
+# --- disk safety valve (pause claiming when free space is low) ------------
+
+class _DiskCfg:                   # only the fields _disk_too_low reads
+    data_dir = "/data"
+    min_free_disk_mb = 5000
+
+
+def test_disk_too_low_true_below_floor(monkeypatch):
+    monkeypatch.setattr(runner.health, "_free_disk_mb", lambda p: 4999)
+    assert runner._disk_too_low(_DiskCfg()) is True
+
+
+def test_disk_too_low_false_at_or_above_floor(monkeypatch):
+    monkeypatch.setattr(runner.health, "_free_disk_mb", lambda p: 5000)
+    assert runner._disk_too_low(_DiskCfg()) is False
+
+
+def test_disk_too_low_disabled_when_floor_zero(monkeypatch):
+    class _Off:
+        data_dir = "/data"
+        min_free_disk_mb = 0
+    # _free_disk_mb must not even be consulted when the guard is off.
+    monkeypatch.setattr(runner.health, "_free_disk_mb",
+                        lambda p: (_ for _ in ()).throw(
+                            AssertionError("must not measure")))
+    assert runner._disk_too_low(_Off()) is False
+
+
+def test_disk_too_low_false_when_reading_unknown(monkeypatch):
+    """A None reading (volume not mounted / stat error) does not pause —
+       a measurement gap shouldn't wedge the node."""
+    monkeypatch.setattr(runner.health, "_free_disk_mb", lambda p: None)
+    assert runner._disk_too_low(_DiskCfg()) is False
+
+
+def test_run_once_pauses_claiming_when_disk_low(monkeypatch):
+    """Below the floor, run_once idles (returns False) WITHOUT claiming —
+       so no review starts that a full disk would fail mid-task."""
+    class _StubClient:
+        def claim(self):
+            raise AssertionError("must not claim while disk is below the floor")
+
+    monkeypatch.setattr(runner, "_disk_too_low", lambda cfg: True)
+    cli = _StubClient()
+    # _DiskCfg carries data_dir + min_free_disk_mb, which the pause log reads.
+    assert runner.run_once(_DiskCfg(), cli) is False
+
+
+def test_run_once_claims_when_disk_ok(monkeypatch):
+    """Guard clear → run_once proceeds to claim as usual (here an empty
+       queue, so it still returns False but the claim WAS attempted)."""
+    seen = {"claimed": False}
+
+    class _StubClient:
+        def claim(self):
+            seen["claimed"] = True
+            return None                          # empty queue
+
+    monkeypatch.setattr(runner, "_disk_too_low", lambda cfg: False)
+    monkeypatch.setattr(runner.time, "sleep", lambda _s: None)
+    assert runner.run_once(_Cfg, _StubClient()) is False
+    assert seen["claimed"] is True

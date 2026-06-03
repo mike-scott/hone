@@ -238,7 +238,18 @@ def run_once(cfg: Config, client: HoneCoreClient) -> bool:
     NOT idempotent — a retry re-runs the Claude call from scratch —
     which is the right behaviour: a 429 or 5xx on the prior attempt
     means the model never observed our prompt, so re-issuing is the
-    only path to a result."""
+    only path to a result.
+
+    A disk-floor guard runs first: when free space on the data volume is
+    below cfg.min_free_disk_mb the node idles instead of claiming, so a
+    base fetch or ~1.5 GB review worktree can't fail mid-task with ENOSPC.
+    The idle tick still runs _maybe_maintain (sweep + gc), which can
+    reclaim space and let the next tick resume."""
+    if _disk_too_low(cfg):
+        log.warning("disk: free space on %s below the %d MB floor — pausing "
+                    "claims until it recovers (sweep/gc run between ticks)",
+                    cfg.data_dir, cfg.min_free_disk_mb)
+        return False
     claim = _with_backoff(cfg, "claim", client.claim)
     if claim is None:
         return False
@@ -381,6 +392,21 @@ def _report_health_safely(cfg: Config, client: HoneCoreClient) -> None:
 # are throttled to this interval so a busy node doesn't `du` a large repo on
 # every loop. See refrepo.gc / refrepo.sweep_worktrees.
 _GC_CHECK_INTERVAL_SECONDS = 600
+
+
+def _disk_too_low(cfg: Config) -> bool:
+    """True when free space on the data volume is below cfg.min_free_disk_mb —
+       run_once then idles instead of claiming work whose base fetch or
+       ~1.5 GB review worktree could fail mid-task with ENOSPC (leaving a
+       partial checkout). HONE_MIN_FREE_DISK_MB=0 disables the guard. A None
+       reading (volume not mounted / stat error) does NOT pause — a
+       measurement gap shouldn't wedge the node. The same condition surfaces
+       to the operator as health.disk_low."""
+    floor = getattr(cfg, "min_free_disk_mb", 0)
+    if not floor:
+        return False
+    free = health._free_disk_mb(cfg.data_dir)
+    return free is not None and free < floor
 
 
 def _maybe_maintain(cfg: Config, state: dict) -> None:

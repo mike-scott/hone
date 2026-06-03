@@ -9,8 +9,9 @@ import pytest
 from node import ai, health
 
 
-def _cfg(data_dir="/data", repo_dir="/data/linux"):
-    return SimpleNamespace(data_dir=data_dir, repo_dir=repo_dir)
+def _cfg(data_dir="/data", repo_dir="/data/linux", min_free_disk_mb=0):
+    return SimpleNamespace(data_dir=data_dir, repo_dir=repo_dir,
+                           min_free_disk_mb=min_free_disk_mb)
 
 
 # --- _free_disk_mb --------------------------------------------------------
@@ -70,6 +71,7 @@ def test_collect_packages_the_three_first_cut_fields(monkeypatch):
         "free_disk_mb":         1024,
         "refrepo_size_mb":      4500,
         "last_anthropic_error": "rate_limit",
+        "disk_low":             False,        # 1024 MB free, guard off (floor 0)
     }
 
 
@@ -83,6 +85,31 @@ def test_collect_carries_a_clean_status_when_anthropic_is_happy(monkeypatch):
     monkeypatch.setattr(ai, "_LAST_ERROR", None)
     snap = health.collect(_cfg())
     assert snap["last_anthropic_error"] is None
+
+
+# --- collect: disk_low flag (the safety-valve signal to the operator) -----
+
+def test_collect_disk_low_true_below_floor(monkeypatch):
+    monkeypatch.setattr(health, "_free_disk_mb", lambda p: 4000)
+    monkeypatch.setattr(health, "_refrepo_size_mb", lambda p: 0)
+    snap = health.collect(_cfg(min_free_disk_mb=5000))
+    assert snap["disk_low"] is True
+
+
+def test_collect_disk_low_false_above_floor(monkeypatch):
+    monkeypatch.setattr(health, "_free_disk_mb", lambda p: 6000)
+    monkeypatch.setattr(health, "_refrepo_size_mb", lambda p: 0)
+    snap = health.collect(_cfg(min_free_disk_mb=5000))
+    assert snap["disk_low"] is False
+
+
+def test_collect_disk_low_false_when_free_unknown(monkeypatch):
+    """No reading (volume not mounted) → not flagged low, mirroring the
+       runner guard that won't pause on a measurement gap."""
+    monkeypatch.setattr(health, "_free_disk_mb", lambda p: None)
+    monkeypatch.setattr(health, "_refrepo_size_mb", lambda p: 0)
+    snap = health.collect(_cfg(min_free_disk_mb=5000))
+    assert snap["disk_low"] is False
 
 
 # --- ai._record_outcome integration --------------------------------------

@@ -57,6 +57,10 @@ class Config:
                                 # accrete; 0 disables the size trigger
     repo_gc_every:      int    # HONE_REPO_GC_EVERY — also gc every N completed
                                 # tasks regardless of size (0 disables)
+    min_free_disk_mb:   int    # HONE_MIN_FREE_DISK_MB — pause claiming while
+                                # free space on the data volume is below this,
+                                # so a base fetch / ~1.5 GB review worktree
+                                # can't fail mid-task with ENOSPC; 0 disables
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -104,4 +108,6 @@ class Config:
             repo_gc_threshold_mb = int(os.environ.get(
                                           "HONE_REPO_GC_THRESHOLD_MB", "20000")),
             repo_gc_every      = int(os.environ.get("HONE_REPO_GC_EVERY", "25")),
+            min_free_disk_mb   = int(os.environ.get("HONE_MIN_FREE_DISK_MB",
+                                                    "5000")),
         )

@@ -67,10 +67,19 @@ def collect(cfg):
          - last_anthropic_error: short category string from
            node.ai (auth / rate_limit / connection / other), or
            None if the most recent call_claude returned cleanly
+         - disk_low: True when free_disk_mb is below the configured
+           floor (cfg.min_free_disk_mb) — the node has paused claiming
+           until space recovers (runner._disk_too_low). False when
+           space is unknown or the guard is disabled, so the operator
+           can tell a paused node from a merely idle one.
 
        Keep this fast — it runs every tick of the claim loop."""
+    free = _free_disk_mb(cfg.data_dir)
+    floor = getattr(cfg, "min_free_disk_mb", 0) or 0
     return {
-        "free_disk_mb":         _free_disk_mb(cfg.data_dir),
+        "free_disk_mb":         free,
         "refrepo_size_mb":      _refrepo_size_mb(cfg.repo_dir),
         "last_anthropic_error": ai.get_last_error(),
+        "disk_low":             bool(free is not None and floor > 0
+                                     and free < floor),
     }
