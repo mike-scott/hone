@@ -42,7 +42,7 @@ RUN apt-get update \
 # Pin CLAUDE_VERSION so a rebuild is reproducible — bump it deliberately
 # when an upstream release adds something we depend on.
 ARG WITH_CLAUDE_CLI=1
-ARG CLAUDE_VERSION=v2.1.150
+ARG CLAUDE_VERSION=v2.1.161
 ARG TARGETARCH
 RUN if [ "$WITH_CLAUDE_CLI" = "1" ]; then \
         ARCH="${TARGETARCH:-$(dpkg --print-architecture 2>/dev/null || uname -m)}" \

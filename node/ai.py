@@ -373,6 +373,23 @@ def _trace_tool_results(ev, trace):
                                    else None})
 
 
+# Tools the CLI must NEVER run on a constrained (prepare/review) turn. The
+# `--allowedTools` allowlist only governs which tools *auto-approve*, NOT which
+# may run at all, so a "read-only" review could still shell out (Bash) or fan
+# out into subagents (Task/Agent) — both observed in the wild, and a subagent
+# finalization crash is what wedged the CLI on at least one review (the run
+# exited non-zero with no result event). `--disallowedTools` is the hard
+# exclusion: it overrides the prompt and the allowlist both. We pass it on
+# every turn that declares an explicit tool set (`tools is not None`),
+# covering prepare (tools=[]) and review (tools=Read/Grep/Glob) alike; a
+# caller that leaves tools=None wants the CLI default and opts out. Task and
+# Agent are both listed because the subagent tool surfaces under either name
+# across CLI versions.
+_CLI_BLOCKED_TOOLS = ["Task", "Agent", "Bash", "BashOutput", "KillShell",
+                      "Write", "Edit", "MultiEdit", "NotebookEdit",
+                      "WebFetch", "WebSearch"]
+
+
 def _call_claude_cli(cfg, system, user_text, *, model, tools=None, cwd=None):
     """`claude` CLI subprocess path — uses the OAuth session in
        $HOME/.claude rather than ANTHROPIC_API_KEY. Pipes user_text through
@@ -383,7 +400,11 @@ def _call_claude_cli(cfg, system, user_text, *, model, tools=None, cwd=None):
        `--allowedTools <names>`, and an empty list passes an empty allowlist
        — no tools. prepare uses `[]` so the model can't run Bash/git to hunt
        for a kernel tree (it has none; Tier-0 owns the tree-dependent
-       fields), regardless of what the prompt says.
+       fields), regardless of what the prompt says. Whenever `tools` is given
+       (not None) we ALSO pass `--disallowedTools _CLI_BLOCKED_TOOLS`: the
+       allowlist only governs auto-approval, so the hard denylist is what
+       actually keeps a "read-only" turn from shelling out or spawning
+       subagents.
 
        Streams `--output-format stream-json --verbose`: the CLI emits one
        JSON event per line as the turn unfolds (session init, assistant
@@ -406,6 +427,9 @@ def _call_claude_cli(cfg, system, user_text, *, model, tools=None, cwd=None):
            "--system-prompt", system]
     if tools is not None:
         cmd += ["--allowedTools", ",".join(tools)]   # [] → "" → no tools
+        # Hard exclusion — the allowlist alone does not stop unlisted tools
+        # (Bash, Task/Agent subagents) from running; this does.
+        cmd += ["--disallowedTools", ",".join(_CLI_BLOCKED_TOOLS)]
     if chosen:
         cmd += ["--model", chosen]
     log.info("claude CLI → model=%s system=%d user=%d chars tools=%s cwd=%s "

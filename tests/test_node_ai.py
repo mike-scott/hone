@@ -334,6 +334,26 @@ def test_cli_backend_gates_tools(monkeypatch):
     state = _patch_popen(monkeypatch, events=[_envelope()])
     ai.call_claude(_CliCfg(), "s", "u")                    # tools=None default
     assert "--allowedTools" not in state["cmd"]
+    assert "--disallowedTools" not in state["cmd"]
+
+
+def test_cli_backend_hard_blocks_escape_tools_when_constrained(monkeypatch):
+    """A constrained turn (tools given) ALSO passes --disallowedTools, since
+       --allowedTools only governs auto-approval, not what may run. The
+       denylist hard-blocks subagents (Task/Agent) and shell (Bash) — the
+       fan-out path that wedged a review CLI — plus file-mutation and network
+       tools. tools=None (CLI default) opts out of the denylist."""
+    # A read-only review tool set still gets the hard denylist.
+    state = _patch_popen(monkeypatch, events=[_envelope()])
+    ai.call_claude(_CliCfg(), "s", "u", tools=["Read", "Grep", "Glob"])
+    cmd = state["cmd"]
+    blocked = cmd[cmd.index("--disallowedTools") + 1].split(",")
+    for name in ("Task", "Agent", "Bash", "Write", "Edit"):
+        assert name in blocked
+    # ...and the empty (no-tools) prepare turn too.
+    state = _patch_popen(monkeypatch, events=[_envelope()])
+    ai.call_claude(_CliCfg(), "s", "u", tools=[])
+    assert "--disallowedTools" in state["cmd"]
 
 
 def test_cli_backend_logs_a_heartbeat_while_claude_thinks(monkeypatch, caplog):
