@@ -10,7 +10,8 @@ from node import runner
 def _cfg():
     # backoff_initial/backoff_max are read by _with_backoff (enrollment runs
     # through it); enrollment here never fails, so the values are unused.
-    return SimpleNamespace(repo_dir="/data/linux", core_url="https://core",
+    return SimpleNamespace(repo_dir="/data/linux", scratch_dir="/data/scratch",
+                           core_url="https://core",
                            backoff_initial=0.001, backoff_max=0.01)
 
 
@@ -20,11 +21,14 @@ def test_bootstrap_enrolls_then_initializes_repo(monkeypatch):
     client = SimpleNamespace(ensure_enrolled=lambda: calls.append("enroll"))
     monkeypatch.setattr(runner.refrepo, "ensure_repo",
                         lambda: calls.append("ensure_repo"))
+    monkeypatch.setattr(runner.refrepo, "sweep_worktrees",
+                        lambda d: calls.append("sweep") or 0)
 
     runner.bootstrap(_cfg(), client)
 
-    # enrollment happens first, then the reference repo is initialized
-    assert calls == ["enroll", "ensure_repo"]
+    # enrollment first, then the reference repo is initialized, then any
+    # leaked review worktrees from a prior crash are reclaimed
+    assert calls == ["enroll", "ensure_repo", "sweep"]
 
 
 def test_bootstrap_skips_repo_when_no_tree_bound_task_types(monkeypatch):

@@ -17,13 +17,16 @@ CLI:
                                         missing — trying [tree] first when
                                         given); add a detached worktree
   refrepo.py cleanup <wt-dir> [...]     remove prepared worktree(s)
+  refrepo.py sweep [scratch-dir]        reclaim leaked review worktrees
   refrepo.py gc                         bound the repo (git gc --prune=now)
   refrepo.py status                     repo size + live worktrees
 
-Importable: prepare(), cleanup(), gc(), base_of(), have().
+Importable: prepare(), cleanup(), sweep_worktrees(), gc(), size_mb(),
+base_of(), have().
 """
 import os
 import re
+import shutil
 import subprocess
 import sys
 
@@ -177,10 +180,50 @@ def cleanup(*wt_dirs):
     _git("worktree", "prune")
 
 
+def sweep_worktrees(scratch_dir):
+    """Reclaim leaked review worktrees. Each review's worktree is removed in a
+       `finally` (cleanup()), but a SIGKILL or restart mid-review strands its
+       ~1.5 GB checkout. Call only when this node is idle — no review is then
+       in flight, so every `review-*` directory under scratch_dir is a
+       leftover. Each is removed as a worktree (force), with an rm -rf fallback
+       for one git no longer tracks, then the admin refs are pruned. Returns
+       the count reclaimed. A no-op when scratch_dir doesn't exist yet."""
+    if not os.path.isdir(scratch_dir):
+        return 0
+    removed = 0
+    for name in os.listdir(scratch_dir):
+        if not name.startswith("review-"):
+            continue
+        path = os.path.join(scratch_dir, name)
+        _git("worktree", "remove", "--force", path)
+        if os.path.lexists(path):
+            shutil.rmtree(path, ignore_errors=True)
+        if not os.path.lexists(path):
+            removed += 1
+    if removed:
+        _git("worktree", "prune")
+    return removed
+
+
 def gc():
     """Bound the repo — discard the unreachable churn that arbitrary base
        fetches (especially daily-rebased linux-next) leave behind."""
     return _git("gc", "--prune=now").returncode == 0
+
+
+def size_mb():
+    """Reference repo size in MiB (`du -sm` of REPO), or 0 when it's absent.
+       The idle-time gc trigger reads this; matches the same `du -sm` that
+       health.py reports as refrepo_size_mb so operator UI and trigger agree."""
+    if not os.path.isdir(REPO):
+        return 0
+    r = subprocess.run(["du", "-sm", REPO], capture_output=True, text=True)
+    if r.returncode != 0:
+        return 0
+    try:
+        return int(r.stdout.split("\t", 1)[0])
+    except (ValueError, IndexError):
+        return 0
 
 
 def _du():
@@ -205,6 +248,13 @@ def main():
     elif cmd == "cleanup" and len(a) >= 3:
         cleanup(*a[2:])
         print(f"removed {len(a) - 2} worktree(s)")
+    elif cmd == "sweep":
+        scratch = (a[2] if len(a) >= 3 else
+                   os.environ.get("HONE_SCRATCH_DIR")
+                   or os.path.join(os.environ.get("HONE_DATA", "/data"),
+                                    "scratch"))
+        print(f"reclaimed {sweep_worktrees(scratch)} leaked worktree(s) "
+              f"from {scratch}")
     elif cmd == "gc":
         before = _du()
         ok = gc()

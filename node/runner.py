@@ -169,6 +169,12 @@ def bootstrap(cfg: Config, client: HoneCoreClient) -> None:
     _with_backoff(cfg, "enrollment", client.ensure_enrolled)
     if "review" in tasks.SUPPORTED_TASK_TYPES:
         refrepo.ensure_repo()
+        # A restart after a SIGKILL mid-review strands that review's ~1.5 GB
+        # worktree; reclaim any such leftovers before claiming new work.
+        swept = refrepo.sweep_worktrees(cfg.scratch_dir)
+        if swept:
+            log.info("bootstrap — reclaimed %d leaked review worktree(s)",
+                     swept)
         log.info("bootstrap — reference repo ready (repo_dir=%s)", cfg.repo_dir)
     else:
         log.info("bootstrap — no tree-bound task types; skipping reference repo")
@@ -370,6 +376,58 @@ def _report_health_safely(cfg: Config, client: HoneCoreClient) -> None:
                     exc_info=True)
 
 
+# Idle disk-maintenance cadence. The worktree sweep is cheap and runs every
+# maintenance pass; the gc size-check (a `du` over the repo) and gc itself
+# are throttled to this interval so a busy node doesn't `du` a large repo on
+# every loop. See refrepo.gc / refrepo.sweep_worktrees.
+_GC_CHECK_INTERVAL_SECONDS = 600
+
+
+def _maybe_maintain(cfg: Config, state: dict) -> None:
+    """Between-task disk maintenance — the caller invokes it only after
+       run_once returns, when this node holds no worktree, so it never
+       contends with an in-flight review. Two jobs:
+
+         1. Reclaim leaked review worktrees — a SIGKILL mid-review strands a
+            ~1.5 GB checkout (graceful paths clean up via refrepo.cleanup).
+            Cheap, so every pass.
+         2. gc the reference repo once it crosses cfg.repo_gc_threshold_mb, or
+            cfg.repo_gc_every tasks have run since the last gc — discarding the
+            unreachable churn arbitrary base fetches accrete (left unchecked
+            the repo reached 116 GB). The du + gc is throttled to
+            _GC_CHECK_INTERVAL_SECONDS.
+
+       `state` carries the cross-tick counters {tasks_since_gc, last_gc_check}.
+       Best-effort: any failure is logged, never fatal to the claim loop."""
+    try:
+        swept = refrepo.sweep_worktrees(cfg.scratch_dir)
+        if swept:
+            log.info("disk: reclaimed %d leaked review worktree(s) from %s",
+                     swept, cfg.scratch_dir)
+        now = time.monotonic()
+        if now - state["last_gc_check"] < _GC_CHECK_INTERVAL_SECONDS:
+            return
+        state["last_gc_check"] = now
+        due_by_count = (cfg.repo_gc_every > 0
+                        and state["tasks_since_gc"] >= cfg.repo_gc_every)
+        size_mb = refrepo.size_mb()
+        due_by_size = (cfg.repo_gc_threshold_mb > 0
+                       and size_mb >= cfg.repo_gc_threshold_mb)
+        if not (due_by_count or due_by_size):
+            return
+        log.info("disk: gc reference repo — %.1f GB, %d task(s) since gc "
+                 "(trigger=%s)", size_mb / 1024, state["tasks_since_gc"],
+                 "size" if due_by_size else "count")
+        if refrepo.gc():
+            log.info("disk: gc complete — %.1f GB -> %.1f GB",
+                     size_mb / 1024, refrepo.size_mb() / 1024)
+        else:
+            log.warning("disk: gc failed (will retry next cycle)")
+        state["tasks_since_gc"] = 0
+    except Exception:
+        log.warning("disk maintenance failed (non-fatal)", exc_info=True)
+
+
 def _fatal_config_error(message: str) -> None:
     """Log a known-fatal configuration error as a single ERROR line and
        exit non-zero. The traceback would not help an operator — the
@@ -408,8 +466,12 @@ def main() -> None:
         # retried with backoff inside the calls above.
         # TODO: persist an in-flight result to cfg.scratch_dir so a completed
         # review survives a node restart instead of being re-claimed.
+        # Cross-tick disk-maintenance counters (see _maybe_maintain).
+        maint = {"tasks_since_gc": 0, "last_gc_check": 0.0}
         while True:
             did_work = run_once(cfg, client)
+            if did_work:
+                maint["tasks_since_gc"] += 1
             # Per-tick health report: fires after a successful task
             # submit (did_work=True) and after an empty-queue 204
             # (did_work=False). The abort path inside run_once posts
@@ -417,6 +479,11 @@ def main() -> None:
             # always reflects the most recent signal regardless of
             # exit path.
             _report_health_safely(cfg, client)
+            # Disk maintenance at the safe between-task point: run_once has
+            # returned, so no worktree is in flight on this node. Throttled
+            # internally; sweeps leaked worktrees and gc's the reference repo
+            # when it has grown past the threshold.
+            _maybe_maintain(cfg, maint)
             if not did_work:
                 time.sleep(cfg.poll_interval)
     except EnrollmentError as exc:

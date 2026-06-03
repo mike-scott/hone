@@ -160,3 +160,76 @@ def test_resolve_tip_none_when_no_commit_predates_submission(monkeypatch):
 
 def pytest_fail_git():
     raise AssertionError("_git must not be called on the guard path")
+
+
+# --- sweep_worktrees (reclaim leaked review checkouts) ---------------------
+
+def test_sweep_worktrees_reclaims_review_dirs(tmp_path, monkeypatch):
+    """Every `review-*` dir under scratch is a leftover (sweep is called only
+       when idle); each is removed and the count returned. A non-review dir is
+       left untouched, and `git worktree prune` runs once at the end."""
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    (scratch / "review-aaa").mkdir()
+    (scratch / "review-bbb").mkdir()
+    (scratch / "keep-me").mkdir()                 # not review-* → untouched
+    calls = []
+    def fake_git(*args):
+        calls.append(args)                        # mocked: doesn't remove dirs
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    monkeypatch.setattr(refrepo, "_git", fake_git)
+
+    n = refrepo.sweep_worktrees(str(scratch))
+
+    assert n == 2
+    assert not (scratch / "review-aaa").exists()  # rm -rf fallback removed it
+    assert not (scratch / "review-bbb").exists()
+    assert (scratch / "keep-me").exists()          # untouched
+    assert ("worktree", "remove", "--force",
+            str(scratch / "review-aaa")) in calls
+    assert ("worktree", "prune") in calls          # admin refs pruned once
+
+
+def test_sweep_worktrees_noop_when_scratch_absent(monkeypatch):
+    """No scratch dir yet (first start) → a no-op that never shells out."""
+    monkeypatch.setattr(refrepo, "_git", lambda *a: pytest_fail_git())
+    assert refrepo.sweep_worktrees("/no/such/scratch/dir") == 0
+
+
+def test_sweep_worktrees_no_prune_when_nothing_to_reclaim(tmp_path,
+                                                          monkeypatch):
+    """A clean scratch (only non-review entries) reclaims nothing and skips
+       the prune call entirely."""
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    (scratch / "keep-me").mkdir()
+    calls = []
+    monkeypatch.setattr(refrepo, "_git",
+                        lambda *a: calls.append(a) or
+                        SimpleNamespace(returncode=0, stdout="", stderr=""))
+    assert refrepo.sweep_worktrees(str(scratch)) == 0
+    assert calls == []                             # no worktree remove / prune
+
+
+# --- size_mb (the gc trigger reads this) -----------------------------------
+
+def test_size_mb_parses_du(monkeypatch):
+    monkeypatch.setattr(refrepo.os.path, "isdir", lambda p: True)
+    monkeypatch.setattr(refrepo.subprocess, "run",
+                        lambda *a, **k: SimpleNamespace(
+                            returncode=0, stdout="7234\t/data/linux\n",
+                            stderr=""))
+    assert refrepo.size_mb() == 7234
+
+
+def test_size_mb_zero_when_repo_absent(monkeypatch):
+    monkeypatch.setattr(refrepo.os.path, "isdir", lambda p: False)
+    assert refrepo.size_mb() == 0
+
+
+def test_size_mb_zero_when_du_fails(monkeypatch):
+    monkeypatch.setattr(refrepo.os.path, "isdir", lambda p: True)
+    monkeypatch.setattr(refrepo.subprocess, "run",
+                        lambda *a, **k: SimpleNamespace(
+                            returncode=1, stdout="", stderr="du: error"))
+    assert refrepo.size_mb() == 0

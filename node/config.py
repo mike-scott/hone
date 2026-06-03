@@ -51,6 +51,12 @@ class Config:
     cli_timeout:        int    # HONE_CLI_TIMEOUT — max seconds for one
                                 # `claude` CLI turn before the watchdog kills
                                 # the wedged subprocess (cli backend only)
+    repo_gc_threshold_mb: int  # HONE_REPO_GC_THRESHOLD_MB — gc the reference
+                                # repo once it grows past this, bounding the
+                                # daily-rebase churn arbitrary base fetches
+                                # accrete; 0 disables the size trigger
+    repo_gc_every:      int    # HONE_REPO_GC_EVERY — also gc every N completed
+                                # tasks regardless of size (0 disables)
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -95,4 +101,7 @@ class Config:
             backoff_max        = float(os.environ.get("HONE_BACKOFF_MAX", "300")),
             heartbeat_interval = int(os.environ.get("HONE_HEARTBEAT_INTERVAL", "300")),
             cli_timeout        = int(os.environ.get("HONE_CLI_TIMEOUT", "600")),
+            repo_gc_threshold_mb = int(os.environ.get(
+                                          "HONE_REPO_GC_THRESHOLD_MB", "20000")),
+            repo_gc_every      = int(os.environ.get("HONE_REPO_GC_EVERY", "25")),
         )

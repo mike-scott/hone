@@ -545,3 +545,79 @@ def test_fatal_config_error_logs_one_line_and_exits(caplog):
     assert any("hone-node CONFIG ERROR" in m and "ANTHROPIC_API_KEY" in m
                for m in messages)
     assert any("Container will exit" in m for m in messages)
+
+
+# --- idle disk maintenance (gc + leaked-worktree sweep) -------------------
+
+class _MaintCfg:                  # only the fields _maybe_maintain reads
+    scratch_dir = "/sim/scratch"
+    repo_gc_threshold_mb = 20000
+    repo_gc_every = 25
+
+
+def _maint_state():
+    return {"tasks_since_gc": 0, "last_gc_check": 0.0}
+
+
+def _stub_refrepo(monkeypatch, *, swept=0, size_mb=100, gc_ok=True):
+    """Stub refrepo's three maintenance hooks; return a calls recorder."""
+    calls = {"sweep": 0, "size": 0, "gc": 0}
+    monkeypatch.setattr(runner.refrepo, "sweep_worktrees",
+                        lambda d: calls.__setitem__("sweep", calls["sweep"] + 1)
+                        or swept)
+    monkeypatch.setattr(runner.refrepo, "size_mb",
+                        lambda: calls.__setitem__("size", calls["size"] + 1)
+                        or size_mb)
+    monkeypatch.setattr(runner.refrepo, "gc",
+                        lambda: calls.__setitem__("gc", calls["gc"] + 1)
+                        or gc_ok)
+    return calls
+
+
+def test_maintain_sweeps_but_skips_gc_when_not_due(monkeypatch):
+    """Repo below threshold and no task backlog → sweep runs, gc does not,
+       the counter is left intact."""
+    calls = _stub_refrepo(monkeypatch, swept=3, size_mb=100)
+    state = _maint_state()
+    runner._maybe_maintain(_MaintCfg(), state)
+    assert calls["sweep"] == 1
+    assert calls["gc"] == 0
+    assert state["tasks_since_gc"] == 0
+
+
+def test_maintain_gcs_when_repo_exceeds_threshold(monkeypatch):
+    """Size high-water mark crossed → gc fires even with no task backlog."""
+    calls = _stub_refrepo(monkeypatch, size_mb=25000)        # > 20000
+    state = _maint_state()
+    runner._maybe_maintain(_MaintCfg(), state)
+    assert calls["gc"] == 1
+
+
+def test_maintain_gcs_every_n_tasks_and_resets_counter(monkeypatch):
+    """Enough tasks since the last gc → gc fires (size below threshold) and
+       the counter resets so the cadence restarts."""
+    calls = _stub_refrepo(monkeypatch, size_mb=100)          # below threshold
+    state = _maint_state()
+    state["tasks_since_gc"] = 25                              # == repo_gc_every
+    runner._maybe_maintain(_MaintCfg(), state)
+    assert calls["gc"] == 1
+    assert state["tasks_since_gc"] == 0
+
+
+def test_maintain_throttles_the_gc_check(monkeypatch):
+    """A second back-to-back pass is throttled: it still sweeps (cheap) but
+       does not re-`du`/gc within the interval."""
+    calls = _stub_refrepo(monkeypatch, size_mb=25000)
+    state = _maint_state()
+    runner._maybe_maintain(_MaintCfg(), state)               # 1st: du + gc
+    runner._maybe_maintain(_MaintCfg(), state)               # 2nd: throttled
+    assert calls["sweep"] == 2                               # sweep every pass
+    assert calls["gc"] == 1            # gc once — 2nd pass throttled, not re-run
+
+
+def test_maintain_swallows_errors(monkeypatch):
+    """Maintenance must never break the claim loop — a refrepo failure is
+       logged, not raised."""
+    monkeypatch.setattr(runner.refrepo, "sweep_worktrees",
+                        lambda d: (_ for _ in ()).throw(RuntimeError("boom")))
+    runner._maybe_maintain(_MaintCfg(), _maint_state())      # no exception
