@@ -93,9 +93,9 @@ def test_claude_backends_enum_documents_supported_values():
     assert CLAUDE_BACKENDS == ("sdk", "cli")
 
 
-def test_cli_timeout_defaults_to_600(monkeypatch):
+def test_cli_timeout_defaults_to_3600(monkeypatch):
     _set_minimum(monkeypatch, HONE_CLAUDE_BACKEND="cli")
-    assert Config.from_env().cli_timeout == 600
+    assert Config.from_env().cli_timeout == 3600
 
 
 def test_cli_timeout_overridden_by_env(monkeypatch):

@@ -100,7 +100,7 @@ class Config:
             backoff_initial    = float(os.environ.get("HONE_BACKOFF_INITIAL", "1")),
             backoff_max        = float(os.environ.get("HONE_BACKOFF_MAX", "300")),
             heartbeat_interval = int(os.environ.get("HONE_HEARTBEAT_INTERVAL", "300")),
-            cli_timeout        = int(os.environ.get("HONE_CLI_TIMEOUT", "600")),
+            cli_timeout        = int(os.environ.get("HONE_CLI_TIMEOUT", "3600")),
             repo_gc_threshold_mb = int(os.environ.get(
                                           "HONE_REPO_GC_THRESHOLD_MB", "20000")),
             repo_gc_every      = int(os.environ.get("HONE_REPO_GC_EVERY", "25")),
