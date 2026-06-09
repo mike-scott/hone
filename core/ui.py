@@ -196,7 +196,13 @@ async def register_submit(request: Request):
             "email": email, "display_name": display_name,
         }, status_code=422)
 
-    if not email or not re.match(r"[^@]+@[^@]+\.[^@]+", email):
+    # fullmatch (anchored both ends) so trailing junk after a valid-looking
+    # prefix can't slip through, and a negated class that rejects whitespace
+    # + every C0 control char + DEL so an attacker can't embed CR/LF or NUL
+    # in a value that later flows into a header, log line, or outbound mailer.
+    if not email or not re.fullmatch(
+            r"[^@\s\x00-\x1f\x7f]+@[^@\s\x00-\x1f\x7f]+\.[^@\s\x00-\x1f\x7f]+",
+            email):
         return _fail("Please enter a valid email address.")
     if len(password) < 10:
         return _fail("Password must be at least 10 characters.")

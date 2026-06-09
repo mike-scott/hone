@@ -181,6 +181,39 @@ def test_register_existing_email_renders_the_same_success_page(ctx):
     assert after["state"] == "approved"
 
 
+@pytest.mark.parametrize("bad_email", [
+    # Internal whitespace (strip only removes leading/trailing) — the old
+    # `re.match` would have let these through because [^@] matches \n / \t.
+    "foo\nbar@example.com",
+    "foo\tbar@example.com",
+    "foo bar@example.com",
+    # Control characters / DEL — would otherwise flow into log lines,
+    # mailer calls, or anywhere else that takes the address downstream.
+    "alice\x00@example.com",
+    "alice@example.\x7fcom",
+    "alice@exa\x0dmple.com",
+    # Trailing junk after a valid-looking prefix — fullmatch catches it
+    # where re.match (unanchored at end) would have passed it.
+    "alice@example.comJUNK\nEXTRA",
+])
+def test_register_rejects_emails_with_control_chars_or_trailing_junk(
+        ctx, bad_email):
+    r = _post_register(ctx, email=bad_email, password="x" * 12)
+    assert r.status_code == 422
+    assert "valid email" in r.text.lower()
+
+
+@pytest.mark.parametrize("good_email", [
+    "alice@example.com",
+    "bob.smith@example.co.uk",
+    "carol+tag@example.com",
+    "dave-99@sub.example.org",
+])
+def test_register_accepts_ordinary_email_shapes(ctx, good_email):
+    r = _post_register(ctx, email=good_email, password="x" * 12)
+    assert r.status_code == 200                  # the "submitted" success page
+
+
 def test_register_keeps_input_validation_errors(ctx):
     """The no-enumeration cleanup must not paper over legitimate input
        validation — a malformed email or a too-short password is still
