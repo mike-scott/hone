@@ -326,10 +326,11 @@ rejected with the field flagged and `config.yaml` left untouched. A
 separate read-only panel lists the deployment configuration.
 
 **Authentication.** The Settings page **mutates** hone-core's behaviour,
-so it sits behind operator authentication. Today the whole operator UI is
-gated by HTTP Basic auth against `HONE_ADMIN_TOKEN` (`require_ui_auth` in
-`core/api.py`); the session-based login described under *Operator web UI*
-is the target refinement, not yet built.
+so it sits behind operator authentication. The whole operator UI is gated
+by session-based login (`core/auth.py`): email/password (Argon2id) or
+Google SSO, with an admin-approval gate for self-registered accounts; the
+configured `HONE_ADMIN_TOKEN` is a separate config-admin identity with
+exclusive access to user management.
 
 **Not in scope here.** Methodology import/export (export the DB methodology
 to YAML, re-import an edited one — see *Methodology storage*) is operator

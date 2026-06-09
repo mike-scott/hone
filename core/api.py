@@ -9,8 +9,6 @@ The claim endpoint assembles a self-contained payload (patchset, patch
 messages, training comments, compiled methodology), so a node makes one
 HTTP call per task instead of three.
 """
-import base64
-import binascii
 import copy
 import datetime
 import json
@@ -134,29 +132,6 @@ def require_admin(request: Request,
     """Authenticate an admin request."""
     if not _secret_ok(admin_token, request.app.state.config.admin_token):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "bad admin token")
-
-
-def require_ui_auth(request: Request,
-                    authorization: str | None = Header(None)):
-    """Gate the operator web UI behind HTTP Basic auth so a browser prompts
-       for credentials. Any username; the password must equal the admin token
-       (HONE_ADMIN_TOKEN) — the same secret require_admin checks, carried the
-       browser-native way. A miss returns 401 with a Basic challenge so the
-       browser shows its login dialog. The fleet API (/v1/*), /healthz, and
-       /static are mounted outside the UI router and keep their own gate (or
-       none). Fail-closed: an unset admin token denies all (_secret_ok)."""
-    expected = request.app.state.config.admin_token
-    if authorization and authorization[:6].lower() == "basic ":
-        try:
-            raw = base64.b64decode(authorization[6:], validate=True)
-            _user, _, password = raw.decode("utf-8", "replace").partition(":")
-        except (binascii.Error, ValueError):
-            password = ""
-        if _secret_ok(password, expected):
-            return
-    raise HTTPException(
-        status.HTTP_401_UNAUTHORIZED, "operator authentication required",
-        headers={"WWW-Authenticate": 'Basic realm="hone-core"'})
 
 
 def _oauth_error(code, message, status_code=status.HTTP_400_BAD_REQUEST):
