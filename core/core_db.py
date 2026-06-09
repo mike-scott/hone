@@ -2848,6 +2848,8 @@ def create_user(db, email, display_name, auth_provider, *,
 def set_user_state(db, user_id, state):
     now = int(time.time())
     approved_at = now if state == "approved" else None
+    # COALESCE preserves approved_at on revoke/un-approve (audit trail) and
+    # refreshes it with `now` on (re-)approval.
     db.execute(
         "UPDATE users SET state = ?, approved_at = COALESCE(?, approved_at) WHERE id = ?",
         (state, approved_at, user_id))

@@ -95,6 +95,40 @@ def test_require_session_skips_db_lookup_for_the_config_admin(db, monkeypatch):
     assert calls == []                       # no DB hit
 
 
+# --- set_user_state: approved_at semantics across all four transitions ---
+
+def test_set_user_state_approved_at_is_preserved_on_revoke_refreshed_on_reapprove(db):
+    """The SQL `COALESCE(?, approved_at)` is non-obvious: a revoke / un-approve
+       leaves the existing approved_at intact (so the audit trail of when the
+       user was last approved survives), but a (re-)approval refreshes it.
+       Pin all four transitions so a silent change to the UPDATE is caught."""
+    uid = core_db.create_user(db, "u@x", "U", "local", password_hash="x")
+
+    # Initial state: pending, no approval timestamp yet.
+    assert core_db.get_user_by_id(db, uid)["approved_at"] is None
+
+    # First approval stamps approved_at.
+    core_db.set_user_state(db, uid, "approved")
+    first = core_db.get_user_by_id(db, uid)["approved_at"]
+    assert first is not None
+
+    # Revoke preserves it (audit trail).
+    core_db.set_user_state(db, uid, "revoked")
+    assert core_db.get_user_by_id(db, uid)["approved_at"] == first
+
+    # Un-approve back to pending also preserves it.
+    core_db.set_user_state(db, uid, "pending")
+    assert core_db.get_user_by_id(db, uid)["approved_at"] == first
+
+    # Re-approve refreshes it — force a clearly-wrong sentinel so the assertion
+    # doesn't rely on `now` having moved on (the test may run inside one
+    # wall-clock second).
+    db.execute("UPDATE users SET approved_at = 1 WHERE id = ?", (uid,))
+    db.commit()
+    core_db.set_user_state(db, uid, "approved")
+    assert core_db.get_user_by_id(db, uid)["approved_at"] != 1
+
+
 # --- PasswordHasher singleton --------------------------------------------
 
 def test_password_hasher_is_a_module_level_singleton():
