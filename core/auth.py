@@ -73,6 +73,20 @@ def verify_password(plain: str, hashed: str) -> bool:
         return False
 
 
+_DUMMY_HASH: Optional[str] = None
+
+
+def dummy_password_hash() -> str:
+    """A pre-computed Argon2 hash used as the verify target when an email
+       lookup misses — pays the same CPU/wall time as a real `verify_password`
+       so the response timing of a failed login is independent of whether the
+       email is registered. Computed lazily on first use and cached."""
+    global _DUMMY_HASH
+    if _DUMMY_HASH is None:
+        _DUMMY_HASH = hash_password("placeholder-never-matches")
+    return _DUMMY_HASH
+
+
 # ---------------------------------------------------------------------------
 # FastAPI dependencies
 # ---------------------------------------------------------------------------

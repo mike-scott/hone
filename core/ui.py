@@ -98,6 +98,12 @@ async def login_submit(request: Request):
     password = (form.get("password") or "")
     next_url = _safe_next(form.get("next"))
 
+    def _login_response(error, status_code):
+        return templates.TemplateResponse(request, "login.html", {
+            "next": next_url, "google_enabled": bool(cfg.google_client_id),
+            "error": error,
+        }, status_code=status_code)
+
     # Config-token admin — constant-time comparison against HONE_ADMIN_TOKEN.
     if cfg.admin_token and secrets.compare_digest(password, cfg.admin_token):
         auth.set_session_user(request, auth.SessionUser(
@@ -105,30 +111,32 @@ async def login_submit(request: Request):
             display_name="Admin", is_config_admin=True))
         return RedirectResponse(next_url, status_code=303)
 
-    # Regular DB user.
+    # Regular DB user. Always run an Argon2 verify (against a precomputed
+    # dummy hash if the email lookup misses or the user has no password) so
+    # the wall-time of a failed login is roughly independent of whether the
+    # email is registered — no enumeration through response timing. State-
+    # specific messages (pending / revoked) are only revealed AFTER a valid
+    # password, so they don't leak: an attacker who can produce them already
+    # has the user's credentials.
     user = core_db.get_user_by_email(db, email)
-    if user and user["password_hash"] and auth.verify_password(password, user["password_hash"]):
-        if user["state"] == "pending":
-            return templates.TemplateResponse(request, "login.html", {
-                "next": next_url, "google_enabled": bool(cfg.google_client_id),
-                "error": "Your account is awaiting admin approval.",
-            }, status_code=403)
-        if user["state"] == "revoked":
-            return templates.TemplateResponse(request, "login.html", {
-                "next": next_url, "google_enabled": bool(cfg.google_client_id),
-                "error": "Your account has been revoked.",
-            }, status_code=403)
-        auth.set_session_user(request, auth.SessionUser(
-            id=user["id"], email=user["email"],
-            display_name=user["display_name"] or user["email"],
-            is_config_admin=False))
-        core_db.touch_last_login(db, user["id"])
-        return RedirectResponse(next_url, status_code=303)
+    hashed = (user["password_hash"] if user and user["password_hash"]
+              else auth.dummy_password_hash())
+    password_ok = auth.verify_password(password, hashed)
 
-    return templates.TemplateResponse(request, "login.html", {
-        "next": next_url, "google_enabled": bool(cfg.google_client_id),
-        "error": "Invalid email or password.",
-    }, status_code=401)
+    if not (user and password_ok):
+        return _login_response("Invalid email or password.", 401)
+    if user["state"] == "pending":
+        return _login_response(
+            "Your account is awaiting admin approval.", 403)
+    if user["state"] == "revoked":
+        return _login_response("Your account has been revoked.", 403)
+
+    auth.set_session_user(request, auth.SessionUser(
+        id=user["id"], email=user["email"],
+        display_name=user["display_name"] or user["email"],
+        is_config_admin=False))
+    core_db.touch_last_login(db, user["id"])
+    return RedirectResponse(next_url, status_code=303)
 
 
 @router.get("/register", response_class=HTMLResponse, include_in_schema=False)
@@ -160,11 +168,17 @@ async def register_submit(request: Request):
         return _fail("Please enter a valid email address.")
     if len(password) < 10:
         return _fail("Password must be at least 10 characters.")
-    if core_db.get_user_by_email(db, email):
-        return _fail("An account with that email already exists.")
 
-    core_db.create_user(db, email, display_name or email, "local",
-                        password_hash=auth.hash_password(password))
+    # Always hash the password (so the response time is independent of whether
+    # the email is registered) and always render the same success page (so
+    # the body/status don't leak which addresses have accounts). If the email
+    # is already taken we silently no-op rather than overwriting the existing
+    # row; the legitimate owner is unaffected, and an attacker probing the
+    # endpoint can't tell whether their submission landed.
+    hashed = auth.hash_password(password)
+    if not core_db.get_user_by_email(db, email):
+        core_db.create_user(db, email, display_name or email, "local",
+                            password_hash=hashed)
     return templates.TemplateResponse(request, "register.html", {
         "google_enabled": bool(cfg.google_client_id),
         "error": "", "success": True,
