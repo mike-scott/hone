@@ -58,15 +58,24 @@ def _plant_user(ctx, *, email="alice@example.com", state="approved",
     return uid
 
 
-_CSRF_RE = __import__("re").compile(r'name="csrf_token" value="([^"]+)"')
+import re as _re
+_CSRF_RE = _re.compile(r'name="csrf_token" value="([^"]+)"')
+_CSRF_META_RE = _re.compile(r'<meta name="csrf-token" content="([^"]+)"')
 
 
 def _csrf(ctx, path):
     """Fetch the real CSRF token by rendering the page (the GET seeds the
-       session cookie + hidden field), the way a browser does."""
+       session cookie + hidden field), the way a browser does. If the page
+       redirects — e.g. an already-logged-in user GET-ing /login now skips
+       the form — fall back to the home page's <meta name="csrf-token">,
+       which carries the same per-session token."""
     r = ctx.client.get(path)
     m = _CSRF_RE.search(r.text)
-    assert m, f"no csrf_token found on GET {path}"
+    if m:
+        return m.group(1)
+    r = ctx.client.get("/")
+    m = _CSRF_META_RE.search(r.text)
+    assert m, f"no csrf_token found on GET {path} (and / didn't render either)"
     return m.group(1)
 
 
@@ -244,6 +253,69 @@ def test_admin_token_login_still_works_with_any_email(ctx):
     r = _post_login(ctx, email="literally-anything@x", password=_ADMIN_TOKEN)
     assert r.status_code == 303
     assert "hone_session" in r.headers.get("set-cookie", "")
+
+
+# --- GET /login: already-logged-in shortcut ----------------------------------
+
+def test_login_page_redirects_when_already_authenticated(ctx):
+    """A logged-in user landing on /login skips the form — they're already
+       in. Default redirect target is '/'."""
+    _plant_user(ctx, email="alice@example.com", state="approved")
+    # Log in once.
+    r = _post_login(ctx, email="alice@example.com",
+                    password="correct-horse-battery-staple")
+    assert r.status_code == 303
+    # Second GET /login should now redirect (the user is authenticated).
+    r = ctx.client.get("/login")
+    assert r.status_code == 303
+    assert r.headers["Location"] == "/"
+
+
+def test_login_page_redirect_honours_next_param(ctx):
+    """The opener-passed `?next=…` URL drives where the redirect lands, so
+       a deep-link in a logged-in session doesn't lose its destination."""
+    _plant_user(ctx, email="alice@example.com", state="approved")
+    _post_login(ctx, email="alice@example.com",
+                password="correct-horse-battery-staple")
+    r = ctx.client.get("/login?next=/settings")
+    assert r.status_code == 303
+    assert r.headers["Location"] == "/settings"
+
+
+def test_login_page_redirect_rejects_offsite_next(ctx):
+    """The shared _safe_next guard still applies — an absolute / protocol-
+       relative URL is dropped to '/' so the shortcut isn't an open redirect."""
+    _plant_user(ctx, email="alice@example.com", state="approved")
+    _post_login(ctx, email="alice@example.com",
+                password="correct-horse-battery-staple")
+    r = ctx.client.get("/login?next=https://attacker.example/")
+    assert r.status_code == 303
+    assert r.headers["Location"] == "/"
+
+
+def test_login_page_renders_form_when_session_is_stale(ctx):
+    """A cookie whose user is no longer approved must NOT redirect — the
+       current_session_user re-check clears the stale cookie and lets the
+       form render, so the user can log in afresh."""
+    _plant_user(ctx, email="alice@example.com", state="approved")
+    _post_login(ctx, email="alice@example.com",
+                password="correct-horse-battery-staple")
+    # Admin revokes them.
+    user = core_db.get_user_by_email(ctx.db, "alice@example.com")
+    core_db.set_user_state(ctx.db, user["id"], "revoked")
+    r = ctx.client.get("/login")
+    assert r.status_code == 200
+    assert _CSRF_RE.search(r.text) is not None     # the form is back
+
+
+def test_login_page_redirect_works_for_config_admin(ctx):
+    """The HONE_ADMIN_TOKEN-as-password path also short-circuits — config
+       admins are id=None and bypass the DB re-check."""
+    r = _post_login(ctx, email="x@y", password=_ADMIN_TOKEN)
+    assert r.status_code == 303
+    r = ctx.client.get("/login")
+    assert r.status_code == 303
+    assert r.headers["Location"] == "/"
 
 
 # --- per-IP failed-login throttle ---------------------------------------------

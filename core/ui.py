@@ -98,6 +98,12 @@ def _google_redirect_uri(cfg) -> str:
 async def login_page(request: Request, next: str | None = None,
                      error: str | None = None):
     cfg = request.app.state.config
+    # Already-logged-in shortcut: a user with a still-valid session
+    # (current_session_user re-validates against the DB, so a revoked cookie
+    # is treated as no session at all) skips the form and proceeds where
+    # they were going.
+    if auth.current_session_user(request) is not None:
+        return RedirectResponse(_safe_next(next), status_code=303)
     return templates.TemplateResponse(request, "login.html", {
         "next":           next or "",
         "error":          error or "",

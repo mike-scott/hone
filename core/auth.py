@@ -166,22 +166,32 @@ def _redirect_to_login(request: Request) -> HTTPException:
         headers={"Location": f"/login?next={next_url}"})
 
 
-def require_session(request: Request) -> SessionUser:
-    """Per-request session check, re-validated against the DB so revoke /
-       delete / un-approve takes effect on the user's NEXT request instead
-       of waiting for their cookie to expire. The config-token admin has no
-       DB row (id is None) and bypasses the lookup — that identity is
-       controlled by HONE_ADMIN_TOKEN only."""
+def current_session_user(request: Request) -> Optional[SessionUser]:
+    """The current authenticated session user, re-validated against the DB so
+       revoke / delete / un-approve takes effect on the NEXT request. Returns
+       None when there's no session, when the session is stale (and clears the
+       cookie so a future request prompts a fresh login), or when the cookie
+       carries a DB user whose state is no longer 'approved'. The config-token
+       admin (id=None) bypasses the lookup — controlled by HONE_ADMIN_TOKEN.
+
+       Shared by require_session (raises when None) and the GET /login handler
+       (redirects when non-None — already-logged-in users shouldn't see the
+       form again)."""
     user = get_session_user(request)
     if user is None:
-        raise _redirect_to_login(request)
+        return None
     if user.is_config_admin:
         return user
     row = core_db.get_user_by_id(request.app.state.db, user.id)
     if row is None or row["state"] != "approved":
-        # Tear down the stale cookie so the next request prompts a fresh
-        # login instead of looping through the same revoked identity.
         clear_session(request)
+        return None
+    return user
+
+
+def require_session(request: Request) -> SessionUser:
+    user = current_session_user(request)
+    if user is None:
         raise _redirect_to_login(request)
     return user
 
