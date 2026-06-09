@@ -1062,8 +1062,13 @@ def _patchset_list_where(q, state, comments, list_tag, patch_type):
                     training / skipped) or None
          comments   "with" → thread carries ≥1 comment
          list_tag   patchset is tagged with this mailing list
-         patch_type prepare-derived primary patch type (bugfix / feature / …)"""
-    clauses, params = [], []
+         patch_type prepare-derived primary patch type (bugfix / feature / …)
+
+       The listing is the CORPUS view, so uploaded patchsets are excluded
+       unconditionally — they are submissions, browsed on /my-patchsets,
+       not corpus rows to search / filter / train against."""
+    clauses = [f"p.origin = {PATCHSET_ORIGIN_GATHERED}"]
+    params = []
     if q:
         like = f"%{q}%"
         clauses.append("(p.subject LIKE ? OR rm.author_name LIKE ? "
@@ -1083,8 +1088,35 @@ def _patchset_list_where(q, state, comments, list_tag, patch_type):
                        "WHERE pmt.root_message_id = p.root_message_id "
                        "AND json_extract(pmt.patch_type, '$.primary') = ?)")
         params.append(patch_type)
-    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    where = " WHERE " + " AND ".join(clauses)
     return where, params
+
+
+def list_uploaded_patchsets(db, *, uploaded_by_user_id=None):
+    """The /my-patchsets dashboard rows — uploaded-origin patchsets,
+       newest first, scoped to one uploader (None = the admin's
+       everyone view). Each row carries the pipeline facts the status
+       chip derives from: has_metadata / has_ai_review plus the latest
+       prepare and review work-item states (NULL when none exists)."""
+    sql = ("SELECT p.root_message_id, p.subject, p.n_patches, "
+           "p.series_version, p.base_commit, p.gathered_at, "
+           "p.uploaded_by_user_id, "
+           f"{_PATCHSET_PREPARED} AS has_metadata, "
+           f"{_PATCHSET_REVIEWED} AS has_ai_review, "
+           "(SELECT w.state FROM work_items w "
+           " WHERE w.root_message_id=p.root_message_id AND w.type=? "
+           " ORDER BY w.id DESC LIMIT 1) AS prepare_state, "
+           "(SELECT w.state FROM work_items w "
+           " WHERE w.root_message_id=p.root_message_id AND w.type=? "
+           " ORDER BY w.id DESC LIMIT 1) AS review_state "
+           "FROM patchsets p WHERE p.origin=? ")
+    params = [WORK_ITEM_TYPE_PREPARE, WORK_ITEM_TYPE_REVIEW,
+              PATCHSET_ORIGIN_UPLOADED]
+    if uploaded_by_user_id is not None:
+        sql += "AND p.uploaded_by_user_id=? "
+        params.append(uploaded_by_user_id)
+    sql += "ORDER BY p.gathered_at DESC, p.root_message_id"
+    return [dict(r) for r in db.execute(sql, params)]
 
 
 def distinct_patchset_tags(db):
@@ -1618,10 +1650,19 @@ def enqueue_session_train(db, *, session_id, root_message_id,
        filter). The work_items CHECK constraint enforces that every train
        row has its session fields, message_id (the patch), and
        comment_message_id populated. Returns the new work-item id.
-       Raises ValueError on missing prerequisites."""
+       Raises ValueError on missing prerequisites — including an
+       uploaded-origin patchset: uploads are submissions, never training
+       data, and this is the choke point every train work-item passes
+       through, so the exclusion is structural rather than a property of
+       whichever selector enqueued it."""
     if session_role not in SESSION_ROLE_NAMES:
         raise ValueError(f"bad role: {session_role!r}")
     root = norm_msgid(root_message_id)
+    ps = db.execute("SELECT origin FROM patchsets WHERE root_message_id=?",
+                    (root,)).fetchone()
+    if ps is not None and ps["origin"] != PATCHSET_ORIGIN_GATHERED:
+        raise ValueError(f"patchset {root!r} is uploaded-origin: uploads "
+                         "are never training data")
     if get_ai_review(db, root,
                      source=AI_REVIEW_SOURCE_HONE_NODE) is None:
         raise ValueError(f"no hone-node ai_review for patchset {root!r}: "

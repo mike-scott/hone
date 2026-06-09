@@ -81,6 +81,22 @@ requirements:
 Default `task_types` when none declared:
 `["prepare", "review", "train", "draft"]` (every task type).
 
+## Uploading a patchset for review
+
+The corpus gathers itself from the mailing lists; your own
+not-yet-posted series goes in through **My patchsets → Upload a
+patchset**. Drop the files `git format-patch` produces (one
+`.patch`/`.eml` per patch plus the optional cover letter), a single
+mbox of the series, or paste one diff. Generate the series with
+`--base=<commit>` so prepare and review run authoritatively; without it
+they fall back to heuristic mode. The page shows a parse preview —
+series order, detected base, every warning — and nothing ingests until
+you confirm. On confirm the prepare task queues to your own nodes
+first, and the review chains automatically once prepare completes; the
+My-patchsets dashboard tracks the pipeline (uploaded → preparing →
+reviewing → reviewed) with the review one click away. Uploads never
+enter the training corpus.
+
 ## Watching the queue
 
 The queue page (`/queue`) shows the work queue with a two-axis chip

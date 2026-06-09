@@ -188,3 +188,87 @@ def test_upload_preview_warns_when_root_already_in_corpus(tmp_path):
                             n_patches=2)
     r = _post_files(ctx.client, _series_files())
     assert "already in the" in r.text
+
+
+# --- commit 2: dashboard, corpus exclusion, badges, training guard ---------
+
+def _confirm_upload(ctx, files=None):
+    """Drive the full upload → preview → confirm flow; returns the root."""
+    r = _post_files(ctx.client, files or _series_files())
+    token = r.text.split('name="token" value="')[1].split('"')[0]
+    ctx.client.post("/upload/confirm", data={"token": token},
+                    follow_redirects=False)
+    return "cover@x"
+
+
+def test_uploaded_patchsets_are_excluded_from_the_corpus_listing(tmp_path):
+    """The home page is the CORPUS view — an uploaded series must not
+       appear in its rows or its pager total."""
+    ctx = _ctx(tmp_path)
+    core_db.upsert_patchset(ctx.db, "<lkml@x>", subject="gathered thing",
+                            n_patches=1)
+    _confirm_upload(ctx)
+    assert core_db.count_patchsets(ctx.db) == 1
+    page = core_db.list_patchsets_page(ctx.db)
+    assert [p["subject"] for p in page] == ["gathered thing"]
+    body = ctx.client.get("/").text
+    assert "gathered thing" in body
+    assert "net: fix things" not in body
+
+
+def test_my_patchsets_lists_own_uploads_with_status(tmp_path):
+    """The uploader's dashboard shows their series with the pipeline
+       status chip — 'preparing' right after confirm (the prepare
+       work-item exists, nothing has run yet)."""
+    ctx = _ctx(tmp_path)
+    _confirm_upload(ctx)
+    body = ctx.client.get("/my-patchsets").text
+    assert "net: fix things" in body
+    assert ">preparing<" in body
+    assert ">Owner<" not in body                  # own view: no owner column
+
+
+def test_my_patchsets_scopes_to_the_viewer(tmp_path):
+    """Another regular user sees an empty dashboard; the admin sees the
+       upload with an Owner column."""
+    ctx = _ctx(tmp_path)
+    _confirm_upload(ctx)
+
+    bob_id = core_db.create_user(ctx.db, "bob@x", "bob", "local")
+    bob = auth.SessionUser(id=bob_id, email="bob@x", display_name="bob",
+                           is_config_admin=False)
+    app = FastAPI()
+    app.include_router(ui.router)
+    app.dependency_overrides[auth.require_session] = lambda: bob
+    app.state.db = ctx.db
+    assert "net: fix things" not in TestClient(app).get("/my-patchsets").text
+
+    admin = auth.SessionUser(id=None, email="admin", display_name="Admin",
+                             is_config_admin=True)
+    app.dependency_overrides[auth.require_session] = lambda: admin
+    body = TestClient(app).get("/my-patchsets").text
+    assert "net: fix things" in body
+    assert ">Owner<" in body and "alice@x" in body
+
+
+def test_patchset_detail_badges_an_uploaded_series(tmp_path):
+    ctx = _ctx(tmp_path)
+    root = _confirm_upload(ctx)
+    body = ctx.client.get(f"/patchsets/{root}").text
+    assert ">uploaded<" in body
+    assert "alice@x" in body
+
+
+def test_enqueue_session_train_refuses_uploaded_patchsets(tmp_path):
+    """The structural training guard: every train work-item passes
+       through enqueue_session_train, which refuses uploaded-origin
+       patchsets regardless of what a future selector picks."""
+    ctx = _ctx(tmp_path)
+    root = _confirm_upload(ctx)
+    core_db.upsert_ai_review(ctx.db, root, concerns=[])
+    sid = core_db.create_session_draft(ctx.db, "standard")
+    with pytest.raises(ValueError, match="never training data"):
+        core_db.enqueue_session_train(
+            ctx.db, session_id=sid, root_message_id=root,
+            patch_message_id="<p1@x>", comment_message_id="<c1@x>",
+            session_role=core_db.SESSION_ROLE_POOL, stratum_label="x")

@@ -190,9 +190,13 @@ materialisation time, after the patchsets have been chosen.
 
 When the operator commits a draft, the `draft → ready` transition runs:
 
-1. **Eligibility filter.** Patchsets with `prepare` complete, with an
-   `ai_reviews` row from `hone-node`, with `review_intensity.bucket_overall
-   ≠ none`, and not currently in another active session.
+1. **Eligibility filter.** Patchsets with `origin = gathered` (uploaded
+   patchsets are submissions, never training data — and independently of
+   any selector, `enqueue_session_train` refuses uploaded-origin
+   patchsets at the choke point every train work-item passes through),
+   with `prepare` complete, with an `ai_reviews` row from `hone-node`,
+   with `review_intensity.bucket_overall ≠ none`, and not currently in
+   another active session.
 2. **Holdout reservation first.** Select the target number of holdout
    patchsets, stratified per spec, drawn from patchsets that have never
    appeared in any prior session in any role (**strict virginity** — now

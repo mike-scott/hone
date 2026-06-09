@@ -186,6 +186,15 @@ Pages:
   deny it. The first user to look a code up **pairs** the enrollment to
   themselves (first-lookup-wins) and becomes the node's owner at
   approval.
+- **My patchsets** (`/my-patchsets`) — the uploader's dashboard: their
+  uploaded patchsets as a pipeline view (uploaded → preparing → reviewing
+  → reviewed, with the failure states surfaced), the review one click
+  away, and the **Upload** button (`/upload`: `git format-patch` output,
+  a series mbox, or a pasted diff, parsed into a confirm-preview before
+  anything ingests). Scoped like the queue — a user sees their own, an
+  admin sees everyone's. Uploaded patchsets do **not** appear on the
+  corpus home page and are never training data (see `SOURCES.md` →
+  *Uploads are not a gather source*).
 - **Sessions** (`/sessions`) — the training-session list (drafts, active,
   complete, analysed) and the **session-draft page** (`/sessions/draft`)
   where an operator composes a new session against a corpus snapshot. See

@@ -45,9 +45,10 @@
             <i class="bi bi-list-task me-1"></i>Queue</a>
         </li>
         <li class="nav-item">
-          <a href="/upload" class="nav-link
-             {%- if active.startswith('/upload') %} active{% endif %}">
-            <i class="bi bi-upload me-1"></i>Upload</a>
+          <a href="/my-patchsets" class="nav-link
+             {%- if active.startswith('/my-patchsets')
+                  or active.startswith('/upload') %} active{% endif %}">
+            <i class="bi bi-person-workspace me-1"></i>My patchsets</a>
         </li>
         <li class="nav-item">
           <a href="/nodes" class="nav-link

@@ -28,6 +28,12 @@
 <h1 class="h4 mb-1">{{ patchset.subject or "(no subject)" }}</h1>
 <div class="text-muted small mb-2">
   <code>{{ patchset.root_message_id }}</code>
+  {% if patchset.is_uploaded %}
+  <span class="badge text-bg-info ms-1">uploaded</span>
+  {% if patchset.uploaded_by_email %}
+  by <code>{{ patchset.uploaded_by_email }}</code>
+  {% endif %}
+  {% endif %}
 </div>
 
 {% set mode_badge = {"authoritative": "text-bg-success",

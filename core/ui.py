@@ -491,6 +491,59 @@ def _pending_uploads(request):
     return store
 
 
+def _upload_status(row):
+    """The pipeline chip for a /my-patchsets row — uploaded → preparing
+       → prepared → reviewing → reviewed, with the two failure states
+       surfaced. Reads the booleans + latest work-item states
+       list_uploaded_patchsets computes."""
+    if row["has_ai_review"]:
+        return ("reviewed", "text-bg-success")
+    for state, stage in ((row["review_state"], "review"),
+                         (row["prepare_state"], "prepare")):
+        if state == core_db.WORK_ITEM_STATE_UNAPPLIABLE:
+            return (f"{stage} unappliable", "text-bg-danger")
+        if state == core_db.WORK_ITEM_STATE_DEFERRED:
+            return (f"{stage} deferred", "text-bg-warning")
+    if row["review_state"] is not None:
+        return ("reviewing", "text-bg-info")
+    if row["has_metadata"]:
+        return ("prepared", "text-bg-info")
+    if row["prepare_state"] is not None:
+        return ("preparing", "text-bg-secondary")
+    return ("uploaded", "text-bg-secondary")
+
+
+@router.get("/my-patchsets", response_class=HTMLResponse)
+async def my_patchsets(request: Request,
+                       current_user: auth.SessionUser = Depends(auth.require_session)):
+    """The uploader's dashboard — their uploaded patchsets as a pipeline
+       view (status chip per row, the review one click away), with the
+       Upload button. Scoped like the queue: a regular user sees their
+       own uploads, an admin sees everyone's with an Owner column.
+       Uploaded patchsets do NOT appear on the corpus home page — this
+       page is where they live."""
+    db = request.app.state.db
+    scope_user_id = _queue_scope_user_id(current_user)
+    owner_emails = _owner_email_map(db) if scope_user_id is None else {}
+    items = []
+    for r in core_db.list_uploaded_patchsets(
+            db, uploaded_by_user_id=scope_user_id):
+        label, badge = _upload_status(r)
+        items.append({
+            "subject":          r["subject"] or r["root_message_id"],
+            "detail_url":       f"/patchsets/{quote(r['root_message_id'])}",
+            "n_patches":        r["n_patches"],
+            "series_version":   r["series_version"],
+            "status":           label,
+            "status_badge":     badge,
+            "uploaded_display": _when(r["gathered_at"]),
+            "owner_email":      owner_emails.get(r["uploaded_by_user_id"]),
+        })
+    return templates.TemplateResponse(request, "my_patchsets.html", {
+        "current_user": current_user, "items": items,
+        "show_owner": scope_user_id is None})
+
+
 @router.get("/upload", response_class=HTMLResponse)
 async def upload_page(request: Request,
                       current_user: auth.SessionUser = Depends(auth.require_session)):
@@ -1292,6 +1345,14 @@ def _patchset_view(db, root):
     patchset["gathered_display"]  = _when(patchset.get("gathered_at"))
     patchset["state_display"] = core_db.PATCHSET_STATE_NAMES.get(
         patchset["state"], "?")
+    # Uploaded-origin patchsets are submissions, not corpus rows — badge
+    # them so the shared detail page never reads as LKML data.
+    patchset["is_uploaded"] = (patchset.get("origin")
+                               == core_db.PATCHSET_ORIGIN_UPLOADED)
+    patchset["uploaded_by_email"] = None
+    if patchset["is_uploaded"] and patchset.get("uploaded_by_user_id"):
+        u = core_db.get_user_by_id(db, patchset["uploaded_by_user_id"])
+        patchset["uploaded_by_email"] = u["email"] if u else None
 
     tags = core_db.tags_for_patchset(db, root)
     metadata = core_db.get_patchset_metadata(db, root)

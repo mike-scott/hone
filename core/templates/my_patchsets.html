@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}My patchsets · hone-core{% endblock %}
+{% block content %}
+<div class="d-flex align-items-center justify-content-between mb-3">
+  <h1 class="h3 mb-0">My patchsets</h1>
+  <a href="/upload" class="btn btn-sm btn-primary">
+    <i class="bi bi-upload me-1"></i>Upload a patchset</a>
+</div>
+
+<p class="text-muted small">
+  Patchsets you uploaded for review. They are kept apart from the
+  gathered corpus and are never used as training data; prepare and
+  review queue to your own nodes first, and the review chains
+  automatically once prepare completes.
+</p>
+
+{% if items %}
+<table class="table table-sm table-hover align-middle">
+  <thead>
+    <tr><th>Patchset</th><th>Patches</th><th>Version</th>
+        {% if show_owner %}<th>Owner</th>{% endif %}
+        <th>Status</th><th>Uploaded</th></tr>
+  </thead>
+  <tbody>
+  {% for p in items %}
+    <tr>
+      <td>
+        <a href="{{ p.detail_url }}"
+           class="link-body-emphasis text-decoration-none">
+          {{ p.subject }}
+        </a>
+      </td>
+      <td>{{ p.n_patches }}</td>
+      <td class="text-muted">v{{ p.series_version }}</td>
+      {% if show_owner %}
+      <td class="small">
+        {% if p.owner_email %}<code>{{ p.owner_email }}</code>
+        {% else %}<span class="text-muted">—</span>{% endif %}
+      </td>
+      {% endif %}
+      <td><span class="badge {{ p.status_badge }}">{{ p.status }}</span></td>
+      <td class="text-nowrap">{{ p.uploaded_display }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="text-muted">
+  Nothing uploaded yet — use the button above to submit a series
+  (<code>git format-patch</code> output, an mbox, or a pasted diff).
+</p>
+{% endif %}
+{% endblock %}

@@ -129,10 +129,13 @@ HTMX assets are vendored, not loaded from a CDN. Timestamps display in
 the viewer's local timezone (UTC without JS; hover shows UTC).
 
 Operator pages: **Queue** (the work queue with type × state chip
-filter), **Nodes** (the fleet — every node visible, controls gated to
-the node's owner — plus your pending-enrollment pairing queue),
-**Enroll** (the verification URL a node prints on startup; the first
-user to look a code up pairs the node to themselves),
+filter), **My patchsets** (your uploaded patchsets as a pipeline view,
+plus the upload form — uploads are submissions for review, kept out of
+the corpus and never used as training data), **Nodes** (the fleet —
+every node visible, controls gated to the node's owner — plus your
+pending-enrollment pairing queue), **Enroll** (the verification URL a
+node prints on startup; the first user to look a code up pairs the node
+to themselves),
 **Sessions** (training-session list and live session-draft composer),
 **Site settings** (admin-only: runtime config + list-tag gather filter),
 **User settings** (the account's own profile), and the
