@@ -686,7 +686,36 @@ CREATE TABLE users (
 );
 """
 
-_MIGRATIONS = [_SCHEMA_V1, _SCHEMA_V2, _SCHEMA_V3]
+# Migration v4 — add a CHECK on users.auth_provider so the column matches
+# the style of users.state. SQLite has no ALTER TABLE … ADD CHECK, so rebuild
+# the table: create users_new with the constraint, copy every row, swap names.
+# Nothing FK-references users(id), so DROP TABLE is safe; the data shape is
+# unchanged, only the column-level invariant is tightened.
+_SCHEMA_V4 = """
+CREATE TABLE users_new (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    email         TEXT UNIQUE NOT NULL,
+    password_hash TEXT,
+    display_name  TEXT,
+    auth_provider TEXT NOT NULL DEFAULT 'local'
+        CHECK (auth_provider IN ('local', 'google')),
+    google_sub    TEXT UNIQUE,
+    state         TEXT NOT NULL DEFAULT 'pending'
+        CHECK (state IN ('pending', 'approved', 'revoked')),
+    created_at    INTEGER NOT NULL,
+    approved_at   INTEGER,
+    last_login_at INTEGER
+);
+INSERT INTO users_new
+    (id, email, password_hash, display_name, auth_provider, google_sub,
+     state, created_at, approved_at, last_login_at)
+    SELECT id, email, password_hash, display_name, auth_provider, google_sub,
+           state, created_at, approved_at, last_login_at FROM users;
+DROP TABLE users;
+ALTER TABLE users_new RENAME TO users;
+"""
+
+_MIGRATIONS = [_SCHEMA_V1, _SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4]
 
 
 def connect(path=None):

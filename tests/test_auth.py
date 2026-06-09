@@ -129,6 +129,60 @@ def test_set_user_state_approved_at_is_preserved_on_revoke_refreshed_on_reapprov
     assert core_db.get_user_by_id(db, uid)["approved_at"] != 1
 
 
+# --- users.auth_provider CHECK constraint (migration v4) -----------------
+
+def test_users_auth_provider_check_rejects_unknown_values(db):
+    """auth_provider is constrained to {'local', 'google'} so a typo or a
+       hypothetical third provider can't land in the corpus silently. Matches
+       the style of users.state."""
+    import sqlite3
+    with pytest.raises(sqlite3.IntegrityError):
+        db.execute(
+            "INSERT INTO users (email, display_name, auth_provider, state, "
+            "created_at) VALUES (?, ?, ?, 'pending', 0)",
+            ("typo@example.com", "X", "gooogle"))
+    # The two valid providers still go in fine.
+    core_db.create_user(db, "local@x", "L", "local")
+    core_db.create_user(db, "google@x", "G", "google", google_sub="g-1")
+
+
+def test_v4_migration_preserves_v3_user_rows_and_enables_the_check(tmp_path):
+    """Existing databases stop at v3 (no CHECK); the v4 migration rebuilds the
+       table and brings every column over without touching the data. Stand
+       up a v3 DB by hand, plant a user, run core_db.connect (which applies
+       v4), and verify both halves."""
+    import sqlite3
+    path = str(tmp_path / "v3.db")
+    raw = sqlite3.connect(path)
+    raw.executescript(core_db._SCHEMA_V1)
+    raw.executescript(core_db._SCHEMA_V2)
+    raw.executescript(core_db._SCHEMA_V3)
+    raw.execute("PRAGMA user_version=3")
+    raw.execute(
+        "INSERT INTO users (email, display_name, auth_provider, state, "
+        "created_at, approved_at) VALUES "
+        "('kept@x', 'Kept', 'local', 'approved', 100, 200)")
+    raw.commit()
+    raw.close()
+
+    # Re-open via the runner — applies v4.
+    db = core_db.connect(path)
+    assert db.execute("PRAGMA user_version").fetchone()[0] == 4
+
+    row = core_db.get_user_by_email(db, "kept@x")
+    assert row is not None
+    assert row["display_name"] == "Kept"
+    assert row["state"] == "approved"
+    assert row["approved_at"] == 200
+    assert row["auth_provider"] == "local"
+
+    # And the new CHECK is now enforced on the rebuilt table.
+    with pytest.raises(sqlite3.IntegrityError):
+        db.execute(
+            "INSERT INTO users (email, display_name, auth_provider, state, "
+            "created_at) VALUES ('bad@x', 'B', 'facebook', 'pending', 0)")
+
+
 # --- PasswordHasher singleton --------------------------------------------
 
 def test_password_hasher_is_a_module_level_singleton():
