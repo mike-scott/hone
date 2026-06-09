@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+{% block title %}Upload a patchset · hone-core{% endblock %}
+{% block content %}
+<h1 class="h3 mb-3">Upload a patchset</h1>
+
+<div class="card mb-4" style="max-width: 46rem">
+  <div class="card-body">
+    <p class="text-muted small mb-3">
+      Upload the files <code>git format-patch</code> produces — one
+      <code>.patch</code>/<code>.eml</code> per patch plus the optional
+      cover letter — or a single mbox of the series, or paste one diff.
+      Generate the series with a base so review can run authoritatively:
+      <code>git format-patch --base=&lt;commit&gt; -vN -o out/ &lt;range&gt;</code>.
+      Uploaded patchsets are reviewed on your behalf; they are kept apart
+      from the gathered corpus and are never used as training data.
+    </p>
+    <form method="post" action="/upload" enctype="multipart/form-data">
+      {{ csrf_field(request) }}
+      <div class="mb-3">
+        <label for="files" class="form-label small">Patch files
+          (<code>.patch</code> / <code>.eml</code> / <code>.mbox</code>)</label>
+        <input type="file" id="files" name="files" multiple
+               class="form-control form-control-sm">
+      </div>
+      <div class="mb-3">
+        <label for="pasted" class="form-label small">…or paste a patch /
+          diff / mbox</label>
+        <textarea id="pasted" name="pasted" rows="6"
+                  class="form-control form-control-sm font-monospace"
+                  spellcheck="false"></textarea>
+      </div>
+      <button class="btn btn-sm btn-primary">Parse &amp; preview</button>
+    </form>
+  </div>
+</div>
+
+{% if preview %}
+{% if preview.errors %}
+<div class="alert alert-danger" style="max-width: 46rem">
+  <div class="fw-semibold mb-1">The upload can’t be ingested:</div>
+  <ul class="mb-0">
+    {% for e in preview.errors %}<li>{{ e }}</li>{% endfor %}
+  </ul>
+</div>
+{% endif %}
+{% if preview.warnings %}
+<div class="alert alert-warning" style="max-width: 46rem">
+  <ul class="mb-0">
+    {% for w in preview.warnings %}<li>{{ w }}</li>{% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+{% if preview.ok %}
+<div class="card mb-4" style="max-width: 46rem">
+  <div class="card-header fw-semibold">
+    <i class="bi bi-collection me-1"></i>Series preview
+  </div>
+  <div class="card-body">
+    <dl class="row mb-0 small">
+      <dt class="col-sm-3">Subject</dt>
+      <dd class="col-sm-9">{{ preview.subject }}</dd>
+      <dt class="col-sm-3">Submitter</dt>
+      <dd class="col-sm-9">{{ preview.submitter_email or "—" }}</dd>
+      <dt class="col-sm-3">Patches</dt>
+      <dd class="col-sm-9">{{ preview.n_patches }}
+        {% if preview.cover %}(+ cover letter){% endif %}
+        · v{{ preview.series_version }}</dd>
+      <dt class="col-sm-3">Base commit</dt>
+      <dd class="col-sm-9 mb-0">
+        {% if preview.base_commit %}
+        <code>{{ preview.base_commit }}</code>
+        {% else %}
+        <span class="text-muted">none declared (heuristic mode)</span>
+        {% endif %}
+      </dd>
+    </dl>
+  </div>
+  <table class="table table-sm table-hover align-middle mb-0">
+    <thead><tr><th>#</th><th>Subject</th><th>Message-ID</th></tr></thead>
+    <tbody>
+      {% if preview.cover %}
+      <tr><td class="text-muted">0</td>
+          <td>{{ preview.cover.subject }}</td>
+          <td class="small"><code>{{ preview.cover.message_id }}</code></td></tr>
+      {% endif %}
+      {% for p in preview.patches %}
+      <tr><td class="text-muted">{{ p.part_index or 1 }}</td>
+          <td>{{ p.subject }}</td>
+          <td class="small"><code>{{ p.message_id }}</code></td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <div class="card-body border-top">
+    <form method="post" action="/upload/confirm" class="d-inline">
+      {{ csrf_field(request) }}
+      <input type="hidden" name="token" value="{{ token }}">
+      <button class="btn btn-sm btn-success">
+        Confirm — ingest &amp; request review</button>
+    </form>
+    <span class="text-muted small ms-2">
+      Prepare and review are queued to your own nodes first.
+    </span>
+  </div>
+</div>
+{% endif %}
+{% endif %}
+{% endblock %}

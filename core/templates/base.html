@@ -45,6 +45,11 @@
             <i class="bi bi-list-task me-1"></i>Queue</a>
         </li>
         <li class="nav-item">
+          <a href="/upload" class="nav-link
+             {%- if active.startswith('/upload') %} active{% endif %}">
+            <i class="bi bi-upload me-1"></i>Upload</a>
+        </li>
+        <li class="nav-item">
           <a href="/nodes" class="nav-link
              {%- if active.startswith('/nodes')
                   or active.startswith('/enroll') %} active{% endif %}">

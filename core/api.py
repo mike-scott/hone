@@ -855,18 +855,28 @@ def submit_result(claim_id: str, request: Request, body: dict,
             root = wi["root_message_id"]
             mv = wi["methodology_version"]
             # On a successful prepare, write the patchset_metadata row from
-            # the record's flat structured fields. Review is NOT auto-
-            # enqueued — an operator requests it per patchset from the UI
-            # (core/ui.py → request_review); a 100k-patchset gather must
-            # not flood the queue with reviews. maybe_enqueue_review (the
-            # prepare-gated, idempotent enqueue) is what that manual
-            # trigger calls.
+            # the record's flat structured fields. For GATHERED patchsets
+            # review is NOT auto-enqueued — an operator requests it per
+            # patchset from the UI (core/ui.py → request_review); a
+            # 100k-patchset gather must not flood the queue with reviews.
+            # An UPLOADED patchset is the opposite case: review is the
+            # uploader's whole intent, so chain it here the moment the
+            # prepare gate opens, stamped with the uploader as its origin
+            # (routing it onto their own nodes' queue).
             if task_type == "prepare" and outcome == "prepared":
                 core_db.upsert_patchset_metadata(
                     db, root,
                     mode=(record.get("preparation_notes") or {}).get("mode"),
                     methodology_version=mv,
                     **{f: record.get(f) for f in _PREPARE_METADATA_FIELDS})
+                ps = db.execute(
+                    "SELECT origin, uploaded_by_user_id FROM patchsets "
+                    "WHERE root_message_id=?", (root,)).fetchone()
+                if (ps is not None
+                        and ps["origin"] == core_db.PATCHSET_ORIGIN_UPLOADED):
+                    core_db.maybe_enqueue_review(
+                        db, root,
+                        requested_by_user_id=ps["uploaded_by_user_id"])
             # On a successful review, capture the concerns into ai_reviews.
             # No train enqueue here — trains are session-driven, created
             # only when the operator launches a session that includes this

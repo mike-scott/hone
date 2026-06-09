@@ -29,6 +29,14 @@ patchset already in the corpus. hone-core blind-reviews each patchset (a
 that lands on a reviewed patchset (a *train* work item) — see
 `ARCHITECTURE-WORK-LIFECYCLE.md` → Work lifecycle.
 
+**Uploads are not a gather source.** The web UI's Upload page
+(`core/upload.py` + `core/ui.py`) lets a user submit a series directly —
+`git format-patch` output, an mbox, or a pasted diff — through the same
+ingest primitives gather uses, marked `origin = uploaded` with the
+uploader recorded. Uploads have no cursor, no `since_date`, and no
+list-tag filter; they are submissions ("review my series"), never
+training data, and their review is auto-chained when prepare completes.
+
 ## The gather-module API
 
 Each data source is implemented by a **gather module** — a self-contained

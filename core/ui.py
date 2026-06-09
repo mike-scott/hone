@@ -29,7 +29,8 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from common.version import __version__ as VERSION
-from core import auth, core_db, gather, methodology_format, patchview, runtime_config
+from core import (auth, core_db, gather, methodology_format, patchview,
+                  runtime_config, upload)
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 templates = Jinja2Templates(directory=os.path.join(_HERE, "templates"))
@@ -466,6 +467,128 @@ async def user_settings_password(request: Request,
     core_db.set_user_password_hash(db, current_user.id,
                                    auth.hash_password(new))
     return RedirectResponse("/user-settings?saved=password", status_code=303)
+
+
+# ===========================================================================
+# Patchset upload (origin=uploaded — a submission, not corpus/training data)
+# ===========================================================================
+
+# Parsed-but-unconfirmed uploads, keyed by a one-shot token the preview
+# page posts back. In-memory and process-local — a restart drops pending
+# previews (the user just re-uploads), which is fine for a confirm step.
+_UPLOAD_PENDING_TTL_SECONDS = 900
+_UPLOAD_PENDING_CAP = 20
+
+
+def _pending_uploads(request):
+    """The app-wide pending-upload store, pruned of expired entries."""
+    store = getattr(request.app.state, "pending_uploads", None)
+    if store is None:
+        store = request.app.state.pending_uploads = {}
+    cutoff = time.time() - _UPLOAD_PENDING_TTL_SECONDS
+    for tok in [t for t, v in store.items() if v["at"] < cutoff]:
+        del store[tok]
+    return store
+
+
+@router.get("/upload", response_class=HTMLResponse)
+async def upload_page(request: Request,
+                      current_user: auth.SessionUser = Depends(auth.require_session)):
+    """The patchset-upload form — `git format-patch` output (one .patch /
+       .eml per patch + optional cover), a series mbox, or a pasted diff.
+       Uploads are submissions ("review my series"), kept apart from the
+       gathered corpus by patchsets.origin; they are never training
+       data."""
+    return templates.TemplateResponse(request, "upload.html", {
+        "current_user": current_user, "preview": None, "token": None})
+
+
+@router.post("/upload", response_class=HTMLResponse, dependencies=[Depends(auth.require_csrf)])
+async def upload_preview(request: Request,
+                         current_user: auth.SessionUser = Depends(auth.require_session)):
+    """Parse the upload and render the confirm preview — the series
+       assembled in order, the detected base-commit, and every warning
+       (no base trailer, ignored replies, synthetic Message-IDs). Nothing
+       touches the corpus until the user confirms."""
+    form = await request.form()
+    blobs = []
+    for f in form.getlist("files"):
+        if getattr(f, "filename", None):
+            blobs.append((f.filename, await f.read()))
+    pasted = (form.get("pasted") or "")
+    parsed = upload.parse_upload(blobs, pasted=pasted)
+
+    token = None
+    if parsed["ok"]:
+        db = request.app.state.db
+        existing = db.execute(
+            "SELECT origin FROM patchsets WHERE root_message_id=?",
+            (core_db.norm_msgid(parsed["root_message_id"]),)).fetchone()
+        if existing is not None:
+            parsed["warnings"].append(
+                "a patchset with this root Message-ID is already in the "
+                "corpus — confirming refreshes its messages but keeps its "
+                "existing origin and work history")
+        store = _pending_uploads(request)
+        if len(store) >= _UPLOAD_PENDING_CAP:
+            oldest = min(store, key=lambda t: store[t]["at"])
+            del store[oldest]
+        token = secrets.token_urlsafe(16)
+        store[token] = {"parsed": parsed, "user_id": current_user.id,
+                        "at": time.time()}
+    return templates.TemplateResponse(request, "upload.html", {
+        "current_user": current_user, "preview": parsed, "token": token})
+
+
+@router.post("/upload/confirm", dependencies=[Depends(auth.require_csrf)])
+async def upload_confirm(request: Request,
+                         current_user: auth.SessionUser = Depends(auth.require_session)):
+    """Ingest a previewed upload through the same primitives gather uses
+       (upsert_patchset / upsert_message / maybe_enqueue_prepare) — same
+       dedup, same idempotency — stamped origin=uploaded with the
+       uploader's id. The prepare work-item carries the uploader as its
+       origin, so it routes onto their own nodes' queue; the review is
+       auto-chained when prepare lands (api.submit_result). Redirects to
+       the patchset's detail page."""
+    form = await request.form()
+    token = form.get("token") or ""
+    entry = _pending_uploads(request).pop(token, None)
+    if entry is None or entry["user_id"] != current_user.id:
+        raise HTTPException(status.HTTP_410_GONE,
+                            "upload preview expired — please re-upload")
+    parsed = entry["parsed"]
+    db = request.app.state.db
+
+    root = core_db.upsert_patchset(
+        db, parsed["root_message_id"],
+        subject=parsed["subject"],
+        submitter_email=parsed["submitter_email"] or None,
+        sent=parsed["sent"],
+        n_patches=parsed["n_patches"],
+        base_commit=parsed["base_commit"],
+        series_version=parsed["series_version"],
+        origin=core_db.PATCHSET_ORIGIN_UPLOADED,
+        uploaded_by_user_id=current_user.id)
+    cover = parsed["cover"]
+    if cover is not None:
+        core_db.upsert_message(
+            db, cover["message_id"], root_message_id=root,
+            type=core_db.MSG_TYPE_COVER, body=cover["body"], part_index=0,
+            author_name=cover["author_name"] or None,
+            author_email=cover["author_email"] or None,
+            subject=cover["subject"], sent=cover["sent"])
+    for p in parsed["patches"]:
+        core_db.upsert_message(
+            db, p["message_id"], root_message_id=root,
+            type=core_db.MSG_TYPE_PATCH, body=p["body"],
+            part_index=p["part_index"],
+            parent_message_id=cover["message_id"] if cover else None,
+            author_name=p["author_name"] or None,
+            author_email=p["author_email"] or None,
+            subject=p["subject"], sent=p["sent"])
+    core_db.maybe_enqueue_prepare(db, root,
+                                  requested_by_user_id=current_user.id)
+    return RedirectResponse(f"/patchsets/{quote(root)}", status_code=303)
 
 
 def _types(raw):

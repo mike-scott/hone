@@ -1,0 +1,190 @@
+"""Tests for the patchset upload path: the series parser (core/upload.py)
+   and the upload → preview → confirm flow (core/ui.py /upload*)."""
+from types import SimpleNamespace
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from core import auth, core_db, ui, upload
+
+_BASE = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+
+
+def _mail(subject, msgid, *, body="fix it\n---\ndiff --git a/f b/f\n"
+                                  "@@ -1 +1 @@\n-old\n+new\n",
+          base=None, sender="Alice <alice@x>"):
+    if base:
+        body += f"\nbase-commit: {base}\n"
+    return (f"From: {sender}\n"
+            f"Date: Tue, 09 Dec 2025 15:51:00 +0000\n"
+            f"Subject: {subject}\n"
+            f"Message-ID: {msgid}\n"
+            f"\n{body}").encode()
+
+
+def _series_files():
+    """A 2-patch v2 series with cover letter and a declared base —
+       deliberately out of order to exercise the sort."""
+    return [
+        ("0002-b.patch", _mail("[PATCH v2 2/2] net: part two", "<p2@x>")),
+        ("0000-cover.patch", _mail("[PATCH v2 0/2] net: fix things",
+                                   "<cover@x>", base=_BASE)),
+        ("0001-a.patch", _mail("[PATCH v2 1/2] net: part one", "<p1@x>")),
+    ]
+
+
+# --- parser -----------------------------------------------------------------
+
+def test_parse_full_series_with_cover_and_base():
+    parsed = upload.parse_upload(_series_files())
+    assert parsed["ok"], parsed["errors"]
+    assert parsed["root_message_id"] == "<cover@x>"
+    assert parsed["subject"] == "[PATCH v2 0/2] net: fix things"
+    assert parsed["submitter_email"] == "alice@x"
+    assert parsed["n_patches"] == 2
+    assert parsed["series_version"] == 2
+    assert parsed["base_commit"] == _BASE
+    assert [p["part_index"] for p in parsed["patches"]] == [1, 2]
+    assert not any("base-commit" in w for w in parsed["warnings"])
+
+
+def test_parse_incomplete_series_is_an_error():
+    files = [("a", _mail("[PATCH 1/3] one", "<p1@x>")),
+             ("c", _mail("[PATCH 3/3] three", "<p3@x>"))]
+    parsed = upload.parse_upload(files)
+    assert not parsed["ok"]
+    assert any("missing patch 2/3" in e for e in parsed["errors"])
+
+
+def test_parse_single_mbox_ignores_replies():
+    """A b4-style thread mbox: cover + patch + a reply. The reply is
+       ignored with a warning; the series still parses."""
+    mbox = (b"From x Mon Jan 1 00:00:00 2026\n"
+            + _mail("[PATCH 0/1] one thing", "<c@x>", base=_BASE)
+            + b"\nFrom x Mon Jan 1 00:00:01 2026\n"
+            + _mail("[PATCH 1/1] the thing", "<p1@x>")
+            + b"\nFrom x Mon Jan 1 00:00:02 2026\n"
+            + _mail("Re: [PATCH 1/1] the thing", "<r1@x>",
+                    sender="Bob <bob@x>"))
+    parsed = upload.parse_upload([("thread.mbox", mbox)])
+    assert parsed["ok"], parsed["errors"]
+    assert parsed["n_patches"] == 1
+    assert any("ignored" in w for w in parsed["warnings"])
+
+
+def test_parse_pasted_bare_diff_is_a_single_synthetic_patch():
+    diff = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b\n"
+    parsed = upload.parse_upload([], pasted=diff)
+    assert parsed["ok"], parsed["errors"]
+    assert parsed["n_patches"] == 1
+    assert parsed["patches"][0]["part_index"] is None
+    assert parsed["root_message_id"].startswith("<upload-")
+    assert any("base-commit" in w for w in parsed["warnings"])
+
+
+def test_parse_garbage_paste_is_an_error():
+    parsed = upload.parse_upload([], pasted="hello, please review")
+    assert not parsed["ok"]
+    assert any("neither" in e for e in parsed["errors"])
+
+
+def test_parse_missing_message_id_synthesises_one_with_warning():
+    raw = (b"From: A <a@x>\nSubject: [PATCH] no msgid\n\n"
+           b"diff --git a/f b/f\n@@ -1 +1 @@\n-x\n+y\n")
+    parsed = upload.parse_upload([("p.patch", raw)])
+    assert parsed["ok"], parsed["errors"]
+    assert parsed["root_message_id"].startswith("<upload-")
+    assert any("Message-ID" in w for w in parsed["warnings"])
+
+
+def test_parse_mixed_numbered_and_unnumbered_is_an_error():
+    files = [("a", _mail("[PATCH 1/2] one", "<p1@x>")),
+             ("b", _mail("[PATCH] loner", "<p2@x>"))]
+    parsed = upload.parse_upload(files)
+    assert not parsed["ok"]
+    assert any("mix" in e for e in parsed["errors"])
+
+
+# --- the upload → preview → confirm flow ------------------------------------
+
+def _ctx(tmp_path):
+    db = core_db.connect(str(tmp_path / "hone.db"))
+    uid = core_db.create_user(db, "alice@x", "alice", "local")
+    core_db.set_user_state(db, uid, "approved")
+    user = auth.SessionUser(id=uid, email="alice@x", display_name="alice",
+                            is_config_admin=False)
+    app = FastAPI()
+    app.include_router(ui.router)
+    app.dependency_overrides[auth.require_session] = lambda: user
+    app.dependency_overrides[auth.require_csrf] = lambda: None
+    app.state.db = db
+    return SimpleNamespace(client=TestClient(app), db=db, uid=uid)
+
+
+def _post_files(client, files):
+    return client.post("/upload", files=[
+        ("files", (name, data, "text/plain")) for name, data in files])
+
+
+def test_upload_preview_then_confirm_ingests_the_series(tmp_path):
+    ctx = _ctx(tmp_path)
+    r = _post_files(ctx.client, _series_files())
+    assert r.status_code == 200
+    assert "Series preview" in r.text and "Confirm" in r.text
+    token = r.text.split('name="token" value="')[1].split('"')[0]
+
+    r = ctx.client.post("/upload/confirm", data={"token": token},
+                        follow_redirects=False)
+    assert r.status_code == 303
+
+    ps = ctx.db.execute("SELECT * FROM patchsets").fetchone()
+    assert ps["root_message_id"] == "cover@x"
+    assert ps["origin"] == core_db.PATCHSET_ORIGIN_UPLOADED
+    assert ps["uploaded_by_user_id"] == ctx.uid
+    assert ps["n_patches"] == 2 and ps["base_commit"] == _BASE
+
+    msgs = ctx.db.execute(
+        "SELECT type, part_index FROM messages "
+        "ORDER BY COALESCE(part_index, 99)").fetchall()
+    assert [(m["type"], m["part_index"]) for m in msgs] == [
+        (core_db.MSG_TYPE_COVER, 0),
+        (core_db.MSG_TYPE_PATCH, 1),
+        (core_db.MSG_TYPE_PATCH, 2)]
+
+    wi = ctx.db.execute("SELECT type, requested_by_user_id "
+                        "FROM work_items").fetchone()
+    assert wi["type"] == core_db.WORK_ITEM_TYPE_PREPARE
+    assert wi["requested_by_user_id"] == ctx.uid
+
+
+def test_upload_preview_shows_errors_without_a_confirm(tmp_path):
+    ctx = _ctx(tmp_path)
+    r = ctx.client.post("/upload", data={"pasted": "hello"})
+    assert r.status_code == 200
+    assert "neither" in r.text
+    assert 'name="token"' not in r.text
+    assert ctx.db.execute("SELECT COUNT(*) AS n FROM patchsets") \
+                 .fetchone()["n"] == 0
+
+
+def test_upload_confirm_rejects_unknown_or_foreign_tokens(tmp_path):
+    ctx = _ctx(tmp_path)
+    r = ctx.client.post("/upload/confirm", data={"token": "nope"})
+    assert r.status_code == 410
+
+    # A token stashed by another user is not confirmable by this one.
+    r = _post_files(ctx.client, _series_files())
+    token = r.text.split('name="token" value="')[1].split('"')[0]
+    store = ctx.client.app.state.pending_uploads
+    store[token]["user_id"] = 999                 # someone else's preview
+    r = ctx.client.post("/upload/confirm", data={"token": token})
+    assert r.status_code == 410
+
+
+def test_upload_preview_warns_when_root_already_in_corpus(tmp_path):
+    ctx = _ctx(tmp_path)
+    core_db.upsert_patchset(ctx.db, "<cover@x>", subject="already here",
+                            n_patches=2)
+    r = _post_files(ctx.client, _series_files())
+    assert "already in the" in r.text

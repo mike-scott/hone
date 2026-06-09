@@ -57,6 +57,11 @@ PATCHSET_STATE_SKIPPED  = 2
 PATCHSET_STATE_NAMES    = {PATCHSET_STATE_GATHERED: "gathered",
                            PATCHSET_STATE_SKIPPED:  "skipped"}
 
+PATCHSET_ORIGIN_GATHERED = 1     # a gather module (lore, …) — the corpus
+PATCHSET_ORIGIN_UPLOADED = 2     # the web UI's upload page — a submission
+PATCHSET_ORIGIN_NAMES    = {PATCHSET_ORIGIN_GATHERED: "gathered",
+                            PATCHSET_ORIGIN_UPLOADED: "uploaded"}
+
 # ---- messages.type ----
 MSG_TYPE_COVER   = 1
 MSG_TYPE_PATCH   = 2
@@ -755,7 +760,22 @@ ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0
     CHECK (is_admin IN (0, 1));
 """
 
-_MIGRATIONS = [_SCHEMA_V1, _SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4, _SCHEMA_V5]
+_SCHEMA_V6 = """
+-- Patchset origin: gathered from a list archive (the corpus — training
+-- data, maintainer-selected reviews) vs uploaded through the web UI (a
+-- submission: "review my series"). Uploaded patchsets are never training
+-- data — the session selector and corpus stats exclude them by origin.
+-- Legacy rows are all gathered.
+ALTER TABLE patchsets ADD COLUMN origin INTEGER NOT NULL DEFAULT 1
+    CHECK (origin IN (1, 2));        -- PATCHSET_ORIGIN_GATHERED|UPLOADED
+-- The uploader, for the per-user "my patchsets" view and for stamping
+-- the auto-chained review's work-item origin.
+ALTER TABLE patchsets ADD COLUMN uploaded_by_user_id INTEGER
+    REFERENCES users(id) ON DELETE SET NULL;
+"""
+
+_MIGRATIONS = [_SCHEMA_V1, _SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4, _SCHEMA_V5,
+               _SCHEMA_V6]
 
 
 # How long a connection waits on another connection's write lock before
@@ -916,16 +936,23 @@ def _hash(secret):
 
 def upsert_patchset(db, root_message_id, *, subject=None, submitter_email=None,
                     sent=None, n_patches=None, base_commit=None,
-                    change_id=None, series_version=1, gathered_at=None):
+                    change_id=None, series_version=1, gathered_at=None,
+                    origin=None, uploaded_by_user_id=None):
     """Insert a gathered patchset (idempotent on the root id); refresh the
        mutable fields if it is already known. Does not touch state/skip_reason
-       - a re-gather never un-skips a patchset. Returns the normalized
+       - a re-gather never un-skips a patchset. `origin` defaults to
+       PATCHSET_ORIGIN_GATHERED; the upload ingress passes UPLOADED plus
+       the uploader's id. Both are insert-only: a conflict (the same
+       series arriving via a second path) keeps the FIRST origin and
+       uploader, so a later lore gather of an uploaded series can't strip
+       the uploader's attribution. Returns the normalized
        root_message_id."""
     root = norm_msgid(root_message_id)
     db.execute(
         "INSERT INTO patchsets (root_message_id,subject,submitter_email,sent,"
-        "n_patches,base_commit,change_id,series_version,state,gathered_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?) "
+        "n_patches,base_commit,change_id,series_version,state,gathered_at,"
+        "origin,uploaded_by_user_id) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?) "
         "ON CONFLICT(root_message_id) DO UPDATE SET "
         "subject=excluded.subject, submitter_email=excluded.submitter_email, "
         "sent=excluded.sent, n_patches=excluded.n_patches, "
@@ -935,7 +962,9 @@ def upsert_patchset(db, root_message_id, *, subject=None, submitter_email=None,
          norm_email(submitter_email) if submitter_email else None,
          sent, n_patches, base_commit, change_id, series_version,
          PATCHSET_STATE_GATHERED,
-         gathered_at if gathered_at is not None else int(time.time())))
+         gathered_at if gathered_at is not None else int(time.time()),
+         origin if origin is not None else PATCHSET_ORIGIN_GATHERED,
+         uploaded_by_user_id))
     db.commit()
     return root
 

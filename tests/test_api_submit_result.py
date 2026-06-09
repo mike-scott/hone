@@ -64,8 +64,8 @@ def client(monkeypatch):
     def fake_upsert_patchset_metadata(db, root, *, mode, **fields):
         state.patchset_metadata_written = (root, mode, fields)
 
-    def fake_maybe_enqueue_review(db, root):
-        state.review_re_enqueued = root
+    def fake_maybe_enqueue_review(db, root, *, requested_by_user_id=None):
+        state.review_re_enqueued = (root, requested_by_user_id)
         return None
 
     def fake_add_proposal(db, ptype, payload):
@@ -88,9 +88,17 @@ def client(monkeypatch):
             return super().__getitem__(k)
 
     class _FakeDB:
+        # The patchsets-row lookup the prepare path does to decide the
+        # review auto-chain. Tests flip these to the uploaded case.
+        patchset_origin = core_db.PATCHSET_ORIGIN_GATHERED
+        patchset_uploaded_by = None
+
         def execute(self, sql, params=()):
             if "draft_tasks" in sql:
                 row = _FakeRow(methodology_version=FAKE_MV)
+            elif "FROM patchsets" in sql:
+                row = _FakeRow(origin=self.patchset_origin,
+                               uploaded_by_user_id=self.patchset_uploaded_by)
             else:
                 row = _FakeRow(root_message_id="<r1@x>",
                                 methodology_version=FAKE_MV)
@@ -103,8 +111,9 @@ def client(monkeypatch):
     app = FastAPI()
     app.include_router(api.router)
     app.state.config = SimpleNamespace(fleet_secret="f", admin_token="a")
-    app.state.db = _FakeDB()
-    return SimpleNamespace(http=TestClient(app), state=state)
+    fake_db = _FakeDB()
+    app.state.db = fake_db
+    return SimpleNamespace(http=TestClient(app), state=state, db=fake_db)
 
 
 # --- review ----------------------------------------------------------------
@@ -244,9 +253,10 @@ PREPARE_METADATA = {
 
 def test_prepare_prepared_writes_metadata_without_review_enqueue(client):
     """A prepared record writes the patchset_metadata row but does NOT
-       auto-enqueue a review — review is operator-triggered per patchset
-       (core/ui.py → request_review), so a gather/prepare run never floods
-       the queue with reviews."""
+       auto-enqueue a review for a GATHERED patchset — review is
+       operator-triggered per patchset (core/ui.py → request_review), so
+       a gather/prepare run never floods the queue with reviews.
+       (Uploaded patchsets are the exception — see the chain test below.)"""
     body = {"task_type": "prepare", "worker_id": "1",
             "outcome": "prepared",
             "model": "claude-opus-4-7", "usage": USAGE,
@@ -257,11 +267,27 @@ def test_prepare_prepared_writes_metadata_without_review_enqueue(client):
     assert client.state.patchset_metadata_written is not None
     root, mode, fields = client.state.patchset_metadata_written
     assert root == "<r1@x>" and mode == "heuristic"
-    # No auto review enqueue on prepare completion (the manual trigger is
-    # the only path now).
+    # No auto review enqueue on a gathered patchset's prepare completion.
     assert client.state.review_re_enqueued is None
     # Version is read off the work_items row (FAKE_MV), not the record.
     assert fields["methodology_version"] == FAKE_MV
+
+
+def test_prepare_on_uploaded_patchset_chains_the_review(client):
+    """An UPLOADED patchset's prepare completion auto-enqueues the
+       review, stamped with the uploader as the work-item origin — the
+       upload's whole intent is review, so no second click is needed and
+       the item routes onto the uploader's own nodes."""
+    client.db.patchset_origin = core_db.PATCHSET_ORIGIN_UPLOADED
+    client.db.patchset_uploaded_by = 42
+    body = {"task_type": "prepare", "worker_id": "1",
+            "outcome": "prepared",
+            "model": "claude-opus-4-7", "usage": USAGE,
+            "self_review_record": {"summary": "ok", "challenges": []},
+            **PREPARE_METADATA}
+    r = client.http.post("/v1/claims/c1/result", json=body, headers=HEADERS)
+    assert r.status_code == 200, r.json()
+    assert client.state.review_re_enqueued == ("<r1@x>", 42)
 
 
 def test_prepare_uncharacterisable_does_not_write_metadata(client):
