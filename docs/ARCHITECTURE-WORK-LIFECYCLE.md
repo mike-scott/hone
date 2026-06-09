@@ -49,7 +49,31 @@ hone-core does not push work; a node **claims** it. One atomic SQL
 writers, so two nodes never claim the same item. A claim request carries
 the `task_types` the node can handle (`prepare`, `review`, `train`,
 `draft`); the queue returns the oldest claimable item of an accepted
-type.
+type, picked by the ownership-aware claim order below.
+
+**Work-item origin & the per-user queue.** Every `work_items` row
+carries a `requested_by_user_id` origin: NULL for **system** work (the
+gather auto-enqueue, the session orchestrator), a user id for work that
+user requested from the UI (the Request-review button stamps the
+clicking user; the config-token admin stamps NULL). A node, in turn, is
+optionally **owned** by a user (`nodes.owner_user_id` — see
+`ARCHITECTURE.md` → *Auth, enrollment & transport* → *Node ownership*).
+The claim matches the two, in order:
+
+1. A node with an owner serves its owner's items first (FIFO within
+   the accepted types).
+2. Otherwise — no owner, or the owner's queue is empty — a node with
+   `handles_system` set falls back to the **system pool**: system-origin
+   items plus **orphan rescue**, user items whose requester currently
+   owns no active node. A rescued item has no dedicated server, so the
+   pool absorbs it rather than letting it starve; the rule is evaluated
+   at claim time, so pairing a node later takes the user's queue back,
+   and revoking a user's last node releases their pending items to the
+   pool.
+3. Otherwise `204 No Content`. A freshly-paired node is **user-only**
+   (`handles_system=0`) until its owner opts in from the node detail
+   page; an ownerless (admin-approved) node gets `handles_system=1` and
+   serves the pool — the classic interchangeable fleet member.
 
 **Work-item lifecycle** (one shared state machine for `type ∈ {prepare,
 review, train}`):
@@ -115,7 +139,9 @@ are enqueued; they are never picked or re-offered.
 - **review — operator-triggered, not auto-enqueued.** The operator requests
   a review from the patchset detail page (`POST /review-requests/<root>` →
   `core_db.maybe_enqueue_review`), which enqueues one `review` work-item per
-  patchset (idempotent, one per root Message-ID). Auto-enqueueing review at
+  patchset (idempotent, one per root Message-ID), stamped with the
+  requesting user as its origin so it routes onto their own nodes' queue
+  (an admin-triggered review is a system item). Auto-enqueueing review at
   gather time would flood the queue, so it is a deliberate per-patchset
   action. The request is only offered once a `patchset_metadata` row exists,
   so preparation still precedes the review — reviewers cited against the
@@ -138,9 +164,10 @@ node's behaviour depends on `session_role` as described in *The train
 task payload* below.
 
 **Crash recovery:** a dead node's claim goes stale; once the lease
-elapses the claim protocol re-offers it. No work is lost or stuck. This
-is what makes the worker tier a pool of interchangeable nodes rather
-than one-shot tasks.
+elapses the claim protocol re-offers it (to whichever nodes the item's
+origin makes eligible). No work is lost or stuck. This is what makes
+the worker tier a pool of interchangeable nodes — within their
+ownership scope — rather than one-shot tasks.
 
 ## Review output: concerns and scoping
 

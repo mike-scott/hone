@@ -67,7 +67,11 @@ dials out. Given just three start parameters (Claude API token,
 hone-core URL, fleet secret), it enrols via the OAuth 2.0
 device-authorization grant, receives access/refresh tokens plus
 hone-core's CA cert, persists them to its data volume, builds its own
-reference kernel repo, and begins claiming. The Claude token is
+reference kernel repo, and begins claiming. A node is **owned** by the
+user who pairs and approves its enrollment — it serves its owner's
+requested work first and joins the shared system pool only by owner
+opt-in (see [`docs/ARCHITECTURE-WORK-LIFECYCLE.md`](docs/ARCHITECTURE-WORK-LIFECYCLE.md)
+→ *Work lifecycle & the claim protocol*). The Claude token is
 injected at runtime, never baked into the image. Both services run
 unprivileged.
 
@@ -103,8 +107,9 @@ holds seven groups — see
   `training_session_patchsets`, `patchset_session_history`:
   operator-triggered batch overlays providing per-stratum coverage and
   held-out evaluation pools.
-- **Nodes & auth** — `nodes`, `node_enrollments`, `node_tokens` (hashed
-  only).
+- **Users, nodes & auth** — `users` (the operator accounts), `nodes`
+  (each optionally owned by a user), `node_enrollments`, `node_tokens`
+  (hashed only).
 - **Gather state** — per-source resume cursors.
 
 A patchset's identity — and the cross-source dedup key — is its
@@ -123,8 +128,10 @@ no JavaScript build step; the AdminLTE / Bootstrap / Bootstrap Icons /
 HTMX assets are vendored, not loaded from a CDN.
 
 Operator pages: **Queue** (the work queue with type × state chip
-filter), **Nodes** (the fleet plus the pending-enrollment approval
-queue), **Enroll** (the verification URL a node prints on startup),
+filter), **Nodes** (the fleet — every node visible, controls gated to
+the node's owner — plus your pending-enrollment pairing queue),
+**Enroll** (the verification URL a node prints on startup; the first
+user to look a code up pairs the node to themselves),
 **Sessions** (training-session list and live session-draft composer),
 **Settings** (runtime config + list-tag gather filter), and the
 **merge gate** (planned) for dispositioning methodology proposals — the
@@ -141,15 +148,15 @@ GATHER loop with the `lore` source (`core/gather.py`,
 (`core/default-methodology.yaml`) and shared JSON Schemas
 (`common/schema/`), the FastAPI app serving the full `/v1` wire contract
 (`core/api.py`) alongside the server-rendered operator UI (`core/ui.py`,
-`core/templates/`, vendored assets in `core/static/`), self-provisioned
-TLS (`core/tls.py`), and — on the node — the claim runner plus the
-`prepare` task, both its deterministic Tier-0 phase (`node/cgit.py`,
-`node/tier0.py`, `node/maintainers.py`) and its LLM Tier-1 phase
-(`node/tasks.py`, `node/ai.py`). Still to build: the `review`, `train`,
-and `draft` task handlers (`node/tasks.py`, currently raising
-`NotImplementedError`); training sessions and the statistical-aggregation
-module; the merge gate and its operator UI; and the session-based
-operator login. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) →
+`core/templates/`, vendored assets in `core/static/`), the session-based
+operator login with per-user node ownership (`core/auth.py`),
+self-provisioned TLS (`core/tls.py`), and — on the node — the claim
+runner plus the `prepare` task, both its deterministic Tier-0 phase
+(`node/cgit.py`, `node/tier0.py`, `node/maintainers.py`) and its LLM
+Tier-1 phase (`node/tasks.py`, `node/ai.py`). Still to build: the
+`review`, `train`, and `draft` task handlers (`node/tasks.py`, currently
+raising `NotImplementedError`); training sessions and the
+statistical-aggregation module; and the merge gate and its operator UI. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) →
 *Today vs. target* for the design's own implementation inventory (note
 that it lags the code in places — e.g. the operator UI and the prepare
 Tier-0 split, both now landed), and [`docs/API.md`](docs/API.md) →

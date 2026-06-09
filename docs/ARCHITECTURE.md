@@ -170,11 +170,16 @@ Pages:
   state (claimable, claimed, completed, unappliable, deferred). Per-type and
   per-state counts ride along the chips.
 - **Nodes** (`/nodes`) — the live node fleet and the **pending-enrollment
-  queue**: an operator enters a node's device-grant *user code* here to
-  approve it and admit it to the fleet (see *Auth, enrollment & transport*).
-- **Enroll** (`/enroll`) — the verification URL a node logs on startup; the
-  operator pastes the user code here to look the enrollment up and approve
-  or deny it.
+  queue**. Every approved node is visible to every user; pending
+  enrollments are private to the user who paired them, and the per-node
+  controls (delete, the `handles_system` toggle, owner reassignment)
+  render only for the node's owner or the config-token admin (see
+  *Auth, enrollment & transport* → *Node ownership*).
+- **Enroll** (`/enroll`) — the verification URL a node logs on startup; a
+  user pastes the user code here to look the enrollment up and approve or
+  deny it. The first user to look a code up **pairs** the enrollment to
+  themselves (first-lookup-wins) and becomes the node's owner at
+  approval.
 - **Sessions** (`/sessions`) — the training-session list (drafts, active,
   complete, analysed) and the **session-draft page** (`/sessions/draft`)
   where an operator composes a new session against a corpus snapshot. See
@@ -348,9 +353,9 @@ by concern:
 | **Corpus** | `patchsets`, `messages`, `ai_reviews`, `patchset_metadata`, `review_evaluations` | one row per patchset (root Message-ID + declared `base_commit`); the per-message store (covers, patches, comments) keyed on Message-ID; one `ai_reviews` row per `(patchset, source)` with **scoped** concerns (see *Review output: concerns and scoping*); one `patchset_metadata` row per patchset with the structured metadata produced by the `prepare` task; one `review_evaluations` row per `(patchset, ai_review, session)` — written when every train a session created for the patchset has terminated; a patchset re-used across sessions produces one eval row per session |
 | **List-tag filter** | `list_tags`, `patchset_tags` | the universe of mailing lists (origin = `manifest` from the lore manifest, or `observed` once seen on a patchset) and the per-patchset tag set; an operator-enabled tag set gates ingest |
 | **Methodology** | `methodology_versions`, `methodology_candidates`, `methodology_proposals`, `eligibility_flags` | the versioned methodology document (active + superseded); the candidate practices with their pooled `applied` / `catches` / `unique_catches` counters and **two parallel `severity_witness` histograms** — `severity_witness_introduced` across the five tags for findings the candidate has produced on patch-introduced code, and `severity_witness_preexisting` for findings on pre-existing code (per the concern's `is_preexisting` flag). Two histograms rather than one so the merge gate can show the introduced-vs-preexisting split directly without re-querying concerns; the human-dispositioned `methodology_proposals` queue + suppression log; and the `eligibility_flags` table — per-`(subject_kind, subject_id, kind)` rows recording which subjects currently satisfy which deterministic eligibility gate (graduate, prune-redundant, prune-ineffective, consolidate, revise, revise-severity-scale), with the evidence snapshot at flag-set time, a `suppressed_at` timestamp (set when the suppression log filters the flag), and a `defer_watermark_at` recording the counter value past which the flag was deferred — together driving the draft-task trigger pipeline described in *The merge gate* |
-| **Work queue** | `work_items`, `draft_tasks` | the unified prepare + review + train queue (`type` = prepare / review / train; one prepare per patchset, one review per patchset, one train per session-selected `(patch, comment)` pair); draft tasks for merge-gate work |
+| **Work queue** | `work_items`, `draft_tasks` | the unified prepare + review + train queue (`type` = prepare / review / train; one prepare per patchset, one review per patchset, one train per session-selected `(patch, comment)` pair), each row stamped with a `requested_by_user_id` origin (NULL = system, a user id = user-requested — the per-user claim-routing key; see [`ARCHITECTURE-WORK-LIFECYCLE.md`](ARCHITECTURE-WORK-LIFECYCLE.md)); draft tasks for merge-gate work |
 | **Training sessions** | `training_sessions`, `training_session_patchsets`, `patchset_session_history` | operator-triggered batch overlays on the work queue; the per-session membership with role and stratum; a denormalised history table for fast "has this patchset been used in any session?" queries |
-| **Nodes & auth** | `nodes`, `node_enrollments`, `node_tokens` | enrolled nodes + the device-authorization-grant enrollments + the issued access/refresh token pairs (hashed only) |
+| **Users, nodes & auth** | `users`, `nodes`, `node_enrollments`, `node_tokens` | the operator accounts (email/Argon2id or Google SSO, admin-approval gated; the config-token admin has no row); enrolled nodes, each optionally owned by a user (`owner_user_id` + the `handles_system` system-pool opt-in — see *Auth, enrollment & transport* → *Node ownership*); the device-authorization-grant enrollments (stamped with the pairing user); the issued access/refresh token pairs (hashed only) |
 | **Gather state** | `gather_state` | one row per gather module — the opaque resume cursor (see `SOURCES.md`) |
 
 A patchset is gathered once; a comment lands as a separate `messages` row
@@ -827,10 +832,14 @@ is *added to the fleet by enrolling itself*, gated by a human:
 1. On first start the node calls `POST /v1/oauth/device_authorization`
    (presenting the fleet secret) and is issued a short **user code** and a
    verification URL. It logs them and begins polling.
-2. An operator opens hone-core's web UI, enters the user code, reviews the
-   node's self-described metadata, names it, and approves — or denies.
-   This human step is the trust anchor; it replaces the earlier admin
-   "pre-register a client key" call.
+2. A logged-in user opens hone-core's web UI and enters the user code.
+   The first user to look a code up **pairs** the enrollment to
+   themselves (first-lookup-wins, enforced atomically; the pending row
+   is visible only to them, and only they — or the config-token admin —
+   may approve or deny it). They review the node's self-described
+   metadata, name it, and approve — or deny. This human step is the
+   trust anchor; it replaces the earlier admin "pre-register a client
+   key" call.
 3. The node's poll to `POST /v1/oauth/token` then returns an **access
    token**, a **refresh token**, and hone-core's **CA certificate** (see
    *Transport* below). The node persists all three to its data volume and
@@ -842,6 +851,22 @@ stores only its hash and validates it by lookup, so revoking a node is a
 single database update. (hone-core is one instance; a per-request database
 lookup is the existing pattern, and opaque tokens keep revocation
 immediate and add no cryptographic key management.)
+
+**Node ownership.** Approval stamps the new `nodes` row with the pairing
+user as `owner_user_id` — a node belongs to the user who paired it. A
+freshly-paired node is **user-only** (`handles_system=0`): it serves
+work its owner requested and nothing else, until the owner opts it into
+the system pool from the node detail page. The config-token admin
+approving an unpaired enrollment creates an **ownerless** node with
+`handles_system=1` — the classic interchangeable fleet member. Work
+items carry the requesting user as their origin
+(`work_items.requested_by_user_id`, NULL = system); the ownership-aware
+claim order — owner's queue first, then the system pool with its
+orphan-rescue rule for items of node-less users — is specified in
+[`ARCHITECTURE-WORK-LIFECYCLE.md`](ARCHITECTURE-WORK-LIFECYCLE.md) →
+*Work lifecycle & the claim protocol*. Every approved node is visible to
+every user; mutating one (delete, the `handles_system` toggle) is
+owner-or-admin only, and owner reassignment is admin-only.
 
 **Transport — a self-provisioned TLS CA.** On **first startup** hone-core
 generates, once, a private **certificate authority** and a server
@@ -971,8 +996,11 @@ hone-core:
   slice.
 - `core/ui.py` + `core/templates/` + `core/static/` — the server-rendered
   operator UI (Queue, Nodes, Enroll, Settings, patchset and work-item
-  detail) on vendored AdminLTE / Bootstrap / HTMX assets, gated by HTTP
-  Basic auth against `HONE_ADMIN_TOKEN`.
+  detail) on vendored AdminLTE / Bootstrap / HTMX assets, gated by the
+  session-based login (`core/auth.py` — email/password Argon2id or Google
+  SSO, admin-approval for self-registered accounts, the config-token
+  admin for user management), with per-user node ownership (pairing-based
+  enrollment, owner-gated node controls, the ownership-aware claim).
 - `core/gather.py` + `core/gather-modules/{gather_api.py, lore.py}` — the
   GATHER supervisor (per-source asyncio tasks, cursor resume, stall
   cancel) and the `lore` source.
@@ -1061,9 +1089,6 @@ items below already have their DB tables and CRUD primitives in place
 - The spot-check audit workflow — a sampler over prepared metadata, train
   results, and `review_evaluations`, the disposition UI, and the feedback
   path into node reputation / health metrics. Not started.
-- The session-based operator login — the UI is gated by HTTP Basic auth
-  against `HONE_ADMIN_TOKEN` today; the richer session-based login is the
-  target.
 
 *Further refinements (after the machinery lands)*
 

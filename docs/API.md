@@ -104,9 +104,13 @@ types. The pending enrollment expires `expires_in` seconds after issue.
 
 ### Operator approval
 
-Out of scope for this wire API: the operator opens hone-core's web UI, enters
-the `user_code`, reviews the node's self-description, and approves or denies
-it (`ARCHITECTURE.md` → Node management). This human approval is the trust
+Out of scope for this wire API: a logged-in user opens hone-core's web UI,
+enters the `user_code`, reviews the node's self-description, and approves or
+denies it (`ARCHITECTURE.md` → *Auth, enrollment & transport*). The first
+user to look a code up pairs the enrollment to themselves; approval creates
+the node **owned** by that user, serving their requested work first (see
+*POST /v1/claims* below). The config-token admin approving an unpaired code
+creates an ownerless fleet node instead. This human approval is the trust
 anchor for adding a node to the fleet.
 
 ### POST /v1/oauth/token — obtain / refresh tokens
@@ -250,6 +254,14 @@ lease lapses.
 `["prepare", "review", "train", "draft"]` (every task type). hone-core
 matches the request against the queue and returns the oldest claimable
 item of an accepted type.
+
+The match is **ownership-aware**: a node owned by a user serves that
+user's requested items first, then — if the node's `handles_system` flag
+is set — the system pool (system-origin items, plus user items whose
+requester currently owns no active node). A user-only node with an empty
+owner queue gets `204`. The claim order and the work-item origin model
+are specified in `ARCHITECTURE-WORK-LIFECYCLE.md` → *Work lifecycle &
+the claim protocol*; nothing about it changes the wire shapes below.
 
 **Response `200` — a prepare-task claim:**
 ```json

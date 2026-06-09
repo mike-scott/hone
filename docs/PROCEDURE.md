@@ -48,11 +48,25 @@ and proposals" step. See *Training sessions* below.
 ## Enrolling a node
 
 Start a hone-node container with the fleet secret and the hone-core URL.
-The node prints a verification URL and a user code; open `/enroll`,
-paste the code, review the node's self-description (its declared
-`task_types` and `node_name`), and approve. From that point the node
-enrolls itself: bearer tokens are issued, the CA certificate is handed
-over, and the node begins claiming.
+The node prints a verification URL and a user code; open `/enroll` (or
+use "Pair a new node" on `/nodes`), paste the code, review the node's
+self-description (its declared `task_types` and `node_name`), and
+approve. Looking the code up **pairs** the enrollment to you: the
+pending row appears only on your `/nodes` page, and only you (or the
+admin) can approve or deny it. From that point the node enrolls itself:
+bearer tokens are issued, the CA certificate is handed over, and the
+node begins claiming.
+
+A node you pair is **yours**. It serves the work you request (your
+Request-review clicks) and nothing else until you enable *Also handle
+system work* on its detail page, which lets it fall back to the system
+pool — gather-enqueued prepares, session trains — once your own queue is
+empty. The config-token admin approving an unpaired code creates an
+ownerless system node instead, which serves the pool from the start.
+Every approved node is visible to every user on `/nodes`; delete and
+configuration are owner-only, and the admin can reassign ownership from
+the node detail page. Requesting work while owning no active node is
+fine — the system pool picks your items up.
 
 A node can specialise. Different `task_types` have different
 requirements:
