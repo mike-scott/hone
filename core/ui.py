@@ -78,6 +78,17 @@ def _safe_next(next_url: str | None) -> str:
     return "/"
 
 
+def _google_redirect_uri(cfg) -> str:
+    """The Google OAuth callback URL — derived from cfg.public_url, NOT
+       request.base_url. The latter is built from the incoming Host header,
+       and behind a proxy with a slack (or unset) X-Forwarded-Host policy an
+       attacker who can spoof Host could redirect the authorization `code`
+       to a domain they control. Google requires the URI in the authorization
+       step to match the one in the token exchange, so both flows route
+       through this single source."""
+    return cfg.public_url.rstrip("/") + "/auth/google/callback"
+
+
 @router.get("/login", response_class=HTMLResponse, include_in_schema=False)
 async def login_page(request: Request, next: str | None = None,
                      error: str | None = None):
@@ -193,7 +204,7 @@ async def google_sso_start(request: Request, next: str | None = None):
     state = secrets.token_urlsafe(16)
     request.session["oauth_state"] = state
     request.session["oauth_next"]  = _safe_next(next)
-    redirect_uri = str(request.base_url).rstrip("/") + "/auth/google/callback"
+    redirect_uri = _google_redirect_uri(cfg)
     return RedirectResponse(auth.google_auth_url(cfg, redirect_uri, state))
 
 
@@ -216,7 +227,7 @@ async def google_sso_callback(request: Request,
 
     db = request.app.state.db
     try:
-        redirect_uri = str(request.base_url).rstrip("/") + "/auth/google/callback"
+        redirect_uri = _google_redirect_uri(cfg)
         tokens   = await auth.google_exchange_code(cfg, code, redirect_uri)
         userinfo = await auth.google_fetch_userinfo(tokens["access_token"])
     except Exception:
