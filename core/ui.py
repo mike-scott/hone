@@ -172,7 +172,7 @@ async def login_submit(request: Request):
     auth.set_session_user(request, auth.SessionUser(
         id=user["id"], email=user["email"],
         display_name=user["display_name"] or user["email"],
-        is_config_admin=False))
+        is_config_admin=bool(user["is_admin"])))
     core_db.touch_last_login(db, user["id"])
     return RedirectResponse(next_url, status_code=303)
 
@@ -302,7 +302,7 @@ async def google_sso_callback(request: Request,
     auth.set_session_user(request, auth.SessionUser(
         id=user["id"], email=user["email"],
         display_name=user["display_name"] or user["email"],
-        is_config_admin=False))
+        is_config_admin=bool(user["is_admin"])))
     core_db.touch_last_login(db, user["id"])
     return RedirectResponse(next_url, status_code=303)
 
@@ -314,7 +314,7 @@ async def logout(request: Request):
 
 
 # ===========================================================================
-# User management (config-token admin only)
+# User management (admin only — the config-token admin or a granted account)
 # ===========================================================================
 
 @router.get("/users", response_class=HTMLResponse, include_in_schema=False)
@@ -343,6 +343,26 @@ async def user_approve(request: Request, user_id: int,
 async def user_revoke(request: Request, user_id: int,
                       user: auth.SessionUser = Depends(auth.require_config_admin)):
     core_db.set_user_state(request.app.state.db, user_id, "revoked")
+    return RedirectResponse("/users", status_code=303)
+
+
+@router.post("/users/{user_id}/grant-admin", include_in_schema=False, dependencies=[Depends(auth.require_csrf)])
+async def user_grant_admin(request: Request, user_id: int,
+                           user: auth.SessionUser = Depends(auth.require_config_admin)):
+    """Grant the admin permission to an account. Takes effect on the
+       target's next request — auth.current_session_user re-derives the
+       flag from the users row."""
+    core_db.set_user_admin(request.app.state.db, user_id, True)
+    return RedirectResponse("/users", status_code=303)
+
+
+@router.post("/users/{user_id}/revoke-admin", include_in_schema=False, dependencies=[Depends(auth.require_csrf)])
+async def user_revoke_admin(request: Request, user_id: int,
+                            user: auth.SessionUser = Depends(auth.require_config_admin)):
+    """Remove the admin permission. Self-demotion is allowed — the
+       config-token admin (HONE_ADMIN_TOKEN, no users row) is the
+       permanent backstop that can always re-grant."""
+    core_db.set_user_admin(request.app.state.db, user_id, False)
     return RedirectResponse("/users", status_code=303)
 
 

@@ -193,9 +193,10 @@ enough evidence that statistical confirmation is the next step
 ## Tuning runtime config
 
 The Settings page edits runtime config without a restart. It is
-admin-only (reached from the admin section of the user menu — sign in
-with the config admin token). The knobs most commonly touched, and the
-symptom each addresses:
+admin-only, reached from the admin section of the user menu — sign in
+with the config admin token, or as an account granted admin from the
+Users screen. The knobs most commonly touched, and the symptom each
+addresses:
 
 - `gather.interval_seconds` (default 600) — re-spawn cadence per
   source. Lower if you need fresher data; higher to back off if the

@@ -744,7 +744,18 @@ CREATE INDEX idx_work_items_user_claimable
     ON work_items(requested_by_user_id, state, type, enqueued_at);
 """
 
-_MIGRATIONS = [_SCHEMA_V1, _SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4]
+_SCHEMA_V5 = """
+-- Per-user admin grant: an admin can promote a regular account from the
+-- Users screen. The config-token admin (HONE_ADMIN_TOKEN, no users row)
+-- remains the bootstrap / backstop admin; this flag extends the same
+-- permission to accounts. The grant is re-derived from this column on
+-- every request (auth.current_session_user), so granting or demoting
+-- takes effect on the user's next request — same freshness as revoke.
+ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0
+    CHECK (is_admin IN (0, 1));
+"""
+
+_MIGRATIONS = [_SCHEMA_V1, _SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4, _SCHEMA_V5]
 
 
 # How long a connection waits on another connection's write lock before
@@ -3118,6 +3129,17 @@ def set_user_state(db, user_id, state):
         "UPDATE users SET state = ?, approved_at = COALESCE(?, approved_at) WHERE id = ?",
         (state, approved_at, user_id))
     db.commit()
+
+
+def set_user_admin(db, user_id, is_admin):
+    """Flip a user's `is_admin` grant (0 or 1). Returns True when a row
+       was updated. Takes effect on the user's next request —
+       auth.current_session_user re-derives the flag from this column."""
+    cur = db.execute(
+        "UPDATE users SET is_admin = ? WHERE id = ?",
+        (1 if is_admin else 0, user_id))
+    db.commit()
+    return cur.rowcount > 0
 
 
 def delete_user(db, user_id):

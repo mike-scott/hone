@@ -191,7 +191,10 @@ def test_v4_migration_preserves_v3_user_rows_and_enables_the_check(tmp_path):
 
     # Re-open via the runner — applies v4.
     db = core_db.connect(path)
-    assert db.execute("PRAGMA user_version").fetchone()[0] == 4
+    # Head, not literally 4 — later migrations (v5+) run in the same
+    # pass; this test cares that the v3 data survives the chain.
+    assert (db.execute("PRAGMA user_version").fetchone()[0]
+            == len(core_db._MIGRATIONS))
 
     row = core_db.get_user_by_email(db, "kept@x")
     assert row is not None
@@ -325,3 +328,20 @@ def test_require_session_redirects_when_no_session_is_present(db):
     loc = ei.value.headers["Location"]
     assert loc.startswith("/login?next=")
     assert "settings" in loc
+
+
+# --- v5: the per-user admin grant ------------------------------------------
+
+def test_v5_users_carry_an_is_admin_grant(tmp_path):
+    """is_admin defaults to 0 (no grant), set_user_admin flips it both
+       ways, and the CHECK constraint rejects out-of-range values."""
+    import sqlite3
+    db = core_db.connect(str(tmp_path / "hone.db"))
+    uid = core_db.create_user(db, "a@x", "A", "local")
+    assert core_db.get_user_by_id(db, uid)["is_admin"] == 0
+    assert core_db.set_user_admin(db, uid, True)
+    assert core_db.get_user_by_id(db, uid)["is_admin"] == 1
+    assert core_db.set_user_admin(db, uid, False)
+    assert core_db.get_user_by_id(db, uid)["is_admin"] == 0
+    with pytest.raises(sqlite3.IntegrityError):
+        db.execute("UPDATE users SET is_admin=2 WHERE id=?", (uid,))

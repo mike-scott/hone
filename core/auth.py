@@ -6,6 +6,13 @@ hashing (Argon2id), and Google OAuth 2.0 authorization-code flow.
 The config-token admin (HONE_ADMIN_TOKEN) never has a database row — their
 session carries is_config_admin=True and id=None.  All other users are in the
 `users` table and must be in state='approved' to hold an active session.
+
+Admin permission is not exclusive to the token identity: a `users` row can
+carry an `is_admin` grant (set from the Users screen by another admin).
+SessionUser.is_config_admin therefore means "has admin permission" — the
+token identity or a granted account. For DB users the flag is re-derived
+from the row on EVERY request (current_session_user), never trusted from
+the cookie, so granting or demoting takes effect on the next request.
 """
 import collections
 import secrets
@@ -180,12 +187,16 @@ def current_session_user(request: Request) -> Optional[SessionUser]:
     user = get_session_user(request)
     if user is None:
         return None
-    if user.is_config_admin:
-        return user
+    if user.id is None and user.is_config_admin:
+        return user                     # token admin — no DB row to check
     row = core_db.get_user_by_id(request.app.state.db, user.id)
     if row is None or row["state"] != "approved":
         clear_session(request)
         return None
+    # Admin is a DB grant, re-derived per request rather than trusted from
+    # the cookie — granting / demoting takes effect on the user's next
+    # request, exactly like state revocation above.
+    user.is_config_admin = bool(row["is_admin"])
     return user
 
 

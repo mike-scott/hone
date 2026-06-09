@@ -64,6 +64,7 @@
           <th>Email</th>
           <th>Display name</th>
           <th>Provider</th>
+          <th>Admin</th>
           <th>Approved</th>
           <th>Last login</th>
           <th></th>
@@ -75,9 +76,31 @@
           <td>{{ u.email }}</td>
           <td class="text-muted">{{ u.display_name or "—" }}</td>
           <td><span class="badge text-bg-secondary">{{ u.auth_provider }}</span></td>
+          <td>
+            {% if u.is_admin %}
+            <span class="badge text-bg-primary">admin</span>
+            {% else %}
+            <span class="text-muted small">—</span>
+            {% endif %}
+          </td>
           <td class="text-muted small">{{ when(u.approved_at) }}</td>
           <td class="text-muted small">{{ when(u.last_login_at) }}</td>
           <td class="text-end">
+            {% if u.is_admin %}
+            <form method="post" action="/users/{{ u.id }}/revoke-admin" class="d-inline"
+                  data-confirm="Remove admin permission from {{ u.email }}?"
+                  data-confirm-button="Remove admin">
+              {{ csrf_field(request) }}
+              <button class="btn btn-outline-secondary btn-sm">Revoke admin</button>
+            </form>
+            {% else %}
+            <form method="post" action="/users/{{ u.id }}/grant-admin" class="d-inline"
+                  data-confirm="Grant admin permission to {{ u.email }}? Admins manage users, every node, and Settings."
+                  data-confirm-button="Grant admin">
+              {{ csrf_field(request) }}
+              <button class="btn btn-outline-secondary btn-sm">Make admin</button>
+            </form>
+            {% endif %}
             <form method="post" action="/users/{{ u.id }}/revoke" class="d-inline"
                   data-confirm="Revoke access for {{ u.email }}?"
                   data-confirm-button="Revoke">

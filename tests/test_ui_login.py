@@ -381,3 +381,23 @@ def test_login_pending_or_revoked_with_valid_password_does_not_count(ctx):
     # The next credential MISS should still get a fresh 401, not 429.
     r = _post_login(ctx, email="someone-else@example.com", password="wrong")
     assert r.status_code == 401
+
+
+# --- the per-user admin grant, end to end -----------------------------------
+
+def test_db_admin_grant_is_rederived_on_every_request(ctx):
+    """A user with the is_admin grant passes the admin gate after a normal
+       login; removing the grant bites on their NEXT request without a
+       re-login (current_session_user re-derives the flag from the users
+       row, never from the cookie) — and a re-grant restores access the
+       same way."""
+    uid = _plant_user(ctx, email="alice@example.com", state="approved")
+    core_db.set_user_admin(ctx.db, uid, True)
+    r = _post_login(ctx, email="alice@example.com",
+                    password="correct-horse-battery-staple")
+    assert r.status_code == 303
+    assert ctx.client.get("/users").status_code == 200    # admin gate passes
+    core_db.set_user_admin(ctx.db, uid, False)            # demote in the DB
+    assert ctx.client.get("/users").status_code == 403    # next request: gone
+    core_db.set_user_admin(ctx.db, uid, True)             # re-grant
+    assert ctx.client.get("/users").status_code == 200

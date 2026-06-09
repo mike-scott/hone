@@ -334,10 +334,13 @@ separate read-only panel lists the deployment configuration.
 **Authentication.** The Settings page **mutates** hone-core's behaviour
 for every user, so it is **admin-only**. The whole operator UI is gated
 by session-based login (`core/auth.py`): email/password (Argon2id) or
-Google SSO, with an admin-approval gate for self-registered accounts; the
-configured `HONE_ADMIN_TOKEN` is a separate config-admin identity with
-exclusive access to user management and the Settings page (both reached
-from the admin section of the user menu).
+Google SSO, with an admin-approval gate for self-registered accounts.
+The configured `HONE_ADMIN_TOKEN` is the bootstrap admin identity (no
+`users` row); an admin can grant the same admin permission to a regular
+account from the Users screen (`users.is_admin` — re-derived from the
+row on every request, so a demotion takes effect on the target's next
+request, exactly like revocation). The admin surfaces — user management
+and Settings — sit in the admin section of the user menu.
 
 **Not in scope here.** Methodology import/export (export the DB methodology
 to YAML, re-import an edited one — see *Methodology storage*) is operator
@@ -357,7 +360,7 @@ by concern:
 | **Methodology** | `methodology_versions`, `methodology_candidates`, `methodology_proposals`, `eligibility_flags` | the versioned methodology document (active + superseded); the candidate practices with their pooled `applied` / `catches` / `unique_catches` counters and **two parallel `severity_witness` histograms** — `severity_witness_introduced` across the five tags for findings the candidate has produced on patch-introduced code, and `severity_witness_preexisting` for findings on pre-existing code (per the concern's `is_preexisting` flag). Two histograms rather than one so the merge gate can show the introduced-vs-preexisting split directly without re-querying concerns; the human-dispositioned `methodology_proposals` queue + suppression log; and the `eligibility_flags` table — per-`(subject_kind, subject_id, kind)` rows recording which subjects currently satisfy which deterministic eligibility gate (graduate, prune-redundant, prune-ineffective, consolidate, revise, revise-severity-scale), with the evidence snapshot at flag-set time, a `suppressed_at` timestamp (set when the suppression log filters the flag), and a `defer_watermark_at` recording the counter value past which the flag was deferred — together driving the draft-task trigger pipeline described in *The merge gate* |
 | **Work queue** | `work_items`, `draft_tasks` | the unified prepare + review + train queue (`type` = prepare / review / train; one prepare per patchset, one review per patchset, one train per session-selected `(patch, comment)` pair), each row stamped with a `requested_by_user_id` origin (NULL = system, a user id = user-requested — the per-user claim-routing key; see [`ARCHITECTURE-WORK-LIFECYCLE.md`](ARCHITECTURE-WORK-LIFECYCLE.md)); draft tasks for merge-gate work |
 | **Training sessions** | `training_sessions`, `training_session_patchsets`, `patchset_session_history` | operator-triggered batch overlays on the work queue; the per-session membership with role and stratum; a denormalised history table for fast "has this patchset been used in any session?" queries |
-| **Users, nodes & auth** | `users`, `nodes`, `node_enrollments`, `node_tokens` | the operator accounts (email/Argon2id or Google SSO, admin-approval gated; the config-token admin has no row); enrolled nodes, each optionally owned by a user (`owner_user_id` + the `handles_system` system-pool opt-in — see *Auth, enrollment & transport* → *Node ownership*); the device-authorization-grant enrollments (stamped with the pairing user); the issued access/refresh token pairs (hashed only) |
+| **Users, nodes & auth** | `users`, `nodes`, `node_enrollments`, `node_tokens` | the operator accounts (email/Argon2id or Google SSO, admin-approval gated, each optionally carrying the `is_admin` grant; the config-token admin has no row); enrolled nodes, each optionally owned by a user (`owner_user_id` + the `handles_system` system-pool opt-in — see *Auth, enrollment & transport* → *Node ownership*); the device-authorization-grant enrollments (stamped with the pairing user); the issued access/refresh token pairs (hashed only) |
 | **Gather state** | `gather_state` | one row per gather module — the opaque resume cursor (see `SOURCES.md`) |
 
 A patchset is gathered once; a comment lands as a separate `messages` row
