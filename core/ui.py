@@ -2094,7 +2094,7 @@ def _lore_clone_view(state):
 
 @router.get("/settings/lore-clone-status", response_class=HTMLResponse)
 async def lore_clone_status(request: Request,
-                             _: auth.SessionUser = Depends(auth.require_session)):
+                             _: auth.SessionUser = Depends(auth.require_config_admin)):
     """The lore-clone panel partial — rendered standalone for the
        Settings page's `hx-get` poll (every 5 s). Returns just the panel
        HTML so HTMX swaps it in place."""
@@ -2105,7 +2105,7 @@ async def lore_clone_status(request: Request,
 
 @router.post("/settings/lore-clone", response_class=HTMLResponse, dependencies=[Depends(auth.require_csrf)])
 async def lore_clone_trigger(request: Request,
-                              _: auth.SessionUser = Depends(auth.require_session)):
+                              _: auth.SessionUser = Depends(auth.require_config_admin)):
     """Operator-triggered lore provision (the Settings 'Provision now'
        button). Kicks off a background clone unless one is already running,
        then returns the panel partial — now showing 'cloning', which starts
@@ -2176,12 +2176,14 @@ def _resolve_settings_tab(request):
 
 @router.get("/settings", response_class=HTMLResponse)
 async def settings(request: Request,
-                   current_user: auth.SessionUser = Depends(auth.require_session)):
+                   current_user: auth.SessionUser = Depends(auth.require_config_admin)):
     """View the deployment configuration and edit the operator-tunable
-       settings. The page is organised into tabs (`?tab=gather` /
-       `methodology` / `tags` / `deployment`); each tab renders only
-       its own panel so the page isn't a wall of stacked sections.
-       See ARCHITECTURE.md → Configuration & the Settings page."""
+       settings — config-token admin only, like every /settings route:
+       these knobs mutate hone-core's behaviour for everyone. The page
+       is organised into tabs (`?tab=gather` / `methodology` / `tags` /
+       `deployment`); each tab renders only its own panel so the page
+       isn't a wall of stacked sections. See ARCHITECTURE.md →
+       Configuration & the Settings page."""
     rc = request.app.state.runtime_config.as_dict()
     available = gather.gather_api.available()
     values = {f"{g}.{k}": rc[g][k] for g, k, *_ in runtime_config.FIELDS}
@@ -2206,7 +2208,7 @@ async def settings(request: Request,
 
 @router.post("/settings", dependencies=[Depends(auth.require_csrf)])
 async def save_settings(request: Request,
-                         current_user: auth.SessionUser = Depends(auth.require_session)):
+                         current_user: auth.SessionUser = Depends(auth.require_config_admin)):
     """Validate a runtime-config submission, persist it to config.yaml, and
        update the live config — no restart needed. Invalid input re-renders
        the form with the fields flagged; config.yaml is left untouched.
@@ -2263,7 +2265,7 @@ async def save_settings(request: Request,
 
 @router.post("/settings/gather/trigger", dependencies=[Depends(auth.require_csrf)])
 async def trigger_gather(request: Request,
-                          _: auth.SessionUser = Depends(auth.require_session)):
+                          _: auth.SessionUser = Depends(auth.require_config_admin)):
     """Wake the GATHER supervisor and fire every idle enabled source on
        its next tick, bypassing the per-source cadence check. Sources
        mid-cycle keep running; the trigger only affects idle ones. The
@@ -2331,7 +2333,7 @@ def _dump_methodology_yaml(document):
 
 @router.get("/settings/methodology/export")
 async def export_methodology(request: Request,
-                              _: auth.SessionUser = Depends(auth.require_session)):
+                              _: auth.SessionUser = Depends(auth.require_config_admin)):
     """Download the active methodology as YAML. Filename carries the
        DB version so an operator keeping a few revisions on disk can
        tell them apart without diffing. Style mirrors
@@ -2372,7 +2374,7 @@ def _canonical_methodology_bytes(document):
 @router.post("/settings/methodology/import", dependencies=[Depends(auth.require_csrf)])
 async def import_methodology(request: Request,
                               file: UploadFile = File(...),
-                              _: auth.SessionUser = Depends(auth.require_session)):
+                              _: auth.SessionUser = Depends(auth.require_config_admin)):
     """Upload a methodology YAML. Validates against
        common/schema/methodology.schema.yaml, then adds it to the DB
        as a new active version (superseding the current active row in
@@ -2461,7 +2463,7 @@ async def import_methodology(request: Request,
 
 @router.post("/settings/tags", dependencies=[Depends(auth.require_csrf)])
 async def save_tag_filter(request: Request,
-                           _: auth.SessionUser = Depends(auth.require_session)):
+                           _: auth.SessionUser = Depends(auth.require_config_admin)):
     """Persist the list-tag gather filter — every known tag is shown as a
        switch; ticked tags are the new enabled set. Tags not in the form fall
        back to disabled (an unticked checkbox isn't posted)."""

@@ -65,7 +65,7 @@
         </li>
         {# Fleet-pulse chip — the placeholder fires hx-trigger="load"
            immediately and then polls every 10s. Lives between the
-           page-level nav links and the theme/settings icons. #}
+           page-level nav links and the theme icon. #}
         <li class="nav-item me-3">
           <span hx-get="/fleet-status"
                 hx-trigger="load, every 10s"
@@ -77,14 +77,8 @@
           <a class="nav-link" href="#" id="theme-toggle" role="button"
              aria-label="Toggle light/dark theme"><i class="bi"></i></a>
         </li>
-        <li class="nav-item">
-          <a href="/settings" class="nav-link
-             {%- if active.startswith('/settings') %} active{% endif %}"
-             aria-label="Settings" title="Settings">
-            <i class="bi bi-gear"></i></a>
-        </li>
-        {# User menu — shows the logged-in account name; admins also get a
-           link to the Users management page. #}
+        {# User menu — shows the logged-in account name; admins also get
+           links to the Users and Settings pages (both admin-only). #}
         {% if current_user is defined and current_user %}
         <li class="nav-item dropdown ms-2">
           <a class="nav-link dropdown-toggle d-flex align-items-center gap-1"
@@ -97,6 +91,11 @@
             <li>
               <a class="dropdown-item" href="/users">
                 <i class="bi bi-people me-1"></i>Users
+              </a>
+            </li>
+            <li>
+              <a class="dropdown-item" href="/settings">
+                <i class="bi bi-gear me-1"></i>Settings
               </a>
             </li>
             <li><hr class="dropdown-divider"></li>

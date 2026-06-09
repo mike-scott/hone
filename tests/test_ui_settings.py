@@ -524,3 +524,29 @@ def test_import_methodology_rejects_oversized_upload(ctx):
                          files={"file": ("big.yaml", big, "text/yaml")})
     assert r.status_code == 200
     assert "exceeds the methodology size cap" in r.text
+
+
+# --- admin gating ----------------------------------------------------------
+
+def test_settings_routes_are_403_for_non_admin():
+    """Every /settings route requires the config-token admin — the page
+       mutates hone-core's behaviour for everyone, so a regular operator
+       gets a 403. require_session is overridden to a regular user while
+       the REAL require_config_admin gate runs."""
+    from core import auth
+    app = FastAPI()
+    app.include_router(ui.router)
+    user = auth.SessionUser(id=1, email="user@x", display_name="user",
+                            is_config_admin=False)
+    app.dependency_overrides[auth.require_session] = lambda: user
+    app.dependency_overrides[auth.require_csrf] = lambda: None
+    client = TestClient(app)
+    assert client.get("/settings").status_code == 403
+    assert client.post("/settings", data={"_group": "gather"}).status_code == 403
+    assert client.post("/settings/tags", data={}).status_code == 403
+    assert client.get("/settings/methodology/export").status_code == 403
+    assert client.post("/settings/methodology/import",
+                       files={"file": ("m.yaml", b"x")}).status_code == 403
+    assert client.post("/settings/gather/trigger").status_code == 403
+    assert client.get("/settings/lore-clone-status").status_code == 403
+    assert client.post("/settings/lore-clone").status_code == 403

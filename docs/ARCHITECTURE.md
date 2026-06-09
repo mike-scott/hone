@@ -187,7 +187,8 @@ Pages:
 - **Settings** (`/settings`) — view the deployment configuration and edit
   the operator-tunable runtime config (`config.yaml`) **plus the list-tag
   gather filter** (see *Configuration & the Settings page* and `SOURCES.md`
-  → *List-tag filter*).
+  → *List-tag filter*). Config-token admin only; it lives in the admin
+  section of the user menu, not the page nav.
 - **Merge gate** — disposition the `methodology_proposals` queue (see *The
   merge gate*). Planned; not yet implemented.
 - Reporting pages — later. (The patchset and work-item detail views are
@@ -330,12 +331,13 @@ invalid input (a non-positive interval, an unknown gather source) is
 rejected with the field flagged and `config.yaml` left untouched. A
 separate read-only panel lists the deployment configuration.
 
-**Authentication.** The Settings page **mutates** hone-core's behaviour,
-so it sits behind operator authentication. The whole operator UI is gated
+**Authentication.** The Settings page **mutates** hone-core's behaviour
+for every user, so it is **admin-only**. The whole operator UI is gated
 by session-based login (`core/auth.py`): email/password (Argon2id) or
 Google SSO, with an admin-approval gate for self-registered accounts; the
 configured `HONE_ADMIN_TOKEN` is a separate config-admin identity with
-exclusive access to user management.
+exclusive access to user management and the Settings page (both reached
+from the admin section of the user menu).
 
 **Not in scope here.** Methodology import/export (export the DB methodology
 to YAML, re-import an edited one — see *Methodology storage*) is operator
