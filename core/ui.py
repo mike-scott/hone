@@ -7,7 +7,7 @@ Server-rendered: Jinja2 + Bootstrap 5 + HTMX. Pages:
 - `/patchsets/{root}`   per-patchset detail (corpus + reviews + queue history)
 - `/nodes`              the node fleet + pending enrollments
 - `/enroll`             approve a node's device-grant enrollment
-- `/settings`           operator-tunable runtime config + list-tag gather filter
+- `/site-settings`           operator-tunable runtime config + list-tag gather filter
 - `/users`              user management (config-token admin only)
 """
 import datetime
@@ -371,6 +371,101 @@ async def user_delete(request: Request, user_id: int,
                       user: auth.SessionUser = Depends(auth.require_config_admin)):
     core_db.delete_user(request.app.state.db, user_id)
     return RedirectResponse("/users", status_code=303)
+
+
+# ===========================================================================
+# User settings (the logged-in account's own page — any session user)
+# ===========================================================================
+
+def _user_settings_ctx(current_user, db, **extra):
+    """Render context for user_settings.html. `account` is the live users
+       row (None for the config-token admin, who has no row — the template
+       shows a notice instead of forms)."""
+    row = (core_db.get_user_by_id(db, current_user.id)
+           if current_user.id is not None else None)
+    ctx = {"current_user":   current_user,
+           "account":        row,
+           "is_local":       bool(row and row["auth_provider"] == "local"),
+           "when":           _when,
+           "profile_error":  None, "profile_saved":  False,
+           "password_error": None, "password_saved": False}
+    ctx.update(extra)
+    return ctx
+
+
+@router.get("/user-settings", response_class=HTMLResponse, include_in_schema=False)
+async def user_settings(request: Request,
+                        current_user: auth.SessionUser = Depends(auth.require_session)):
+    """The logged-in account's own settings: display name for every
+       DB-backed account, password change for local-provider accounts
+       (Google accounts authenticate at Google — no hone-core password).
+       Distinct from /site-settings, which configures hone-core itself
+       and is admin-only."""
+    saved = request.query_params.get("saved")
+    return templates.TemplateResponse(
+        request, "user_settings.html",
+        _user_settings_ctx(current_user, request.app.state.db,
+                           profile_saved=saved == "profile",
+                           password_saved=saved == "password"))
+
+
+@router.post("/user-settings/profile", include_in_schema=False, dependencies=[Depends(auth.require_csrf)])
+async def user_settings_profile(request: Request,
+                                current_user: auth.SessionUser = Depends(auth.require_session)):
+    """Update the account's display name. The navbar reads the name from
+       the session cookie, so refresh the cookie in place — no re-login."""
+    if current_user.id is None:
+        raise HTTPException(status.HTTP_403_FORBIDDEN,
+                            "the config-token admin has no user account")
+    db = request.app.state.db
+    form = await request.form()
+    name = (form.get("display_name") or "").strip()
+    if not name:
+        return templates.TemplateResponse(
+            request, "user_settings.html",
+            _user_settings_ctx(current_user, db,
+                               profile_error="Display name cannot be empty."),
+            status_code=422)
+    core_db.set_user_display_name(db, current_user.id, name)
+    current_user.display_name = name
+    auth.set_session_user(request, current_user)
+    return RedirectResponse("/user-settings?saved=profile", status_code=303)
+
+
+@router.post("/user-settings/password", include_in_schema=False, dependencies=[Depends(auth.require_csrf)])
+async def user_settings_password(request: Request,
+                                 current_user: auth.SessionUser = Depends(auth.require_session)):
+    """Change the account password — local-provider accounts only.
+       Requires the current password (an unattended session can't be
+       hijacked into a silent credential change) and mirrors the
+       register rule for the new one (≥ 10 chars)."""
+    if current_user.id is None:
+        raise HTTPException(status.HTTP_403_FORBIDDEN,
+                            "the config-token admin has no user account")
+    db = request.app.state.db
+    row = core_db.get_user_by_id(db, current_user.id)
+    if row is None or row["auth_provider"] != "local":
+        raise HTTPException(status.HTTP_403_FORBIDDEN,
+                            "password sign-in is not enabled for this account")
+    form = await request.form()
+
+    def _fail(msg):
+        return templates.TemplateResponse(
+            request, "user_settings.html",
+            _user_settings_ctx(current_user, db, password_error=msg),
+            status_code=422)
+
+    if not auth.verify_password(form.get("current_password") or "",
+                                row["password_hash"] or ""):
+        return _fail("Current password is incorrect.")
+    new = form.get("new_password") or ""
+    if len(new) < 10:
+        return _fail("New password must be at least 10 characters.")
+    if new != (form.get("confirm_password") or ""):
+        return _fail("New passwords do not match.")
+    core_db.set_user_password_hash(db, current_user.id,
+                                   auth.hash_password(new))
+    return RedirectResponse("/user-settings?saved=password", status_code=303)
 
 
 def _types(raw):
@@ -2007,7 +2102,7 @@ async def deny_enrollment(request: Request, user_code: str,
 # --- settings --------------------------------------------------------------
 
 def _deployment_view(cfg):
-    """The read-only deployment-config rows for the Settings page (secrets
+    """The read-only deployment-config rows for the Site-settings page (secrets
        masked — they are set at container start, not editable here)."""
     def masked(v):
         return "•••••••• (set)" if v else "(unset)"
@@ -2044,7 +2139,7 @@ def _settings_fields(field_values, available, errors=None):
 
 
 def _tag_rows(db):
-    """The list-tag rows for the Settings page — one switch per known tag."""
+    """The list-tag rows for the Site-settings page — one switch per known tag."""
     rows = []
     for t in core_db.list_tags(db):
         rows.append({
@@ -2112,18 +2207,18 @@ def _lore_clone_view(state):
     }
 
 
-@router.get("/settings/lore-clone-status", response_class=HTMLResponse)
+@router.get("/site-settings/lore-clone-status", response_class=HTMLResponse)
 async def lore_clone_status(request: Request,
                              _: auth.SessionUser = Depends(auth.require_config_admin)):
     """The lore-clone panel partial — rendered standalone for the
-       Settings page's `hx-get` poll (every 5 s). Returns just the panel
+       Site-settings page's `hx-get` poll (every 5 s). Returns just the panel
        HTML so HTMX swaps it in place."""
     return templates.TemplateResponse(
         request, "_lore_clone_panel.html",
         {"lore_clone": _lore_clone_view(request.app.state.lore_clone)})
 
 
-@router.post("/settings/lore-clone", response_class=HTMLResponse, dependencies=[Depends(auth.require_csrf)])
+@router.post("/site-settings/lore-clone", response_class=HTMLResponse, dependencies=[Depends(auth.require_csrf)])
 async def lore_clone_trigger(request: Request,
                               _: auth.SessionUser = Depends(auth.require_config_admin)):
     """Operator-triggered lore provision (the Settings 'Provision now'
@@ -2168,7 +2263,7 @@ def _methodology_view(db):
         return {**base, "version": None, "export_url": None}
     version, _document = active
     return {**base, "version": version,
-             "export_url":     "/settings/methodology/export"}
+             "export_url":     "/site-settings/methodology/export"}
 
 
 # Valid `?tab=...` values. Defined as a tuple so the order matches the
@@ -2194,23 +2289,23 @@ def _resolve_settings_tab(request):
     return t if t in _SETTINGS_TABS else _DEFAULT_SETTINGS_TAB
 
 
-@router.get("/settings", response_class=HTMLResponse)
-async def settings(request: Request,
+@router.get("/site-settings", response_class=HTMLResponse)
+async def site_settings(request: Request,
                    current_user: auth.SessionUser = Depends(auth.require_config_admin)):
     """View the deployment configuration and edit the operator-tunable
-       settings — config-token admin only, like every /settings route:
+       settings — config-token admin only, like every /site-settings route:
        these knobs mutate hone-core's behaviour for everyone. The page
        is organised into tabs (`?tab=gather` / `methodology` / `tags` /
        `deployment`); each tab renders only its own panel so the page
        isn't a wall of stacked sections. See ARCHITECTURE.md →
-       Configuration & the Settings page."""
+       Configuration & the Site-settings page."""
     rc = request.app.state.runtime_config.as_dict()
     available = gather.gather_api.available()
     values = {f"{g}.{k}": rc[g][k] for g, k, *_ in runtime_config.FIELDS}
     saved = request.query_params.get("saved")
     imported = request.query_params.get("methodology_imported")
     meth_error = request.query_params.get("methodology_error")
-    return templates.TemplateResponse(request, "settings.html", {
+    return templates.TemplateResponse(request, "site_settings.html", {
         "tab":        _resolve_settings_tab(request),
         "groups":     _settings_fields(values, available),
         "tags":       _tag_rows(request.app.state.db),
@@ -2226,8 +2321,8 @@ async def settings(request: Request,
         "current_user": current_user})
 
 
-@router.post("/settings", dependencies=[Depends(auth.require_csrf)])
-async def save_settings(request: Request,
+@router.post("/site-settings", dependencies=[Depends(auth.require_csrf)])
+async def save_site_settings(request: Request,
                          current_user: auth.SessionUser = Depends(auth.require_config_admin)):
     """Validate a runtime-config submission, persist it to config.yaml, and
        update the live config — no restart needed. Invalid input re-renders
@@ -2255,7 +2350,7 @@ async def save_settings(request: Request,
     if not errors:
         runtime_config.save(request.app.state.config.config_path, rc)
         request.app.state.runtime_config = rc
-        return RedirectResponse(f"/settings?tab={tab}&saved=1",
+        return RedirectResponse(f"/site-settings?tab={tab}&saved=1",
                                  status_code=303)
     submitted = {}
     for g, k, _label, _unit, kind in runtime_config.FIELDS:
@@ -2270,7 +2365,7 @@ async def save_settings(request: Request,
         first_errored_group = next(iter(errors)).split(".", 1)[0]
         if first_errored_group in _RUNTIME_CONFIG_GROUPS:
             tab = first_errored_group
-    return templates.TemplateResponse(request, "settings.html", {
+    return templates.TemplateResponse(request, "site_settings.html", {
         "tab":        tab,
         "groups":     _settings_fields(submitted, available, errors),
         "tags":       _tag_rows(request.app.state.db),
@@ -2283,7 +2378,7 @@ async def save_settings(request: Request,
         "current_user": current_user}, status_code=400)
 
 
-@router.post("/settings/gather/trigger", dependencies=[Depends(auth.require_csrf)])
+@router.post("/site-settings/gather/trigger", dependencies=[Depends(auth.require_csrf)])
 async def trigger_gather(request: Request,
                           _: auth.SessionUser = Depends(auth.require_config_admin)):
     """Wake the GATHER supervisor and fire every idle enabled source on
@@ -2295,7 +2390,7 @@ async def trigger_gather(request: Request,
     trigger = getattr(request.app.state, "gather_trigger", None)
     if trigger is not None:
         trigger.set()
-    return RedirectResponse("/settings?tab=gather&saved=triggered",
+    return RedirectResponse("/site-settings?tab=gather&saved=triggered",
                              status_code=303)
 
 
@@ -2351,7 +2446,7 @@ def _dump_methodology_yaml(document):
                       allow_unicode=True)
 
 
-@router.get("/settings/methodology/export")
+@router.get("/site-settings/methodology/export")
 async def export_methodology(request: Request,
                               _: auth.SessionUser = Depends(auth.require_config_admin)):
     """Download the active methodology as YAML. Filename carries the
@@ -2391,7 +2486,7 @@ def _canonical_methodology_bytes(document):
                        ensure_ascii=False).encode("utf-8")
 
 
-@router.post("/settings/methodology/import", dependencies=[Depends(auth.require_csrf)])
+@router.post("/site-settings/methodology/import", dependencies=[Depends(auth.require_csrf)])
 async def import_methodology(request: Request,
                               file: UploadFile = File(...),
                               _: auth.SessionUser = Depends(auth.require_config_admin)):
@@ -2424,16 +2519,16 @@ async def import_methodology(request: Request,
     raw = await file.read(_METHODOLOGY_UPLOAD_CAP_BYTES + 1)
     if len(raw) > _METHODOLOGY_UPLOAD_CAP_BYTES:
         return RedirectResponse(
-            "/settings?tab=methodology&methodology_error=too_large", status_code=303)
+            "/site-settings?tab=methodology&methodology_error=too_large", status_code=303)
     try:
         document = yaml.safe_load(raw.decode("utf-8"))
     except (yaml.YAMLError, UnicodeDecodeError) as exc:
         log.warning("methodology import: parse failure: %s", exc)
         return RedirectResponse(
-            "/settings?tab=methodology&methodology_error=parse", status_code=303)
+            "/site-settings?tab=methodology&methodology_error=parse", status_code=303)
     if not isinstance(document, dict):
         return RedirectResponse(
-            "/settings?tab=methodology&methodology_error=shape", status_code=303)
+            "/site-settings?tab=methodology&methodology_error=shape", status_code=303)
     with open(_METHODOLOGY_SCHEMA_PATH, encoding="utf-8") as f:
         schema = yaml.safe_load(f)
     try:
@@ -2443,7 +2538,7 @@ async def import_methodology(request: Request,
         log.warning("methodology import: schema validation failed: %s",
                      exc.message)
         return RedirectResponse(
-            "/settings?tab=methodology&methodology_error=schema", status_code=303)
+            "/site-settings?tab=methodology&methodology_error=schema", status_code=303)
     # Canonicalize prose fields BEFORE the content-identical
     # check, so an operator who re-uploads the export they edited
     # (with different whitespace / line breaks but the same
@@ -2465,7 +2560,7 @@ async def import_methodology(request: Request,
                       "v%d; refusing to create a duplicate row",
                       _active_db_version)
             return RedirectResponse(
-                "/settings?tab=methodology&methodology_error=identical",
+                "/site-settings?tab=methodology&methodology_error=identical",
                 status_code=303)
         # Auto-bump doc.version: hone-core takes ownership of the
         # field rather than trusting the operator's value.
@@ -2478,10 +2573,10 @@ async def import_methodology(request: Request,
     log.info("methodology imported: db_version=%d doc_version=%d from=%s",
               version, document.get("version"), file.filename)
     return RedirectResponse(
-        f"/settings?tab=methodology&methodology_imported={version}", status_code=303)
+        f"/site-settings?tab=methodology&methodology_imported={version}", status_code=303)
 
 
-@router.post("/settings/tags", dependencies=[Depends(auth.require_csrf)])
+@router.post("/site-settings/tags", dependencies=[Depends(auth.require_csrf)])
 async def save_tag_filter(request: Request,
                            _: auth.SessionUser = Depends(auth.require_config_admin)):
     """Persist the list-tag gather filter — every known tag is shown as a
@@ -2492,5 +2587,5 @@ async def save_tag_filter(request: Request,
     posted = set(form.getlist("tag"))
     for row in core_db.list_tags(db):
         core_db.set_tag_enabled(db, row["tag"], row["tag"] in posted)
-    return RedirectResponse("/settings?tab=tags&saved=tags",
+    return RedirectResponse("/site-settings?tab=tags&saved=tags",
                              status_code=303)

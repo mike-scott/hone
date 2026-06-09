@@ -88,7 +88,7 @@ One mapped volume per service; the container is otherwise ephemeral.
   methodology, the work queue, the training-session state, the node
   fleet, the gather cursors.
 - `config.yaml` (`HONE_CONFIG`) — the operator-tunable runtime config
-  (see ARCHITECTURE.md → *Configuration & the Settings page*).
+  (see ARCHITECTURE.md → *Configuration & the Site-settings page*).
 - `tls/` (`HONE_CERT_DIR`) — the self-generated CA and server
   certificate, reused on every later start.
 - `methodology/` (`HONE_METHODOLOGY_DIR`) — methodology import/export
@@ -133,8 +133,8 @@ Optional knobs (e.g. `HONE_NODE_NAME`, the poll / backoff intervals,
 container via the `env_file` directive.
 
 Every other tunable lives in `config.yaml` on hone-core's data volume
-and is editable via the Settings page at runtime, no restart needed
-(see ARCHITECTURE.md → *Configuration & the Settings page*).
+and is editable via the Site-settings page at runtime, no restart needed
+(see ARCHITECTURE.md → *Configuration & the Site-settings page*).
 
 ## First start
 

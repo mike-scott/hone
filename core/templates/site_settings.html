@@ -1,7 +1,7 @@
 {% extends "base.html" %}
-{% block title %}Settings · hone-core{% endblock %}
+{% block title %}Site settings · hone-core{% endblock %}
 {% block content %}
-<h1 class="h3 mb-3">Settings</h1>
+<h1 class="h3 mb-3">Site settings</h1>
 
 {# Server-rendered tabs — the active tab comes from ?tab=... so the
    URL is bookmarkable. POST handlers redirect back with the same
@@ -19,7 +19,7 @@
     ("deployment",  "Deployment")] %}
   <li class="nav-item">
     <a class="nav-link {% if tab == t[0] %}active{% endif %}"
-       href="/settings?tab={{ t[0] }}">{{ t[1] }}</a>
+       href="/site-settings?tab={{ t[0] }}">{{ t[1] }}</a>
   </li>
   {% endfor %}
 </ul>
@@ -32,7 +32,7 @@
   {% if saved_settings %}
   <div class="alert alert-success" style="max-width: 40rem">Settings saved.</div>
   {% endif %}
-  <form method="post" action="/settings" style="max-width: 40rem">
+  <form method="post" action="/site-settings" style="max-width: 40rem">
     {{ csrf_field(request) }}
     <input type="hidden" name="_group" value="{{ target_group }}">
     {% for group, fields in groups %}
@@ -83,7 +83,7 @@
   new list-tag or right after the lore archive lands. Sources already
   mid-cycle are unaffected.
 </p>
-<form method="post" action="/settings/gather/trigger" class="mb-3">
+<form method="post" action="/site-settings/gather/trigger" class="mb-3">
   {{ csrf_field(request) }}
   <button class="btn btn-outline-primary">
     <i class="bi bi-play-circle me-1"></i>Trigger gather now
@@ -168,7 +168,7 @@
   {% endif %}
 </div>
 
-<form method="post" action="/settings/methodology/import"
+<form method="post" action="/site-settings/methodology/import"
       enctype="multipart/form-data"
       data-confirm="Replace the active methodology with the uploaded YAML? In-flight claims keep their pinned version; new claims use the new one."
       style="max-width: 40rem">
@@ -199,7 +199,7 @@
 {% endif %}
 
 {% if tags %}
-<form method="post" action="/settings/tags" style="max-width: 40rem">
+<form method="post" action="/site-settings/tags" style="max-width: 40rem">
   {{ csrf_field(request) }}
   <table class="table table-sm align-middle">
     <thead>

@@ -77,8 +77,10 @@
           <a class="nav-link" href="#" id="theme-toggle" role="button"
              aria-label="Toggle light/dark theme"><i class="bi"></i></a>
         </li>
-        {# User menu — shows the logged-in account name; admins also get
-           links to the Users and Settings pages (both admin-only). #}
+        {# User menu — shows the logged-in account name. Admins get links
+           to the Users and Site-settings pages (both admin-only); every
+           DB-backed account gets User settings (the config-token admin
+           has no users row, so nothing to edit there). #}
         {% if current_user is defined and current_user %}
         <li class="nav-item dropdown ms-2">
           <a class="nav-link dropdown-toggle d-flex align-items-center gap-1"
@@ -94,11 +96,18 @@
               </a>
             </li>
             <li>
-              <a class="dropdown-item" href="/settings">
-                <i class="bi bi-gear me-1"></i>Settings
+              <a class="dropdown-item" href="/site-settings">
+                <i class="bi bi-sliders me-1"></i>Site settings
               </a>
             </li>
             <li><hr class="dropdown-divider"></li>
+            {% endif %}
+            {% if current_user.id is not none %}
+            <li>
+              <a class="dropdown-item" href="/user-settings">
+                <i class="bi bi-gear me-1"></i>User settings
+              </a>
+            </li>
             {% endif %}
             <li>
               <a class="dropdown-item" href="/logout">

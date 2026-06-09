@@ -133,7 +133,8 @@ the node's owner — plus your pending-enrollment pairing queue),
 **Enroll** (the verification URL a node prints on startup; the first
 user to look a code up pairs the node to themselves),
 **Sessions** (training-session list and live session-draft composer),
-**Settings** (admin-only: runtime config + list-tag gather filter), and the
+**Site settings** (admin-only: runtime config + list-tag gather filter),
+**User settings** (the account's own profile), and the
 **merge gate** (planned) for dispositioning methodology proposals — the
 human ratification step for any methodology change, deliberately kept
 out of the node-facing API. See

@@ -251,8 +251,8 @@ operator's **list-tag filter** decides which lists are in scope:
 - The lore manifest seeds the `list_tags` table with the universe of known
   lists (origin = `manifest`). A list a patchset is observed on but is not
   in the manifest is added (origin = `observed`) — the operator sees it on
-  the Settings page and can enable it.
-- The operator ticks the lists they want gathered (Settings → *List-tag
+  the Site-settings page and can enable it.
+- The operator ticks the lists they want gathered (Site settings → *List-tag
   filter*). The enabled set is the filter; a `PatchsetRef` whose tags do
   **not** intersect the enabled set is recorded with state `skipped` and
   `skip_reason=tag-not-enabled` — never reviewed, never re-offered.

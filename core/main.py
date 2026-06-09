@@ -88,13 +88,13 @@ async def lifespan(app: FastAPI):
     # the same `clone` helper in the background on startup, so gather
     # picks the archive up on the next supervisor tick.
     # Lore-clone status — published by the autoclone task, polled by the
-    # Settings page partial (`core.ui /settings/lore-clone-status`). The
+    # Site-settings page partial (`core.ui /site-settings/lore-clone-status`). The
     # initial snapshot reflects what's on disk; the autoclone path mutates
     # it as the clone runs. In-memory: a restart starts fresh (and re-runs
     # autoclone if the env var is still set).
     app.state.lore_clone = _initial_lore_status()
     # The Settings "Provision now" button calls this to kick off a clone
-    # without a restart (ui.py POST /settings/lore-clone). Stored on
+    # without a restart (ui.py POST /site-settings/lore-clone). Stored on
     # app.state so the router needn't import main (avoids a cycle).
     app.state.lore_clone_task = None
     app.state.trigger_lore_clone = lambda: trigger_lore_clone(app)
@@ -150,7 +150,7 @@ def _initial_lore_status() -> dict:
 
 async def _run_lore_clone(app: FastAPI):
     """Run `clone_all` in a worker thread, publishing progress to
-       `app.state.lore_clone` for the Settings page and a periodic heartbeat
+       `app.state.lore_clone` for the Site-settings page and a periodic heartbeat
        to the log (git's own progress lines flow through via lore's Popen
        reader + `--progress`). Shared by the startup autoclone and the
        Settings 'Provision now' button. On completion the phase is decided

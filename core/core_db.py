@@ -3131,6 +3131,26 @@ def set_user_state(db, user_id, state):
     db.commit()
 
 
+def set_user_display_name(db, user_id, display_name):
+    """Update a user's display name (the User-settings profile form).
+       Returns True when a row was updated."""
+    cur = db.execute(
+        "UPDATE users SET display_name = ? WHERE id = ?",
+        (display_name, user_id))
+    db.commit()
+    return cur.rowcount > 0
+
+
+def set_user_password_hash(db, user_id, password_hash):
+    """Replace a user's Argon2 password hash (the User-settings
+       change-password form). Returns True when a row was updated."""
+    cur = db.execute(
+        "UPDATE users SET password_hash = ? WHERE id = ?",
+        (password_hash, user_id))
+    db.commit()
+    return cur.rowcount > 0
+
+
 def set_user_admin(db, user_id, is_admin):
     """Flip a user's `is_admin` grant (0 or 1). Returns True when a row
        was updated. Takes effect on the user's next request —

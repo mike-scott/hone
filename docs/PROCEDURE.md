@@ -32,7 +32,7 @@ and hone-core runs the same clone in a background task on startup.
 Gather picks up the archive on the next supervisor tick either way —
 no restart needed.
 
-After the archive is in place, open the Settings page and **enable the
+After the archive is in place, open the Site-settings page and **enable the
 list tags** you want gathered. Without any tag enabled the filter is
 off and every list is in scope — useful for an experiment, but real
 triage means ticking the lists you care about.
@@ -192,7 +192,7 @@ enough evidence that statistical confirmation is the next step
 
 ## Tuning runtime config
 
-The Settings page edits runtime config without a restart. It is
+The Site-settings page edits runtime config without a restart. It is
 admin-only, reached from the admin section of the user menu — sign in
 with the config admin token, or as an account granted admin from the
 Users screen. The knobs most commonly touched, and the symptom each
@@ -222,7 +222,7 @@ are tunable but rarely changed.
 | Symptom | Likely cause | First check |
 |---|---|---|
 | Patchsets gathered/prepared but no reviews | Review is operator-triggered, not automatic | Request a review from the patchset detail page (prepare must be complete) |
-| Patchsets not gathering at all | List-tag filter has no enabled tags matching | Settings → enable relevant list tags |
+| Patchsets not gathering at all | List-tag filter has no enabled tags matching | Site settings → enable relevant list tags |
 | Reviews enqueued but stuck at `claimable` | No nodes accepting `review` work | Node health; node's declared `task_types` |
 | "Request review" button stays dimmed | Prepare not yet complete for the patchset | Prepare node logs and `task_types` |
 | Many `unappliable` outcomes | Patch reconstruction issue or wrong list scope | Spot-check `unappliable` records' `reason` fields |

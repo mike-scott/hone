@@ -277,9 +277,9 @@ def test_login_page_redirect_honours_next_param(ctx):
     _plant_user(ctx, email="alice@example.com", state="approved")
     _post_login(ctx, email="alice@example.com",
                 password="correct-horse-battery-staple")
-    r = ctx.client.get("/login?next=/settings")
+    r = ctx.client.get("/login?next=/site-settings")
     assert r.status_code == 303
-    assert r.headers["Location"] == "/settings"
+    assert r.headers["Location"] == "/site-settings"
 
 
 def test_login_page_redirect_rejects_offsite_next(ctx):

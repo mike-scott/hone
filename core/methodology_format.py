@@ -3,7 +3,7 @@
 A single normalizer that gets called at every write boundary that
 touches a methodology document:
 
-  - the operator import endpoint (POST /settings/methodology/import),
+  - the operator import endpoint (POST /site-settings/methodology/import),
   - any future "accept methodology proposal" path emitted by the
     autonomous draft flow,
   - the export endpoint (defensive — covers DB rows that pre-date

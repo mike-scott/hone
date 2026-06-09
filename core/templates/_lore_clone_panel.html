@@ -3,7 +3,7 @@
    the swap target; its id stays stable across phases. #}
 <div id="lore-clone-panel"
      {% if lore_clone.phase == "cloning" %}
-       hx-get="/settings/lore-clone-status"
+       hx-get="/site-settings/lore-clone-status"
        hx-trigger="every 5s"
        hx-swap="outerHTML"
      {% endif %}>
@@ -56,7 +56,7 @@
       <div class="small mt-1"><code>{{ lore_clone.error }}</code></div>
       <div class="text-muted small mt-2">{{ lore_clone.help }}</div>
       <button class="btn btn-sm btn-outline-danger mt-2" type="button"
-              hx-post="/settings/lore-clone"
+              hx-post="/site-settings/lore-clone"
               hx-target="#lore-clone-panel" hx-swap="outerHTML">
         <i class="bi bi-arrow-clockwise me-1"></i>Retry
       </button>
@@ -69,7 +69,7 @@
       is provisioned.
       <div class="mt-2">
         <button class="btn btn-sm btn-primary" type="button"
-                hx-post="/settings/lore-clone"
+                hx-post="/site-settings/lore-clone"
                 hx-target="#lore-clone-panel" hx-swap="outerHTML">
           <i class="bi bi-cloud-download me-1"></i>Provision now
         </button>

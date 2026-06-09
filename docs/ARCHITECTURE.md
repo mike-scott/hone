@@ -184,11 +184,15 @@ Pages:
   complete, analysed) and the **session-draft page** (`/sessions/draft`)
   where an operator composes a new session against a corpus snapshot. See
   *Training sessions* below.
-- **Settings** (`/settings`) — view the deployment configuration and edit
+- **Site settings** (`/site-settings`) — view the deployment configuration and edit
   the operator-tunable runtime config (`config.yaml`) **plus the list-tag
-  gather filter** (see *Configuration & the Settings page* and `SOURCES.md`
-  → *List-tag filter*). Config-token admin only; it lives in the admin
-  section of the user menu, not the page nav.
+  gather filter** (see *Configuration & the Site-settings page* and `SOURCES.md`
+  → *List-tag filter*). Admin only; it lives in the admin section of the
+  user menu, not the page nav.
+- **User settings** (`/user-settings`) — the logged-in account's own page,
+  in the user menu for every DB-backed account: display name, and password
+  change for local-provider accounts. The config-token admin has no
+  account, so the page shows a notice instead of forms.
 - **Merge gate** — disposition the `methodology_proposals` queue (see *The
   merge gate*). Planned; not yet implemented.
 - Reporting pages — later. (The patchset and work-item detail views are
@@ -207,22 +211,22 @@ clone and task scratch and starts empty (the node self-populates it).
 The concrete volume contract — paths, env vars, contents — is in
 `DEPLOYMENT.md` → *Volume contract*.
 
-## Configuration & the Settings page
+## Configuration & the Site-settings page
 
 hone-core's configuration is in two tiers; the operator web UI's
-**Settings** page is the surface for the second.
+**Site-settings** page is the surface for the second.
 
 **Deployment configuration** — environment variables set at container
 start (secrets, hostname / port, data-volume paths). The full
 deployment env-var contract is in `DEPLOYMENT.md` → *Env-var contract*.
 Changing any of these is a **redeploy**, not a UI action — the
-Settings page shows them **read-only** (secrets masked), for reference
+Site-settings page shows them **read-only** (secrets masked), for reference
 only.
 
 **Operator-tunable configuration** — the cadences, lifetimes, thresholds,
 and statistical parameters an operator may adjust on a running instance.
 These live in a YAML file on the data volume, `HONE_CONFIG` (default
-`/data/config.yaml`), which the Settings page **edits**:
+`/data/config.yaml`), which the Site-settings page **edits**:
 
 ```yaml
 # /data/config.yaml — hone-core operator-tunable settings
@@ -263,7 +267,7 @@ statistics:
 `config.yaml` exists, hone-core writes one from the defaults — an env var
 for a tunable key, if set, seeds that key (a convenience for
 infrastructure-as-code). Thereafter **`config.yaml` is authoritative**: the
-Settings page is the way to change a tunable, and an operator's edit is
+Site-settings page is the way to change a tunable, and an operator's edit is
 never silently overridden by a stale env var.
 
 | Group | Setting | Default |
@@ -318,7 +322,7 @@ empirically against observed false-positive rates over the first
 several operational windows before treating them as stable.
 
 **Applying a change.** hone-core holds the resolved config in memory;
-saving the Settings form validates the inputs, writes `config.yaml`, and
+saving the Site-settings form validates the inputs, writes `config.yaml`, and
 updates the in-memory copy. A setting consulted per operation (the claim
 lease, the token TTLs) takes effect on the next operation; one consulted by
 a long-running task (the GATHER cadence) takes effect on that task's next
@@ -331,7 +335,7 @@ invalid input (a non-positive interval, an unknown gather source) is
 rejected with the field flagged and `config.yaml` left untouched. A
 separate read-only panel lists the deployment configuration.
 
-**Authentication.** The Settings page **mutates** hone-core's behaviour
+**Authentication.** The Site-settings page **mutates** hone-core's behaviour
 for every user, so it is **admin-only**. The whole operator UI is gated
 by session-based login (`core/auth.py`): email/password (Argon2id) or
 Google SSO, with an admin-approval gate for self-registered accounts.
@@ -340,12 +344,15 @@ The configured `HONE_ADMIN_TOKEN` is the bootstrap admin identity (no
 account from the Users screen (`users.is_admin` — re-derived from the
 row on every request, so a demotion takes effect on the target's next
 request, exactly like revocation). The admin surfaces — user management
-and Settings — sit in the admin section of the user menu.
+and Site settings — sit in the admin section of the user menu;
+every DB-backed account additionally gets a **User settings** page
+(`/user-settings`: display name, password change for local accounts)
+in the same menu.
 
 **Not in scope here.** Methodology import/export (export the DB methodology
 to YAML, re-import an edited one — see *Methodology storage*) is operator
 configuration of a different kind; it may be surfaced on or beside the
-Settings page, but the YAML methodology is not part of `config.yaml`.
+Site-settings page, but the YAML methodology is not part of `config.yaml`.
 
 ## Data model
 
@@ -1000,7 +1007,8 @@ hone-core:
   `…/heartbeat`, `…/release`, `…/result`, and the compiled methodology
   slice.
 - `core/ui.py` + `core/templates/` + `core/static/` — the server-rendered
-  operator UI (Queue, Nodes, Enroll, Settings, patchset and work-item
+  operator UI (Queue, Nodes, Enroll, Site settings, User settings,
+  patchset and work-item
   detail) on vendored AdminLTE / Bootstrap / HTMX assets, gated by the
   session-based login (`core/auth.py` — email/password Argon2id or Google
   SSO, admin-approval for self-registered accounts, the config-token

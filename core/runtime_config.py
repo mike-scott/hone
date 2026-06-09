@@ -3,10 +3,10 @@
 The settings an operator may change on a running instance — Gather cadence,
 claim lease, token lifetimes, the merge-gate redraft cap. They live in a YAML
 file on the data volume (config.py's `config_path` / HONE_CONFIG, default
-/data/config.yaml); the operator web UI's Settings page edits them; they apply
+/data/config.yaml); the operator web UI's Site-settings page edits them; they apply
 without a restart. Distinct from config.py, which holds the deployment
 configuration (env vars: secrets, TLS, ports, paths). See ARCHITECTURE.md →
-Configuration & the Settings page.
+Configuration & the Site-settings page.
 """
 import copy
 import logging
@@ -64,7 +64,7 @@ _ENV_SEEDS = {
 }
 
 
-# Settings-form schema — drives the operator UI's Settings page and the
+# Settings-form schema — drives the operator UI's Site-settings page and the
 # validation of a submission. `kind`: "int" (a positive integer), "int0"
 # (>= 0), "float01" (a 0..1 ratio), "sources" (a toggle per installed
 # gather module).
@@ -142,7 +142,7 @@ class RuntimeConfig:
         return self._data["merge_gate"]["defer_growth_factor"]
 
     def as_dict(self):
-        """A deep copy of the nested config — for the Settings page / export."""
+        """A deep copy of the nested config — for the Site-settings page / export."""
         return copy.deepcopy(self._data)
 
 
@@ -211,7 +211,7 @@ def load(path, all_sources=None):
 
 
 def save(path, runtime_config):
-    """Persist a RuntimeConfig to `path` — the Settings page calls this."""
+    """Persist a RuntimeConfig to `path` — the Site-settings page calls this."""
     _write(path, runtime_config.as_dict())
 
 

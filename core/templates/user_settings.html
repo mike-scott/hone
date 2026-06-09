@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+{% block title %}User settings · hone-core{% endblock %}
+{% block content %}
+<h1 class="h3 mb-3">User settings</h1>
+
+{% if account is none %}
+<div class="alert alert-info" style="max-width: 40rem">
+  The config-token admin has no user account — there is nothing to edit
+  here. Sign in with a regular account to manage its settings.
+</div>
+{% else %}
+
+<div class="card mb-4" style="max-width: 40rem">
+  <div class="card-header fw-semibold">
+    <i class="bi bi-person me-1"></i>Account
+  </div>
+  <div class="card-body">
+    <dl class="row mb-0 small">
+      <dt class="col-sm-3">Email</dt>
+      <dd class="col-sm-9">{{ account.email }}</dd>
+      <dt class="col-sm-3">Sign-in</dt>
+      <dd class="col-sm-9">
+        <span class="badge text-bg-secondary">{{ account.auth_provider }}</span>
+      </dd>
+      <dt class="col-sm-3">Member since</dt>
+      <dd class="col-sm-9 mb-0">{{ when(account.created_at) }}</dd>
+    </dl>
+  </div>
+</div>
+
+<div class="card mb-4" style="max-width: 40rem">
+  <div class="card-header fw-semibold">
+    <i class="bi bi-card-text me-1"></i>Profile
+  </div>
+  <div class="card-body">
+    {% if profile_saved %}
+    <div class="alert alert-success py-2">Display name updated.</div>
+    {% endif %}
+    {% if profile_error %}
+    <div class="alert alert-danger py-2">{{ profile_error }}</div>
+    {% endif %}
+    <form method="post" action="/user-settings/profile">
+      {{ csrf_field(request) }}
+      <label for="display_name" class="form-label small">Display name</label>
+      <div class="d-flex">
+        <input type="text" id="display_name" name="display_name"
+               class="form-control form-control-sm me-2"
+               style="max-width: 22em"
+               value="{{ account.display_name or '' }}">
+        <button class="btn btn-sm btn-primary">Save</button>
+      </div>
+      <div class="form-text">Shown in the navbar.</div>
+    </form>
+  </div>
+</div>
+
+{% if is_local %}
+<div class="card mb-4" style="max-width: 40rem">
+  <div class="card-header fw-semibold">
+    <i class="bi bi-key me-1"></i>Change password
+  </div>
+  <div class="card-body">
+    {% if password_saved %}
+    <div class="alert alert-success py-2">Password changed.</div>
+    {% endif %}
+    {% if password_error %}
+    <div class="alert alert-danger py-2">{{ password_error }}</div>
+    {% endif %}
+    <form method="post" action="/user-settings/password"
+          style="max-width: 24em">
+      {{ csrf_field(request) }}
+      <div class="mb-2">
+        <label for="current_password" class="form-label small">
+          Current password</label>
+        <input type="password" id="current_password" name="current_password"
+               class="form-control form-control-sm"
+               autocomplete="current-password" required>
+      </div>
+      <div class="mb-2">
+        <label for="new_password" class="form-label small">New password</label>
+        <input type="password" id="new_password" name="new_password"
+               class="form-control form-control-sm"
+               autocomplete="new-password" minlength="10" required>
+        <div class="form-text">At least 10 characters.</div>
+      </div>
+      <div class="mb-3">
+        <label for="confirm_password" class="form-label small">
+          Confirm new password</label>
+        <input type="password" id="confirm_password" name="confirm_password"
+               class="form-control form-control-sm"
+               autocomplete="new-password" required>
+      </div>
+      <button class="btn btn-sm btn-primary">Change password</button>
+    </form>
+  </div>
+</div>
+{% else %}
+<div class="text-muted small" style="max-width: 40rem">
+  This account signs in via Google — there is no hone-core password to
+  change.
+</div>
+{% endif %}
+
+{% endif %}
+{% endblock %}

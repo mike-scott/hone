@@ -3,7 +3,7 @@
 The settings here are fixed for the lifetime of a container: secrets, the TLS
 identity, the listen port, and the data-volume paths. The operator-tunable
 settings (GATHER cadence, token lifetimes, ...) are separate — see
-runtime_config.py and ARCHITECTURE.md → Configuration & the Settings page."""
+runtime_config.py and ARCHITECTURE.md → Configuration & the Site-settings page."""
 import os
 from dataclasses import dataclass
 

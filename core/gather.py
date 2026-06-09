@@ -91,7 +91,7 @@ def _ingest_ref(db, module, ref):
             core_db.mark_skipped(db, ref.root_message_id, ref.skip_reason,
                                  subject=ref.subject)
             return "skipped"
-        # Operator's list-tag filter (Settings page): when the operator has
+        # Operator's list-tag filter (Site-settings page): when the operator has
         # enabled any tags, patchsets whose tags don't intersect the set are
         # recorded as skipped instead of fully ingested. An empty enabled
         # set means no filter (gather everything the modules surface).
@@ -250,7 +250,7 @@ def _plan_tick(reg, now, enabled, interval, stall_after, *,
        stalled tasks to cancel.
 
        `trigger_now=True` bypasses the per-source interval check — the
-       operator's "Gather now" button (Settings page) sets it to fire every
+       operator's "Gather now" button (Site-settings page) sets it to fire every
        idle source on the next tick regardless of when each was last
        spawned. Sources mid-cycle are unaffected (the supervisor never
        preempts a running cycle); they'll re-spawn on their normal cadence
@@ -274,7 +274,7 @@ async def gather_supervisor(app):
     """Spawn and supervise one gather task per enabled source until
        cancelled. The enabled set and the spawn interval are re-read from
        the live runtime config, so a Settings change applies without a
-       restart. The operator's "Gather now" button (Settings page)
+       restart. The operator's "Gather now" button (Site-settings page)
        `set()`s `app.state.gather_trigger` to wake the supervisor early
        and fire every idle source on the next tick regardless of cadence."""
     reg = _Registry()
