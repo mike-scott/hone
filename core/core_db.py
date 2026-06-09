@@ -1921,19 +1921,25 @@ def reclaim_expired(db):
     return w, d
 
 
-def work_item_counts(db):
+def work_item_counts(db, *, requested_by_user_id=None):
     """Counts per (type, state), zero-filled across every state. Returns a
-       dict {type: {state: n}}."""
+       dict {type: {state: n}}. `requested_by_user_id` scopes to one
+       user's items (the non-admin queue view); None counts everything."""
     counts = {t: {s: 0 for s in WORK_ITEM_STATE_NAMES}
               for t in WORK_ITEM_TYPE_NAMES}
-    for row in db.execute(
-            "SELECT type, state, COUNT(*) AS n FROM work_items "
-            "GROUP BY type, state"):
+    sql = "SELECT type, state, COUNT(*) AS n FROM work_items "
+    params = ()
+    if requested_by_user_id is not None:
+        sql += "WHERE requested_by_user_id=? "
+        params = (requested_by_user_id,)
+    sql += "GROUP BY type, state"
+    for row in db.execute(sql, params):
         counts[row["type"]][row["state"]] = row["n"]
     return counts
 
 
-def list_work_items(db, *, type=None, state=None, limit=200, offset=0):
+def list_work_items(db, *, type=None, state=None, requested_by_user_id=None,
+                    limit=200, offset=0):
     """The work queue joined with patchset metadata — sorted by most-recent
        activity, so any state change (enqueue → claim → complete) bubbles
        the row to the top. The sort key is COALESCE(completed_at,
@@ -1946,12 +1952,13 @@ def list_work_items(db, *, type=None, state=None, limit=200, offset=0):
        queue is always visible at the top, instead of buried under newer
        work that the FIFO claim picker hasn't reached yet.
 
-       Optionally filtered by type and/or state. `offset` skips that
-       many rows (page 2 of size 50 = offset 50). Pairs with
+       Optionally filtered by type and/or state; `requested_by_user_id`
+       scopes to one user's items (the non-admin queue view). `offset`
+       skips that many rows (page 2 of size 50 = offset 50). Pairs with
        `count_work_items` for the UI's pagination."""
     sql = ("SELECT w.id, w.type, w.state, w.root_message_id, w.message_id, "
            "w.claimed_by, w.claimed_at, w.completed_at, w.enqueued_at, "
-           "p.subject "
+           "w.requested_by_user_id, p.subject "
            "FROM work_items w "
            "LEFT JOIN patchsets p ON p.root_message_id=w.root_message_id ")
     params = []
@@ -1962,6 +1969,9 @@ def list_work_items(db, *, type=None, state=None, limit=200, offset=0):
     if state is not None:
         where.append("w.state=?")
         params.append(state)
+    if requested_by_user_id is not None:
+        where.append("w.requested_by_user_id=?")
+        params.append(requested_by_user_id)
     if where:
         sql += "WHERE " + " AND ".join(where) + " "
     sql += ("ORDER BY "
@@ -1971,7 +1981,7 @@ def list_work_items(db, *, type=None, state=None, limit=200, offset=0):
     return [dict(r) for r in db.execute(sql, params)]
 
 
-def queue_version(db, *, type=None, state=None):
+def queue_version(db, *, type=None, state=None, requested_by_user_id=None):
     """A short, monotone token for the filtered queue's current activity
        state — two reads return the same value iff no row has appeared,
        transitioned state, been claimed, or completed in between.
@@ -2003,6 +2013,9 @@ def queue_version(db, *, type=None, state=None):
         where.append("type=?"); params.append(type)
     if state is not None:
         where.append("state=?"); params.append(state)
+    if requested_by_user_id is not None:
+        where.append("requested_by_user_id=?")
+        params.append(requested_by_user_id)
     if where:
         sql += " WHERE " + " AND ".join(where)
     r = db.execute(sql, params).fetchone()
@@ -2093,7 +2106,7 @@ def work_items_for_patchset(db, root_message_id):
     return [dict(r) for r in rows]
 
 
-def count_work_items(db, *, type=None, state=None):
+def count_work_items(db, *, type=None, state=None, requested_by_user_id=None):
     """Total rows in `work_items` under the same filter `list_work_items`
        takes. The UI calls this to size the queue page's pagination
        (page X of Y, the page-number window)."""
@@ -2103,6 +2116,9 @@ def count_work_items(db, *, type=None, state=None):
         where.append("type=?"); params.append(type)
     if state is not None:
         where.append("state=?"); params.append(state)
+    if requested_by_user_id is not None:
+        where.append("requested_by_user_id=?")
+        params.append(requested_by_user_id)
     if where:
         sql += " WHERE " + " AND ".join(where)
     return db.execute(sql, params).fetchone()["n"]

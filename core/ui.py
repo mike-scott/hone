@@ -711,9 +711,22 @@ def _page_window(current, pages, radius=2):
     return list(range(lo, hi + 1))
 
 
-def _queue_view(db, type, state, page, size):
+def _queue_scope_user_id(current_user):
+    """The queue's visibility scope: admins (config-token or granted)
+       see every work item; a regular user sees only the items they
+       requested. Returns the user id to filter on, or None for the
+       unscoped admin view."""
+    if current_user is None or current_user.is_config_admin:
+        return None
+    return current_user.id
+
+
+def _queue_view(db, type, state, page, size, current_user=None):
     """Build the queue page's render context — items, chips, paging info.
-       Shared by the full-page `GET /` and the HTMX partial swap."""
+       Shared by the full-page `GET /queue` and the HTMX partial swap.
+       Scoped by _queue_scope_user_id: chips, counts, paging, and rows
+       all describe the same visible subset."""
+    scope_user_id = _queue_scope_user_id(current_user)
     type_int  = _WORK_TYPE_BY_NAME.get(type)
     state_int = _WORK_STATE_BY_NAME.get(state)
     if type_int is None:
@@ -721,7 +734,8 @@ def _queue_view(db, type, state, page, size):
     if state_int is None:
         state = None
 
-    counts = core_db.work_item_counts(db)         # {type_int: {state_int: n}}
+    counts = core_db.work_item_counts(             # {type_int: {state_int: n}}
+        db, requested_by_user_id=scope_user_id)
     type_totals = {core_db.WORK_ITEM_TYPE_NAMES[t]: sum(by_state.values())
                    for t, by_state in counts.items()}
     if type_int is None:
@@ -736,8 +750,9 @@ def _queue_view(db, type, state, page, size):
 
     # Paginate: clamp size to the allowed set, then page to [1, pages].
     size = size if size in _PAGE_SIZES else _DEFAULT_PAGE_SIZE
-    filtered_total = core_db.count_work_items(db, type=type_int,
-                                                state=state_int)
+    filtered_total = core_db.count_work_items(
+        db, type=type_int, state=state_int,
+        requested_by_user_id=scope_user_id)
     pages = max(1, -(-filtered_total // size))    # ceil division
     page = max(1, min(page or 1, pages))
     offset = (page - 1) * size
@@ -748,8 +763,10 @@ def _queue_view(db, type, state, page, size):
                            page=page if page > 1 else None, size=size)
     back_qs = "?back=" + quote(this_url, safe="")
 
+    owner_emails = _owner_email_map(db)
     items = []
     for w in core_db.list_work_items(db, type=type_int, state=state_int,
+                                       requested_by_user_id=scope_user_id,
                                        limit=size, offset=offset):
         type_name  = core_db.WORK_ITEM_TYPE_NAMES.get(w["type"], "?")
         state_name = core_db.WORK_ITEM_STATE_NAMES.get(w["state"], "?")
@@ -767,7 +784,10 @@ def _queue_view(db, type, state, page, size):
             # further click from inside the work-item header.
             "detail_url":     f"/work-items/{w['id']}{back_qs}",
             "claimed_by":     w["claimed_by"],
-            "enqueued_display": _when(w["enqueued_at"]),
+            "origin_email":   owner_emails.get(w["requested_by_user_id"]),
+            "enqueued_display":  _when(w["enqueued_at"]),
+            "started_display":   _when(w["claimed_at"]),
+            "completed_display": _when(w["completed_at"]),
         })
 
     type_chips = [{"label": "All",
@@ -1019,6 +1039,11 @@ async def queue(request: Request,
        page the listing (page is 1-indexed; size is clamped to one of
        _PAGE_SIZES — defaults to 25).
 
+       Visibility is scoped: admins see the whole queue; a regular user
+       sees only the items they requested (chips, counts, paging, and
+       the poll version all describe that same subset — see
+       _queue_scope_user_id).
+
        Auto-poll short-circuit: the #queue-pane wrapper echoes the
        last-known `X-Queue-Version` on every HTMX request. When it
        matches the current filtered queue's version, we return 204 No
@@ -1040,7 +1065,8 @@ async def queue(request: Request,
                      and request.headers.get("hx-trigger") == "queue-pane")
     version = core_db.queue_version(
         db, type=_WORK_TYPE_BY_NAME.get(type),
-        state=_WORK_STATE_BY_NAME.get(state))
+        state=_WORK_STATE_BY_NAME.get(state),
+        requested_by_user_id=_queue_scope_user_id(current_user))
     if is_auto_poll and request.headers.get("x-queue-version") == version:
         # Idle poll: the operator's open page already shows the
         # latest state. Logged at DEBUG so the per-operator,
@@ -1050,7 +1076,8 @@ async def queue(request: Request,
         log.debug("queue poll 204 — version unchanged (%s)", version)
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
-    ctx = _queue_view(db, type, state, page, size)
+    ctx = _queue_view(db, type, state, page, size,
+                      current_user=current_user)
     ctx["queue_version"] = version
     ctx["current_user"] = current_user
     # HTMX swap requests (pagination + the auto-poll wrapper) get just

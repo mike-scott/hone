@@ -83,13 +83,16 @@ Default `task_types` when none declared:
 
 ## Watching the queue
 
-The home page (`/`) shows the work queue with a two-axis chip filter —
-type (prepare / review / train / draft) × state (claimable / claimed /
-completed / unappliable / deferred). State is a lifecycle class, not a
-task-type outcome — every successful outcome (`prepared` / `reviewed` /
-`trained` / `drafted`) lands on `completed`. The queue self-heals: a
-claim without a heartbeat reclaims when the lease elapses; a node that
-goes down has its work re-offered automatically.
+The queue page (`/queue`) shows the work queue with a two-axis chip
+filter — type (prepare / review / train / draft) × state (claimable /
+claimed / completed / unappliable / deferred), plus each item's origin
+(the requesting user, or system) and its enqueued / started / completed
+times. Visibility is scoped: an admin sees the whole queue; a regular
+user sees only the items they requested. State is a lifecycle class,
+not a task-type outcome — every successful outcome (`prepared` /
+`reviewed` / `trained` / `drafted`) lands on `completed`. The queue
+self-heals: a claim without a heartbeat reclaims when the lease
+elapses; a node that goes down has its work re-offered automatically.
 
 **Normal**: items flow claimable → claimed → completed. Occasional
 `unappliable` outcomes (patch doesn't apply to its declared base —

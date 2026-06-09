@@ -18,7 +18,8 @@
   <table class="table table-sm table-hover align-middle">
     <thead>
       <tr><th>Patchset / message</th><th>Type</th><th>Work state</th>
-          <th>Worker</th><th>Enqueued</th></tr>
+          <th>Worker</th><th>Origin</th><th>Enqueued</th>
+          <th>Started</th><th>Completed</th></tr>
     </thead>
     <tbody>
     {% for w in items %}
@@ -35,7 +36,16 @@
         <td><span class="badge {{ w.type_badge }}">{{ w.type }}</span></td>
         <td><span class="badge {{ w.state_badge }}">{{ w.state }}</span></td>
         <td>{{ w.claimed_by or "—" }}</td>
+        <td class="small">
+          {% if w.origin_email %}
+            <code>{{ w.origin_email }}</code>
+          {% else %}
+            <span class="text-muted">system</span>
+          {% endif %}
+        </td>
         <td class="text-nowrap">{{ w.enqueued_display }}</td>
+        <td class="text-nowrap">{{ w.started_display }}</td>
+        <td class="text-nowrap">{{ w.completed_display }}</td>
       </tr>
     {% endfor %}
     </tbody>

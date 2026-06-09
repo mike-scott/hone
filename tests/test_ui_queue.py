@@ -446,3 +446,91 @@ def test_queue_paging_bar_select_has_no_duplicate_id(ctx):
     _seed_n_reviews(ctx.db, 75)
     body = ctx.client.get("/queue").text
     assert 'id="page-size"' not in body
+
+
+# --- origin column + per-user visibility scoping ---------------------------
+
+def _enqueue_user_review(db, root, subject, uid):
+    """A review work-item stamped with `uid` as its origin — the shape
+       the Request-review button creates for a regular user."""
+    core_db.upsert_patchset(db, root, subject=subject, n_patches=1)
+    _plant_metadata(db, root)
+    return core_db.enqueue_review(db, root, requested_by_user_id=uid)
+
+
+def _regular_client(ctx, uid, email):
+    """A second app over the same DB, pinned to a regular (non-admin)
+       session user — the scoped queue view."""
+    from core import auth
+    app = FastAPI()
+    app.include_router(ui.router)
+    user = auth.SessionUser(id=uid, email=email, display_name=email,
+                            is_config_admin=False)
+    app.dependency_overrides[auth.require_session] = lambda: user
+    app.dependency_overrides[auth.require_csrf] = lambda: None
+    app.state.db = ctx.db
+    return TestClient(app)
+
+
+def test_queue_shows_origin_started_completed_columns(ctx):
+    """Admin view: the Origin column carries the requester's email for a
+       user item and 'system' for a system item; Started / Completed ride
+       after Enqueued."""
+    uid = core_db.create_user(ctx.db, "alice@x", "alice", "local")
+    _enqueue_review(ctx.db, "<r1@x>", "system review")
+    _enqueue_user_review(ctx.db, "<r2@x>", "alice review", uid)
+    body = ctx.client.get("/queue").text
+    assert ">Origin<" in body and ">Started<" in body \
+        and ">Completed<" in body
+    assert "alice@x" in body
+    assert ">system<" in body
+
+
+def test_queue_scopes_a_regular_user_to_their_own_items(ctx):
+    """A non-admin sees only the items they requested — not system items,
+       not another user's — and the chip counts describe the same subset."""
+    alice = core_db.create_user(ctx.db, "alice@x", "alice", "local")
+    bob = core_db.create_user(ctx.db, "bob@x", "bob", "local")
+    _enqueue_review(ctx.db, "<r1@x>", "system review")
+    _enqueue_user_review(ctx.db, "<r2@x>", "alice review", alice)
+    _enqueue_user_review(ctx.db, "<r3@x>", "bob review", bob)
+
+    body = _regular_client(ctx, alice, "alice@x").get("/queue").text
+    assert "alice review" in body
+    assert "system review" not in body
+    assert "bob review" not in body
+
+    # The admin keeps the unscoped view.
+    body = ctx.client.get("/queue").text
+    assert "system review" in body and "alice review" in body \
+        and "bob review" in body
+
+
+def test_list_and_count_work_items_scope_by_requester(ctx):
+    """The DB layer's requested_by_user_id filter — the primitive the
+       scoped queue view rides on."""
+    alice = core_db.create_user(ctx.db, "alice@x", "alice", "local")
+    _enqueue_review(ctx.db, "<r1@x>", "system review")
+    _enqueue_user_review(ctx.db, "<r2@x>", "alice review", alice)
+    assert core_db.count_work_items(ctx.db) == 2
+    assert core_db.count_work_items(
+        ctx.db, requested_by_user_id=alice) == 1
+    rows = core_db.list_work_items(ctx.db, requested_by_user_id=alice)
+    assert [r["subject"] for r in rows] == ["alice review"]
+    counts = core_db.work_item_counts(ctx.db, requested_by_user_id=alice)
+    assert counts[core_db.WORK_ITEM_TYPE_REVIEW][
+        core_db.WORK_ITEM_STATE_CLAIMABLE] == 1
+    assert sum(sum(s.values()) for s in counts.values()) == 1
+
+
+def test_queue_version_scopes_by_requester(ctx):
+    """A regular user's poll version tracks their subset: another user's
+       enqueue doesn't change it, their own does."""
+    alice = core_db.create_user(ctx.db, "alice@x", "alice", "local")
+    bob = core_db.create_user(ctx.db, "bob@x", "bob", "local")
+    _enqueue_user_review(ctx.db, "<r1@x>", "alice review", alice)
+    v1 = core_db.queue_version(ctx.db, requested_by_user_id=alice)
+    _enqueue_user_review(ctx.db, "<r2@x>", "bob review", bob)
+    assert core_db.queue_version(ctx.db, requested_by_user_id=alice) == v1
+    _enqueue_user_review(ctx.db, "<r3@x>", "alice again", alice)
+    assert core_db.queue_version(ctx.db, requested_by_user_id=alice) != v1
