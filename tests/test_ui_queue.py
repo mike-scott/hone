@@ -11,7 +11,7 @@ from core import core_db, ui
 
 
 @pytest.fixture
-def ctx(tmp_path):
+def ctx(tmp_path, fake_admin_session):
     db = core_db.connect(str(tmp_path / "hone.db"))
     # claim_work_item stamps methodology_version on the row, which
     # FK-references methodology_versions — plant one for the tests
@@ -19,6 +19,7 @@ def ctx(tmp_path):
     core_db.add_methodology_version(db, {"name": "test", "version": 1})
     app = FastAPI()
     app.include_router(ui.router)
+    fake_admin_session(app)
     app.state.db = db
     return SimpleNamespace(client=TestClient(app), db=db)
 

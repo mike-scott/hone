@@ -10,10 +10,11 @@ from core import core_db, runtime_config, ui
 
 
 @pytest.fixture
-def ctx(tmp_path):
+def ctx(tmp_path, fake_admin_session):
     db = core_db.connect(str(tmp_path / "hone.db"))
     app = FastAPI()
     app.include_router(ui.router)
+    fake_admin_session(app)
     app.state.db = db
     app.state.runtime_config = runtime_config.load(
         str(tmp_path / "config.yaml"))

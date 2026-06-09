@@ -12,11 +12,12 @@ from core import core_db, runtime_config, ui
 
 
 @pytest.fixture
-def ctx(tmp_path):
+def ctx(tmp_path, fake_admin_session):
     db = core_db.connect(str(tmp_path / "hone.db"))
     core_db.add_methodology_version(db, {"name": "test", "version": 1})
     app = FastAPI()
     app.include_router(ui.router)
+    fake_admin_session(app)
     app.state.db = db
     # /nodes/{id} now consults runtime_config for the freshness
     # threshold (via _node_status_fields). Tests that touch the
