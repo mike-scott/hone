@@ -16,8 +16,16 @@ from dataclasses import asdict, dataclass
 from typing import Optional
 
 import httpx
+from argon2 import PasswordHasher
+from argon2.exceptions import (
+    InvalidHashError, VerificationError, VerifyMismatchError)
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.responses import RedirectResponse
+
+# Argon2 hasher reused across hash + verify calls — instantiating PasswordHasher
+# per call is cheap but constant overhead on every login and registration; one
+# instance is thread-safe (it just carries the kdf parameters, not state).
+_PASSWORD_HASHER = PasswordHasher()
 
 from core import core_db
 
@@ -63,15 +71,12 @@ def clear_session(request: Request):
 # ---------------------------------------------------------------------------
 
 def hash_password(plain: str) -> str:
-    from argon2 import PasswordHasher
-    return PasswordHasher().hash(plain)
+    return _PASSWORD_HASHER.hash(plain)
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    from argon2 import PasswordHasher
-    from argon2.exceptions import VerifyMismatchError, VerificationError, InvalidHashError
     try:
-        return PasswordHasher().verify(hashed, plain)
+        return _PASSWORD_HASHER.verify(hashed, plain)
     except (VerifyMismatchError, VerificationError, InvalidHashError):
         return False
 

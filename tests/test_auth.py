@@ -95,6 +95,22 @@ def test_require_session_skips_db_lookup_for_the_config_admin(db, monkeypatch):
     assert calls == []                       # no DB hit
 
 
+# --- PasswordHasher singleton --------------------------------------------
+
+def test_password_hasher_is_a_module_level_singleton():
+    """hash_password and verify_password share one PasswordHasher instance
+       rather than reconstructing one per call. Saves the constant per-attempt
+       overhead on every login + registration; an instance is thread-safe
+       since it carries only the kdf parameters, not state. Pinned so a
+       future refactor doesn't silently revert the optimisation."""
+    from argon2 import PasswordHasher
+    assert isinstance(auth._PASSWORD_HASHER, PasswordHasher)
+    # round-trip sanity against the singleton
+    h = auth.hash_password("for-the-singleton-check")
+    assert auth.verify_password("for-the-singleton-check", h) is True
+    assert auth.verify_password("nope", h) is False
+
+
 # --- FailedAttemptLimiter (sliding-window login brute-force throttle) ----
 
 class _Clock:
