@@ -8,6 +8,11 @@
   <link rel="stylesheet" href="/static/bootstrap-icons.min.css">
   <link rel="stylesheet" href="/static/adminlte.min.css">
   <link rel="stylesheet" href="/static/app.css?v={{ asset_v('app.css') }}">
+  <style>
+    /* AdminLTE sets .card-title { float: left } for its widget cards.
+       On standalone auth pages the title must stack normally above the form. */
+    .card-title { float: none !important; }
+  </style>
   <script>
     (function () {
       var t = localStorage.getItem("hone-theme")
@@ -16,8 +21,7 @@
     })();
   </script>
 </head>
-<body class="bg-body-tertiary">
-<div class="d-flex align-items-center justify-content-center min-vh-100 px-3">
+<body class="login-page bg-body-tertiary">
 
 <div class="card shadow-sm" style="width: 100%; max-width: 400px;">
   <div class="card-body p-4">
@@ -62,8 +66,6 @@
       No account? <a href="/register">Request access</a>
     </div>
   </div>
-</div>
-
 </div>
 
 <script src="/static/bootstrap.bundle.min.js"></script>
