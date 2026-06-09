@@ -318,5 +318,5 @@ async def gather_supervisor(app):
         for task in reg.tasks.values():
             task.cancel()
         if reg.tasks:
-            await asyncio.gather(*reg.tasks.values(), return_exceptions=True)
+            await asyncio.wait(list(reg.tasks.values()), timeout=5)
         log.info("GATHER supervisor stopped")

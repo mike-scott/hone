@@ -112,8 +112,8 @@ async def lifespan(app: FastAPI):
             manual_task.cancel()
         gather_task.cancel()
         try:
-            await gather_task          # let the supervisor stop its tasks
-        except asyncio.CancelledError:
+            await asyncio.wait_for(gather_task, timeout=7)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
             pass
         if autoclone_task:
             try:
