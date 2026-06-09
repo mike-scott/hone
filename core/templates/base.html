@@ -25,7 +25,7 @@
 <body class="bg-body-tertiary">
 <div class="app-wrapper">
 
-  {# Top-bar nav: brand + primary sections + the theme toggle on the
+  {# Top-bar nav: brand + primary sections + the user menu on the
      far right. No sidebar — pages have horizontal nav only.
      `{% set active = request.url.path %}` lets each link decide
      whether to render with the .active style. #}
@@ -73,14 +73,11 @@
                 class="badge rounded-pill text-bg-secondary"
                 title="Loading fleet status…">…</span>
         </li>
-        <li class="nav-item">
-          <a class="nav-link" href="#" id="theme-toggle" role="button"
-             aria-label="Toggle light/dark theme"><i class="bi"></i></a>
-        </li>
         {# User menu — shows the logged-in account name. Admins get links
            to the Users and Site-settings pages (both admin-only); every
            DB-backed account gets User settings (the config-token admin
-           has no users row, so nothing to edit there). #}
+           has no users row, so nothing to edit there); everyone gets the
+           light/dark theme toggle and Sign out. #}
         {% if current_user is defined and current_user %}
         <li class="nav-item dropdown ms-2">
           <a class="nav-link dropdown-toggle d-flex align-items-center gap-1"
@@ -109,6 +106,15 @@
               </a>
             </li>
             {% endif %}
+            {# Theme toggle — flips data-bs-theme in place (base.html
+               script); the label/icon repaint to name the mode a click
+               switches TO. #}
+            <li>
+              <a class="dropdown-item" href="#" id="theme-toggle"
+                 role="button" aria-label="Toggle light/dark theme">
+                <i class="bi me-1"></i><span>Theme</span>
+              </a>
+            </li>
             <li>
               <a class="dropdown-item" href="/logout">
                 <i class="bi bi-box-arrow-right me-1"></i>Sign out
@@ -179,13 +185,17 @@
   })();
 </script>
 <script>
-  // Light/dark toggle — flip data-bs-theme, persist the choice, swap the icon.
+  // Light/dark toggle (user-menu item) — flip data-bs-theme, persist the
+  // choice, repaint the icon + label to the mode a click switches TO.
   (function () {
     var btn = document.getElementById("theme-toggle");
+    if (!btn) return;   // dropdown renders only with a current_user
     var icon = btn.querySelector("i");
+    var label = btn.querySelector("span");
     function paint() {
       var dark = document.documentElement.getAttribute("data-bs-theme") === "dark";
-      icon.className = "bi bi-" + (dark ? "sun" : "moon-stars");
+      icon.className = "bi me-1 bi-" + (dark ? "sun" : "moon-stars");
+      label.textContent = dark ? "Light mode" : "Dark mode";
     }
     paint();
     btn.addEventListener("click", function (e) {
