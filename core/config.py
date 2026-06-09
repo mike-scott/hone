@@ -24,6 +24,18 @@ class Config:
     http_port:       int   # HONE_HTTP_PORT — the port hone-core serves on
     hostname:        str   # HONE_HOSTNAME — the TLS cert / verification host
     public_url:      str   # HONE_PUBLIC_URL — base URL nodes/operators reach
+    session_cookie_secure: bool  # HONE_SESSION_COOKIE_SECURE — sets the
+                                  # session cookie's Secure flag
+
+    @staticmethod
+    def _env_bool(name, default):
+        """Lenient bool parse — true on '1'/'true'/'yes'/'on' (case-insensitive),
+           otherwise false; unset → `default`. Centralised here so future bool
+           settings stay consistent."""
+        v = os.environ.get(name)
+        if v is None:
+            return default
+        return v.strip().lower() in ("1", "true", "yes", "on")
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -50,4 +62,10 @@ class Config:
             hostname        = host,
             public_url      = (os.environ.get("HONE_PUBLIC_URL")
                                or f"https://{host}:{ext_port}"),
+            # Secure-by-default: the session cookie is only sent over HTTPS.
+            # hone-core serves HTTPS directly (the self-generated cert), so
+            # this works in dev too; flip to false only when fronting hone-core
+            # with a proxy that speaks HTTP to the backend.
+            session_cookie_secure = cls._env_bool(
+                "HONE_SESSION_COOKIE_SECURE", default=True),
         )

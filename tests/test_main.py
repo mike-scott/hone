@@ -93,6 +93,48 @@ def test_create_app_succeeds_with_a_session_secret(monkeypatch):
     assert app.title == "hone-core"
 
 
+# --- session_cookie_secure parse + wiring --------------------------------
+
+def test_config_session_cookie_secure_defaults_to_true(monkeypatch):
+    """Secure-by-default: the session cookie's Secure flag is on unless the
+       operator explicitly opts out via HONE_SESSION_COOKIE_SECURE=false."""
+    from core.config import Config
+    _set_required_env(monkeypatch, session_secret="x" * 64)
+    monkeypatch.delenv("HONE_SESSION_COOKIE_SECURE", raising=False)
+    assert Config.from_env().session_cookie_secure is True
+
+
+@pytest.mark.parametrize("env, expected", [
+    ("true",  True),  ("True",  True),  ("1",   True),
+    ("yes",   True),  ("on",    True),
+    ("false", False), ("False", False), ("0",   False),
+    ("no",    False), ("off",   False), ("",    False),
+    ("anything-else", False),
+])
+def test_config_session_cookie_secure_parses_env_bool(monkeypatch, env, expected):
+    from core.config import Config
+    _set_required_env(monkeypatch, session_secret="x" * 64)
+    monkeypatch.setenv("HONE_SESSION_COOKIE_SECURE", env)
+    assert Config.from_env().session_cookie_secure is expected
+
+
+def test_create_app_passes_session_cookie_secure_to_session_middleware(monkeypatch):
+    """The Config flag actually drives the SessionMiddleware's https_only —
+       not just stored on the Config dataclass and ignored on the way through."""
+    from starlette.middleware.sessions import SessionMiddleware
+    _set_required_env(monkeypatch, session_secret="x" * 64)
+
+    monkeypatch.setenv("HONE_SESSION_COOKIE_SECURE", "true")
+    app = create_app()
+    sm = next(m for m in app.user_middleware if m.cls is SessionMiddleware)
+    assert sm.kwargs["https_only"] is True
+
+    monkeypatch.setenv("HONE_SESSION_COOKIE_SECURE", "false")
+    app = create_app()
+    sm = next(m for m in app.user_middleware if m.cls is SessionMiddleware)
+    assert sm.kwargs["https_only"] is False
+
+
 def test_filter_passes_through_records_with_unexpected_args():
     """A future uvicorn that emits a different access-log shape
        shouldn't have everything silently dropped — unrecognised

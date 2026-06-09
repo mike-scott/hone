@@ -242,7 +242,7 @@ def create_app() -> FastAPI:
     # plain-HTTP connections; same_site="lax" is safe for the redirect flow.
     app.add_middleware(SessionMiddleware,
                        secret_key=cfg.session_secret,
-                       https_only=False,   # allow dev HTTP; production uses TLS
+                       https_only=cfg.session_cookie_secure,
                        same_site="lax",
                        session_cookie="hone_session")
 
