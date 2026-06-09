@@ -171,10 +171,17 @@ HTMX swap. No per-user setting needed; with JS off the UTC string
 stands, and hovering always shows UTC for correlating with server logs.
 
 Pages:
-- **Queue** (`/`) — the home page. The work queue (prepare + review + train
-  items), with a two-axis chip filter — type (prepare / review / train) ×
-  state (claimable, claimed, completed, unappliable, deferred). Per-type and
-  per-state counts ride along the chips.
+- **Corpus** (`/`) — the home page: the gathered patchset corpus, with a
+  search box, independent filter axes (lifecycle state, comments,
+  mailing list, patch type), sortable columns, and per-patchset detail
+  pages (`/patchsets/<root>`). "Corpus" is the population training and
+  maintainer-selected reviews draw from; a user's own uploads live on
+  *My patchsets*, not here.
+- **Queue** (`/queue`) — the work queue (prepare + review + train items),
+  with a two-axis chip filter — type (prepare / review / train) × state
+  (claimable, claimed, completed, unappliable, deferred). Per-type and
+  per-state counts ride along the chips; visibility is scoped (admins
+  see all, a user sees the items they requested).
 - **Nodes** (`/nodes`) — the live node fleet and the **pending-enrollment
   queue**. Every approved node is visible to every user; pending
   enrollments are private to the user who paired them, and the per-node

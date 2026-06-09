@@ -71,10 +71,12 @@ def _plant(db, root, *, subject, author, sent, n_patches=1, parts=1, comments=0,
         core_db.set_patchset_tags(db, root, tags)
 
 
-def test_home_page_is_the_patchset_list_with_search_box(ctx):
+def test_home_page_is_the_corpus_list_with_search_box(ctx):
+    """The home page is the gathered-patchset corpus — titled "Corpus"
+       to distinguish it from a user's own uploads on My patchsets."""
     r = ctx.client.get("/")
     assert r.status_code == 200
-    assert "Patchsets" in r.text
+    assert "Corpus" in r.text
     # the search placeholder is present before the user types
     assert "Search by subject or author name" in r.text
 

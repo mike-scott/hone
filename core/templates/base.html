@@ -35,20 +35,26 @@
       <a href="/" class="navbar-brand fw-light">hone-core</a>
       <ul class="navbar-nav me-auto">
         <li class="nav-item">
+          <a href="/my-patchsets" class="nav-link
+             {%- if active.startswith('/my-patchsets')
+                  or active.startswith('/upload') %} active{% endif %}">
+            <i class="bi bi-person-workspace me-1"></i>My patchsets</a>
+        </li>
+        {# "Corpus" is the system's own word for the gathered patchset
+           population (vs a user's uploaded submissions on My patchsets)
+           — see ARCHITECTURE.md → Data model. The /patchsets/* detail
+           routes are shared by both, so an uploaded patchset's detail
+           page highlights this entry too; harmless, and the uploaded
+           badge on the page carries the distinction. #}
+        <li class="nav-item">
           <a href="/" class="nav-link
              {%- if active == '/' or active.startswith('/patchsets') %} active{% endif %}">
-            <i class="bi bi-collection me-1"></i>Patchsets</a>
+            <i class="bi bi-collection me-1"></i>Corpus</a>
         </li>
         <li class="nav-item">
           <a href="/queue" class="nav-link
              {%- if active.startswith('/queue') %} active{% endif %}">
             <i class="bi bi-list-task me-1"></i>Queue</a>
-        </li>
-        <li class="nav-item">
-          <a href="/my-patchsets" class="nav-link
-             {%- if active.startswith('/my-patchsets')
-                  or active.startswith('/upload') %} active{% endif %}">
-            <i class="bi bi-person-workspace me-1"></i>My patchsets</a>
         </li>
         <li class="nav-item">
           <a href="/nodes" class="nav-link
