@@ -38,8 +38,13 @@ def ctx(tmp_path, _shared_hash):
         admin_token=_ADMIN_TOKEN,
         google_client_id="",            # Google SSO disabled for these tests
         google_client_secret="")
+    # Generous limiter so the existing happy-path tests don't trip; the
+    # rate-limit-specific tests below use a tight instance directly.
+    app.state.login_limiter = auth.FailedAttemptLimiter(
+        max_failures=100, window_seconds=60)
     return SimpleNamespace(
         client=TestClient(app, follow_redirects=False),
+        app=app,                               # for per-test limiter overrides
         db=db,
         shared_hash=_shared_hash)
 
@@ -192,3 +197,68 @@ def test_admin_token_login_still_works_with_any_email(ctx):
     r = _post_login(ctx, email="literally-anything@x", password=_ADMIN_TOKEN)
     assert r.status_code == 303
     assert "hone_session" in r.headers.get("set-cookie", "")
+
+
+# --- per-IP failed-login throttle ---------------------------------------------
+
+def _tight_limiter(ctx, *, max_failures=2, window_seconds=60):
+    ctx.app.state.login_limiter = auth.FailedAttemptLimiter(
+        max_failures=max_failures, window_seconds=window_seconds)
+
+
+def test_login_returns_429_after_too_many_failed_attempts(ctx):
+    _tight_limiter(ctx, max_failures=2)
+    _plant_user(ctx, email="alice@example.com", state="approved")
+    # Two credential misses → still 401; the third gets a generic 429.
+    for _ in range(2):
+        r = _post_login(ctx, email="alice@example.com", password="wrong")
+        assert r.status_code == 401
+    r = _post_login(ctx, email="alice@example.com", password="wrong")
+    assert r.status_code == 429
+    assert "Too many login attempts" in r.text
+
+
+def test_login_throttle_blocks_correct_credentials_too(ctx):
+    """Once an IP is locked, ALL further attempts return 429 — even ones
+       carrying valid credentials. The lockout doesn't peek at the password,
+       so an attacker can't tell from the response which guesses would have
+       succeeded."""
+    _tight_limiter(ctx, max_failures=2)
+    _plant_user(ctx, email="alice@example.com", state="approved")
+    # Burn the failure budget.
+    for _ in range(2):
+        _post_login(ctx, email="alice@example.com", password="wrong")
+    r = _post_login(ctx, email="alice@example.com",
+                    password="correct-horse-battery-staple")
+    assert r.status_code == 429
+    # The valid attempt did not log the user in either:
+    assert "hone_session" not in r.headers.get("set-cookie", "")
+
+
+def test_login_success_does_not_count_as_a_failure(ctx):
+    """A legitimate user who logs in normally doesn't burn down their own
+       budget — the limiter only counts the credential-miss path."""
+    _tight_limiter(ctx, max_failures=2)
+    _plant_user(ctx, email="alice@example.com", state="approved")
+    # 5 successes well past the failure threshold; never trips.
+    for _ in range(5):
+        r = _post_login(ctx, email="alice@example.com",
+                        password="correct-horse-battery-staple")
+        assert r.status_code == 303
+
+
+def test_login_pending_or_revoked_with_valid_password_does_not_count(ctx):
+    """A pending or revoked user supplying the right password is past the
+       credential check — those 403 responses must NOT consume the IP's
+       failure budget, otherwise an attacker who knew a pending user's
+       password could DoS that IP's ability to log in elsewhere."""
+    _tight_limiter(ctx, max_failures=2)
+    _plant_user(ctx, email="pending@example.com", state="pending")
+    # 5 pending-403s — well past the limit, but the limiter shouldn't notice.
+    for _ in range(5):
+        r = _post_login(ctx, email="pending@example.com",
+                        password="correct-horse-battery-staple")
+        assert r.status_code == 403
+    # The next credential MISS should still get a fresh 401, not 429.
+    r = _post_login(ctx, email="someone-else@example.com", password="wrong")
+    assert r.status_code == 401

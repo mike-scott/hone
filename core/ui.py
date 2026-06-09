@@ -115,6 +115,18 @@ async def login_submit(request: Request):
             "error": error,
         }, status_code=status_code)
 
+    # Per-IP failed-attempt limiter: caps brute-force / CPU-DoS against the
+    # Argon2 verify path. Keyed on the request's client host (uvicorn's
+    # --proxy-headers populates this from X-Forwarded-For when configured).
+    # A locked IP gets the same 429 regardless of credentials — even valid
+    # ones — so an attacker can't tell which password attempts would have
+    # succeeded.
+    limiter = request.app.state.login_limiter
+    client_ip = (request.client.host if request.client else "") or "unknown"
+    if limiter.is_locked(client_ip):
+        return _login_response(
+            "Too many login attempts. Please try again later.", 429)
+
     # Config-token admin — constant-time comparison against HONE_ADMIN_TOKEN.
     if cfg.admin_token and secrets.compare_digest(password, cfg.admin_token):
         auth.set_session_user(request, auth.SessionUser(
@@ -135,6 +147,10 @@ async def login_submit(request: Request):
     password_ok = auth.verify_password(password, hashed)
 
     if not (user and password_ok):
+        # Count any credential miss — unknown email, wrong password, missing
+        # password hash. State-conditional outcomes (pending / revoked,
+        # below) don't count because they only happen post-valid-password.
+        limiter.record_failure(client_ip)
         return _login_response("Invalid email or password.", 401)
     if user["state"] == "pending":
         return _login_response(

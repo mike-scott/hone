@@ -7,7 +7,10 @@ The config-token admin (HONE_ADMIN_TOKEN) never has a database row — their
 session carries is_config_admin=True and id=None.  All other users are in the
 `users` table and must be in state='approved' to hold an active session.
 """
+import collections
 import secrets
+import threading
+import time
 import urllib.parse
 from dataclasses import asdict, dataclass
 from typing import Optional
@@ -71,6 +74,66 @@ def verify_password(plain: str, hashed: str) -> bool:
         return PasswordHasher().verify(hashed, plain)
     except (VerifyMismatchError, VerificationError, InvalidHashError):
         return False
+
+
+# ---------------------------------------------------------------------------
+# Failed-attempt rate limiter (login brute-force / CPU-DoS defence)
+# ---------------------------------------------------------------------------
+
+# Defaults — 10 failed logins inside any 60-second sliding window locks the
+# source IP out until enough timestamps age out. Argon2 verify is ~50-100ms,
+# so even before the limiter trips an attacker is throttled by hash cost;
+# the limiter caps the wasted CPU and forces them to slow down.
+LOGIN_MAX_FAILURES = 10
+LOGIN_FAILURE_WINDOW_SECONDS = 60
+
+
+class FailedAttemptLimiter:
+    """Sliding-window failed-attempt limiter, keyed by an arbitrary string
+       (login uses the client IP). record_failure() stamps `now`; is_locked()
+       reports True once `max_failures` stamps sit inside `window_seconds`,
+       and unlocks naturally as older stamps age out. Successful attempts
+       record nothing — legitimate users don't throttle themselves.
+
+       In-memory, intra-process — fine for hone-core's single-worker shape.
+       Thread-safe so a sync handler called from uvicorn's worker thread
+       pool can hit it concurrently with the event loop. The clock is
+       injectable (`now=` ctor arg) so tests can advance it deterministically
+       instead of sleeping."""
+
+    def __init__(self, *, max_failures: int, window_seconds: float,
+                 now=time.monotonic):
+        if max_failures < 1:
+            raise ValueError("max_failures must be >= 1")
+        if window_seconds <= 0:
+            raise ValueError("window_seconds must be > 0")
+        self.max = max_failures
+        self.window = window_seconds
+        self._now = now
+        self._stamps: dict = collections.defaultdict(collections.deque)
+        self._lock = threading.Lock()
+
+    def _prune(self, key, now):
+        dq = self._stamps.get(key)
+        if not dq:
+            return
+        cutoff = now - self.window
+        while dq and dq[0] < cutoff:
+            dq.popleft()
+        if not dq:
+            del self._stamps[key]
+
+    def is_locked(self, key) -> bool:
+        now = self._now()
+        with self._lock:
+            self._prune(key, now)
+            return len(self._stamps.get(key, ())) >= self.max
+
+    def record_failure(self, key) -> None:
+        now = self._now()
+        with self._lock:
+            self._prune(key, now)
+            self._stamps[key].append(now)
 
 
 _DUMMY_HASH: Optional[str] = None

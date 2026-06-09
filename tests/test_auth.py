@@ -95,6 +95,66 @@ def test_require_session_skips_db_lookup_for_the_config_admin(db, monkeypatch):
     assert calls == []                       # no DB hit
 
 
+# --- FailedAttemptLimiter (sliding-window login brute-force throttle) ----
+
+class _Clock:
+    def __init__(self, t=1000.0):
+        self.t = t
+
+    def __call__(self):
+        return self.t
+
+    def advance(self, dt):
+        self.t += dt
+
+
+def _limiter(*, max_failures=3, window_seconds=10.0, clock=None):
+    return auth.FailedAttemptLimiter(
+        max_failures=max_failures, window_seconds=window_seconds,
+        now=clock or _Clock())
+
+
+def test_limiter_locks_when_max_failures_inside_window_is_reached():
+    clock = _Clock()
+    lim = _limiter(clock=clock)
+    for _ in range(3):
+        assert lim.is_locked("ip-1") is False
+        lim.record_failure("ip-1")
+    assert lim.is_locked("ip-1") is True       # threshold hit
+
+
+def test_limiter_unlocks_as_stamps_age_out_of_the_window():
+    """The window is a sliding one: a key is locked only while >=N failures
+       sit inside it. Once enough age out, the key becomes available again
+       without any explicit reset — no cron / cleanup needed."""
+    clock = _Clock()
+    lim = _limiter(window_seconds=10.0, clock=clock)
+    for _ in range(3):
+        lim.record_failure("ip-1")
+    assert lim.is_locked("ip-1") is True
+    clock.advance(9.9)
+    assert lim.is_locked("ip-1") is True       # still inside the window
+    clock.advance(0.2)                         # last stamp is now 10.1s old
+    assert lim.is_locked("ip-1") is False
+
+
+def test_limiter_keys_are_isolated():
+    """One client's failures don't lock out another. Important: per-IP keying
+       means the limiter never penalises innocent bystanders."""
+    lim = _limiter()
+    for _ in range(3):
+        lim.record_failure("ip-1")
+    assert lim.is_locked("ip-1") is True
+    assert lim.is_locked("ip-2") is False
+
+
+def test_limiter_rejects_invalid_construction():
+    with pytest.raises(ValueError):
+        auth.FailedAttemptLimiter(max_failures=0, window_seconds=10)
+    with pytest.raises(ValueError):
+        auth.FailedAttemptLimiter(max_failures=1, window_seconds=0)
+
+
 def test_require_session_redirects_when_no_session_is_present(db):
     """Sanity: the existing 'no session' path still 302s to /login with the
        request URL preserved in ?next= (the redirect's pre-existing

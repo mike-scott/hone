@@ -246,6 +246,14 @@ def create_app() -> FastAPI:
                        same_site="lax",
                        session_cookie="hone_session")
 
+    # Per-IP failed-login limiter — caps the wasted CPU / brute-force ceiling
+    # against the operator login. Lives on app.state so tests can swap in a
+    # tight-limit instance without touching production constants.
+    from core import auth
+    app.state.login_limiter = auth.FailedAttemptLimiter(
+        max_failures=auth.LOGIN_MAX_FAILURES,
+        window_seconds=auth.LOGIN_FAILURE_WINDOW_SECONDS)
+
     app.include_router(api.router)   # /v1/* — the node-facing REST API
     # The operator web UI now uses session-based auth (login page + signed
     # cookie) with an admin-approval flow for self-registered users.  Auth
