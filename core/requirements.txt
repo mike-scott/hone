@@ -12,3 +12,6 @@ mdformat>=1.0              # canonicalize methodology prose Markdown
 python-multipart>=0.0.12   # form posts + file upload (operator UI, manual submissions)
 cryptography>=43           # first-start TLS CA + server certificate generation
 zstandard>=0.23            # pack gathered patchsets into .tar.zst archives
+argon2-cffi>=23            # Argon2id password hashing for operator accounts
+httpx>=0.28                # async HTTP client for Google OAuth token exchange
+itsdangerous>=2.2          # signs session cookies (used by SessionMiddleware)

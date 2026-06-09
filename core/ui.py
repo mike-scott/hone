@@ -1,15 +1,14 @@
 """hone-core — the operator web UI (see ../ARCHITECTURE.md → Operator web UI).
 
 Server-rendered: Jinja2 + Bootstrap 5 + HTMX. Pages:
+- `/login`              email+password or Google SSO login
+- `/register`           self-service account registration (admin-approved)
 - `/`                   the work queue (prepare + review + train items)
 - `/patchsets/{root}`   per-patchset detail (corpus + reviews + queue history)
 - `/nodes`              the node fleet + pending enrollments
 - `/enroll`             approve a node's device-grant enrollment
 - `/settings`           operator-tunable runtime config + list-tag gather filter
-
-NOTE: the operator login (session-based, distinct from a node's bearer token)
-is still TODO; these routes are currently unauthenticated, like the rest of
-the UI skeleton.
+- `/users`              user management (config-token admin only)
 """
 import datetime
 import html
@@ -17,20 +16,20 @@ import json
 import logging
 import os
 import re
+import secrets
 import time
-from urllib.parse import quote
-
+from urllib.parse import quote, unquote
 from markupsafe import Markup
 
 log = logging.getLogger("hone.ui")
 
-from fastapi import (APIRouter, File, HTTPException, Request, Response,
+from fastapi import (APIRouter, Depends, File, HTTPException, Request, Response,
                       UploadFile, status)
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from common.version import __version__ as VERSION
-from core import core_db, gather, methodology_format, patchview, runtime_config
+from core import auth, core_db, gather, methodology_format, patchview, runtime_config
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 templates = Jinja2Templates(directory=os.path.join(_HERE, "templates"))
@@ -63,6 +62,237 @@ def _tickcode(text):
 templates.env.filters["tickcode"] = _tickcode
 
 router = APIRouter(tags=["ui"])
+
+
+# ===========================================================================
+# Auth routes — login, register, Google SSO, logout (no session required)
+# ===========================================================================
+
+def _safe_next(next_url: str | None) -> str:
+    """Return next_url if it looks like a safe local path, else '/'."""
+    if not next_url:
+        return "/"
+    decoded = unquote(next_url)
+    if decoded.startswith("/") and not decoded.startswith("//"):
+        return decoded
+    return "/"
+
+
+@router.get("/login", response_class=HTMLResponse, include_in_schema=False)
+async def login_page(request: Request, next: str | None = None,
+                     error: str | None = None):
+    cfg = request.app.state.config
+    return templates.TemplateResponse(request, "login.html", {
+        "next":           next or "",
+        "error":          error or "",
+        "google_enabled": bool(cfg.google_client_id),
+    })
+
+
+@router.post("/login", response_class=HTMLResponse, include_in_schema=False)
+async def login_submit(request: Request):
+    cfg = request.app.state.config
+    db  = request.app.state.db
+    form = await request.form()
+    email    = (form.get("email")    or "").strip().lower()
+    password = (form.get("password") or "")
+    next_url = _safe_next(form.get("next"))
+
+    # Config-token admin — constant-time comparison against HONE_ADMIN_TOKEN.
+    if cfg.admin_token and secrets.compare_digest(password, cfg.admin_token):
+        auth.set_session_user(request, auth.SessionUser(
+            id=None, email=email or "admin",
+            display_name="Admin", is_config_admin=True))
+        return RedirectResponse(next_url, status_code=303)
+
+    # Regular DB user.
+    user = core_db.get_user_by_email(db, email)
+    if user and user["password_hash"] and auth.verify_password(password, user["password_hash"]):
+        if user["state"] == "pending":
+            return templates.TemplateResponse(request, "login.html", {
+                "next": next_url, "google_enabled": bool(cfg.google_client_id),
+                "error": "Your account is awaiting admin approval.",
+            }, status_code=403)
+        if user["state"] == "revoked":
+            return templates.TemplateResponse(request, "login.html", {
+                "next": next_url, "google_enabled": bool(cfg.google_client_id),
+                "error": "Your account has been revoked.",
+            }, status_code=403)
+        auth.set_session_user(request, auth.SessionUser(
+            id=user["id"], email=user["email"],
+            display_name=user["display_name"] or user["email"],
+            is_config_admin=False))
+        core_db.touch_last_login(db, user["id"])
+        return RedirectResponse(next_url, status_code=303)
+
+    return templates.TemplateResponse(request, "login.html", {
+        "next": next_url, "google_enabled": bool(cfg.google_client_id),
+        "error": "Invalid email or password.",
+    }, status_code=401)
+
+
+@router.get("/register", response_class=HTMLResponse, include_in_schema=False)
+async def register_page(request: Request):
+    cfg = request.app.state.config
+    return templates.TemplateResponse(request, "register.html", {
+        "google_enabled": bool(cfg.google_client_id),
+        "error": "", "success": False,
+    })
+
+
+@router.post("/register", response_class=HTMLResponse, include_in_schema=False)
+async def register_submit(request: Request):
+    cfg = request.app.state.config
+    db  = request.app.state.db
+    form = await request.form()
+    email        = (form.get("email")        or "").strip().lower()
+    display_name = (form.get("display_name") or "").strip()
+    password     = (form.get("password")     or "")
+
+    def _fail(msg):
+        return templates.TemplateResponse(request, "register.html", {
+            "google_enabled": bool(cfg.google_client_id),
+            "error": msg, "success": False,
+            "email": email, "display_name": display_name,
+        }, status_code=422)
+
+    if not email or not re.match(r"[^@]+@[^@]+\.[^@]+", email):
+        return _fail("Please enter a valid email address.")
+    if len(password) < 10:
+        return _fail("Password must be at least 10 characters.")
+    if core_db.get_user_by_email(db, email):
+        return _fail("An account with that email already exists.")
+
+    core_db.create_user(db, email, display_name or email, "local",
+                        password_hash=auth.hash_password(password))
+    return templates.TemplateResponse(request, "register.html", {
+        "google_enabled": bool(cfg.google_client_id),
+        "error": "", "success": True,
+    })
+
+
+@router.get("/auth/google", include_in_schema=False)
+async def google_sso_start(request: Request, next: str | None = None):
+    cfg = request.app.state.config
+    if not cfg.google_client_id:
+        raise HTTPException(404)
+    state = secrets.token_urlsafe(16)
+    request.session["oauth_state"] = state
+    request.session["oauth_next"]  = _safe_next(next)
+    redirect_uri = str(request.base_url).rstrip("/") + "/auth/google/callback"
+    return RedirectResponse(auth.google_auth_url(cfg, redirect_uri, state))
+
+
+@router.get("/auth/google/callback", response_class=HTMLResponse,
+            include_in_schema=False)
+async def google_sso_callback(request: Request,
+                               code: str | None = None,
+                               state: str | None = None,
+                               error: str | None = None):
+    cfg = request.app.state.config
+    if not cfg.google_client_id:
+        raise HTTPException(404)
+    if error:
+        return RedirectResponse(f"/login?error={quote(error)}")
+
+    expected_state = request.session.pop("oauth_state", None)
+    next_url = request.session.pop("oauth_next", "/")
+    if not state or not expected_state or not secrets.compare_digest(state, expected_state):
+        return RedirectResponse("/login?error=invalid+state")
+
+    db = request.app.state.db
+    try:
+        redirect_uri = str(request.base_url).rstrip("/") + "/auth/google/callback"
+        tokens   = await auth.google_exchange_code(cfg, code, redirect_uri)
+        userinfo = await auth.google_fetch_userinfo(tokens["access_token"])
+    except Exception:
+        log.exception("Google OAuth exchange failed")
+        return RedirectResponse("/login?error=google+auth+failed")
+
+    google_sub = userinfo.get("sub")
+    g_email    = (userinfo.get("email") or "").lower().strip()
+    g_name     = userinfo.get("name") or g_email
+
+    # Find or create user.
+    user = (core_db.get_user_by_google_sub(db, google_sub)
+            or core_db.get_user_by_email(db, g_email))
+    if user is None:
+        core_db.create_user(db, g_email, g_name, "google", google_sub=google_sub)
+        return templates.TemplateResponse(request, "login.html", {
+            "next": next_url, "google_enabled": True,
+            "error": "Your account has been created and is awaiting admin approval.",
+        })
+
+    # Attach google_sub if this was a previously-local account signing in via Google.
+    if user["google_sub"] is None:
+        db.execute("UPDATE users SET google_sub=? WHERE id=?",
+                   (google_sub, user["id"]))
+        db.commit()
+        user = core_db.get_user_by_id(db, user["id"])
+
+    if user["state"] == "pending":
+        return templates.TemplateResponse(request, "login.html", {
+            "next": next_url, "google_enabled": True,
+            "error": "Your account is awaiting admin approval.",
+        })
+    if user["state"] == "revoked":
+        return templates.TemplateResponse(request, "login.html", {
+            "next": next_url, "google_enabled": True,
+            "error": "Your account has been revoked.",
+        })
+
+    auth.set_session_user(request, auth.SessionUser(
+        id=user["id"], email=user["email"],
+        display_name=user["display_name"] or user["email"],
+        is_config_admin=False))
+    core_db.touch_last_login(db, user["id"])
+    return RedirectResponse(next_url, status_code=303)
+
+
+@router.get("/logout", include_in_schema=False)
+async def logout(request: Request):
+    auth.clear_session(request)
+    return RedirectResponse("/login", status_code=303)
+
+
+# ===========================================================================
+# User management (config-token admin only)
+# ===========================================================================
+
+@router.get("/users", response_class=HTMLResponse, include_in_schema=False)
+async def users_list(request: Request,
+                     user: auth.SessionUser = Depends(auth.require_config_admin)):
+    db = request.app.state.db
+    rows = core_db.list_users(db)
+    pending  = [r for r in rows if r["state"] == "pending"]
+    approved = [r for r in rows if r["state"] == "approved"]
+    revoked  = [r for r in rows if r["state"] == "revoked"]
+    return templates.TemplateResponse(request, "users.html", {
+        "current_user": user,
+        "pending": pending, "approved": approved, "revoked": revoked,
+        "when": _when,
+    })
+
+
+@router.post("/users/{user_id}/approve", include_in_schema=False)
+async def user_approve(request: Request, user_id: int,
+                       user: auth.SessionUser = Depends(auth.require_config_admin)):
+    core_db.set_user_state(request.app.state.db, user_id, "approved")
+    return RedirectResponse("/users", status_code=303)
+
+
+@router.post("/users/{user_id}/revoke", include_in_schema=False)
+async def user_revoke(request: Request, user_id: int,
+                      user: auth.SessionUser = Depends(auth.require_config_admin)):
+    core_db.set_user_state(request.app.state.db, user_id, "revoked")
+    return RedirectResponse("/users", status_code=303)
+
+
+@router.post("/users/{user_id}/delete", include_in_schema=False)
+async def user_delete(request: Request, user_id: int,
+                      user: auth.SessionUser = Depends(auth.require_config_admin)):
+    core_db.delete_user(request.app.state.db, user_id)
+    return RedirectResponse("/users", status_code=303)
 
 
 def _types(raw):
@@ -142,7 +372,8 @@ def _fleet_pulse_view(db, runtime_cfg):
 
 
 @router.get("/fleet-status", response_class=HTMLResponse)
-async def fleet_status_partial(request: Request):
+async def fleet_status_partial(request: Request,
+                                _: auth.SessionUser = Depends(auth.require_session)):
     """The fleet-pulse chip as an HTML partial — polled by HTMX every
        10s from the top nav so the operator gets a live rollup
        without reloading the page they're on. Tiny SQL footprint:
@@ -196,7 +427,8 @@ def _fleet_sparkline_view(db):
 
 
 @router.get("/fleet-sparkline", response_class=HTMLResponse)
-async def fleet_sparkline_partial(request: Request):
+async def fleet_sparkline_partial(request: Request,
+                                   _: auth.SessionUser = Depends(auth.require_session)):
     """The fleet throughput sparkline as an HTML partial — polled
        every 10s from the top nav. Tracks claims/min over a rolling
        hour so the operator sees a confirmation that work is
@@ -568,7 +800,8 @@ async def patchsets(request: Request,
                     comments: str | None = None, list_tag: str | None = None,
                     patch_type: str | None = None,
                     sort: str = "date", direction: str = "desc",
-                    page: int = 1, size: int = _DEFAULT_PAGE_SIZE):
+                    page: int = 1, size: int = _DEFAULT_PAGE_SIZE,
+                    current_user: auth.SessionUser = Depends(auth.require_session)):
     """The patchset corpus — the operator UI's home page. A search box
        (partial subject or author name) plus independent filter axes
        (lifecycle state, comments, mailing list, patch type), sortable
@@ -578,13 +811,15 @@ async def patchsets(request: Request,
     db = request.app.state.db
     ctx = _patchsets_view(db, q, state, comments, list_tag, patch_type,
                           sort, direction, page, size)
+    ctx["current_user"] = current_user
     return templates.TemplateResponse(request, "patchsets.html", ctx)
 
 
 @router.get("/queue", response_class=HTMLResponse)
 async def queue(request: Request,
                 type: str | None = None, state: str | None = None,
-                page: int = 1, size: int = _DEFAULT_PAGE_SIZE):
+                page: int = 1, size: int = _DEFAULT_PAGE_SIZE,
+                current_user: auth.SessionUser = Depends(auth.require_session)):
     """The work queue. `?type=` filters to one work-item type (prepare /
        review / train); `?state=` filters to one state. Unknown axis values
        are ignored. `?page=` and `?size=`
@@ -624,6 +859,7 @@ async def queue(request: Request,
 
     ctx = _queue_view(db, type, state, page, size)
     ctx["queue_version"] = version
+    ctx["current_user"] = current_user
     # HTMX swap requests (pagination + the auto-poll wrapper) get just
     # the `_queue_pane.html` partial — chips + body + the self-renewing
     # `hx-get` wrapper — so the page chrome and the sidebar don't
@@ -846,18 +1082,21 @@ _MSG_TYPE_BADGE = {"cover":   "text-bg-secondary",
 
 @router.get("/patchsets/{root_message_id:path}", response_class=HTMLResponse)
 async def patchset_detail(request: Request, root_message_id: str,
-                           back: str | None = None):
+                           back: str | None = None,
+                           current_user: auth.SessionUser = Depends(auth.require_session)):
     """The per-patchset detail page — drill down into a row from the queue
        (or any other index that links here). `?back=` carries the URL the
        opener wants the `← Back` button to return to; same-origin paths
        only, fallback to `/`."""
     ctx = _patchset_view(request.app.state.db, root_message_id)
     ctx["back_url"] = _safe_back(back)
+    ctx["current_user"] = current_user
     return templates.TemplateResponse(request, "patchset.html", ctx)
 
 
 @router.post("/review-requests/{root_message_id:path}/delete")
-async def delete_review(request: Request, root_message_id: str):
+async def delete_review(request: Request, root_message_id: str,
+                         _: auth.SessionUser = Depends(auth.require_session)):
     """Operator-triggered deletion of a patchset's AI review and the review
        work-item(s) that produced it — the "Delete review" button on the
        detail page POSTs here. Reuses core_db.delete_review, which removes
@@ -881,7 +1120,8 @@ async def delete_review(request: Request, root_message_id: str):
 
 
 @router.post("/review-requests/{root_message_id:path}")
-async def request_review(request: Request, root_message_id: str):
+async def request_review(request: Request, root_message_id: str,
+                          _: auth.SessionUser = Depends(auth.require_session)):
     """Operator-triggered review enqueue. Review is not auto-enqueued
        (a gather run would flood the queue); the operator requests one
        patchset at a time here. Reuses core_db.maybe_enqueue_review — the
@@ -1084,7 +1324,8 @@ def _nodes_view(db, runtime_cfg):
 
 
 @router.get("/nodes", response_class=HTMLResponse)
-async def nodes(request: Request):
+async def nodes(request: Request,
+                current_user: auth.SessionUser = Depends(auth.require_session)):
     """The node fleet: the pending-enrollment queue and the enrolled
        nodes, sorted into health buckets (errored / stale / in-flight
        / idle). The bucketed table partial polls /nodes/fleet-table
@@ -1097,13 +1338,14 @@ async def nodes(request: Request):
         e["task_types_display"] = _types(e.get("task_types"))
         e["requested_display"]  = _when(e.get("created_at"))
         pending.append(e)
-    ctx = {"pending": pending,
+    ctx = {"pending": pending, "current_user": current_user,
             **_nodes_view(db, request.app.state.runtime_config)}
     return templates.TemplateResponse(request, "nodes.html", ctx)
 
 
 @router.get("/nodes/fleet-table", response_class=HTMLResponse)
-async def nodes_fleet_table(request: Request):
+async def nodes_fleet_table(request: Request,
+                              _: auth.SessionUser = Depends(auth.require_session)):
     """The bucketed enrolled-nodes table as an HTML partial — polled
        by the /nodes page every 10s. Skips the pending-enrollment
        table (static between approve/deny clicks; an unnecessary
@@ -1284,7 +1526,8 @@ def _node_detail_view(db, node_id, runtime_cfg, *,
 async def node_detail(request: Request, node_id: int,
                        back: str | None = None,
                        claims_page: int = 1,
-                       claims_size: int = _DEFAULT_CLAIMS_PAGE_SIZE):
+                       claims_size: int = _DEFAULT_CLAIMS_PAGE_SIZE,
+                       current_user: auth.SessionUser = Depends(auth.require_session)):
     """The per-node detail page — drill down into a row from /nodes
        (or any other index that links here). `?back=` carries the URL
        the opener wants the ← Back button to return to; same-origin
@@ -1296,11 +1539,13 @@ async def node_detail(request: Request, node_id: int,
                              claims_page=claims_page, claims_size=claims_size,
                              back=safe_back)
     ctx["back_url"] = safe_back or "/nodes"
+    ctx["current_user"] = current_user
     return templates.TemplateResponse(request, "node_detail.html", ctx)
 
 
 @router.get("/nodes/{node_id:int}/live", response_class=HTMLResponse)
-async def node_detail_live_panel(request: Request, node_id: int):
+async def node_detail_live_panel(request: Request, node_id: int,
+                                  _: auth.SessionUser = Depends(auth.require_session)):
     """The live status panel for the per-node detail page — Node +
        Health cards with bucket badge, running time, and relative
        freshness. Polled every 10s by HTMX so an operator can leave
@@ -1395,19 +1640,22 @@ def _work_item_view(db, work_item_id):
 
 @router.get("/work-items/{work_item_id:int}", response_class=HTMLResponse)
 async def work_item_detail(request: Request, work_item_id: int,
-                            back: str | None = None):
+                            back: str | None = None,
+                            current_user: auth.SessionUser = Depends(auth.require_session)):
     """The per-work-item detail page — every queue / patchset-history /
        node-claims table links here. `?back=` carries the opener's
        URL so the operator returns where they were; same-origin
        paths only via _safe_back, default `/`."""
     ctx = _work_item_view(request.app.state.db, work_item_id)
     ctx["back_url"] = _safe_back(back) if back else "/"
+    ctx["current_user"] = current_user
     return templates.TemplateResponse(request, "work_item.html", ctx)
 
 
 @router.post("/work-items/{work_item_id:int}/release-deferred")
 async def release_deferred(request: Request, work_item_id: int,
-                           back: str | None = None):
+                           back: str | None = None,
+                           _: auth.SessionUser = Depends(auth.require_session)):
     """Operator-triggered release of a DEFERRED work item back to the
        CLAIMABLE pool — the deferred badge on the detail page POSTs here.
        Reuses core_db.release_deferred: a no-op ('not_deferred') if the row
@@ -1424,7 +1672,8 @@ async def release_deferred(request: Request, work_item_id: int,
 
 @router.post("/work-items/{work_item_id:int}/retry-unappliable")
 async def retry_unappliable(request: Request, work_item_id: int,
-                            back: str | None = None):
+                            back: str | None = None,
+                            _: auth.SessionUser = Depends(auth.require_session)):
     """Operator-triggered retry of an UNAPPLIABLE work item back to the
        CLAIMABLE pool — the 'try again' badge on the detail page POSTs here.
        Reuses core_db.retry_unappliable: a no-op ('not_unappliable') if the
@@ -1440,7 +1689,8 @@ async def retry_unappliable(request: Request, work_item_id: int,
 
 
 @router.get("/enroll", response_class=HTMLResponse)
-async def enroll(request: Request, code: str | None = None):
+async def enroll(request: Request, code: str | None = None,
+                 current_user: auth.SessionUser = Depends(auth.require_session)):
     """A node's enrollment verification page — the `verification_uri` it logs.
        The operator enters the user code and approves the node."""
     db = request.app.state.db
@@ -1458,11 +1708,13 @@ async def enroll(request: Request, code: str | None = None):
             enr["task_types_display"] = _types(enr.get("task_types"))
             enr["requested_display"]  = _when(enr.get("created_at"))
             ctx["enrollment"] = enr
+    ctx["current_user"] = current_user
     return templates.TemplateResponse(request, "enroll.html", ctx)
 
 
 @router.post("/nodes/enrollments/{user_code}/approve")
-async def approve_enrollment(request: Request, user_code: str):
+async def approve_enrollment(request: Request, user_code: str,
+                              _: auth.SessionUser = Depends(auth.require_session)):
     """Approve a pending enrollment — the node joins the fleet. Errors
        (already decided / expired / unknown / name now conflicts with
        an active node) silently redirect; the operator sees the row's
@@ -1476,7 +1728,8 @@ async def approve_enrollment(request: Request, user_code: str):
 
 
 @router.post("/nodes/{node_id}/delete")
-async def delete_node(request: Request, node_id: int):
+async def delete_node(request: Request, node_id: int,
+                       _: auth.SessionUser = Depends(auth.require_session)):
     """Hard-delete an enrolled node from the fleet — removes the row,
        deletes its tokens, NULLs the audit references. A no-op if the
        node was already deleted (e.g. a stale tab posting twice)."""
@@ -1485,7 +1738,8 @@ async def delete_node(request: Request, node_id: int):
 
 
 @router.post("/nodes/enrollments/{user_code}/deny")
-async def deny_enrollment(request: Request, user_code: str):
+async def deny_enrollment(request: Request, user_code: str,
+                           _: auth.SessionUser = Depends(auth.require_session)):
     """Deny a pending enrollment."""
     try:
         core_db.deny_enrollment(request.app.state.db, user_code,
@@ -1604,7 +1858,8 @@ def _lore_clone_view(state):
 
 
 @router.get("/settings/lore-clone-status", response_class=HTMLResponse)
-async def lore_clone_status(request: Request):
+async def lore_clone_status(request: Request,
+                             _: auth.SessionUser = Depends(auth.require_session)):
     """The lore-clone panel partial — rendered standalone for the
        Settings page's `hx-get` poll (every 5 s). Returns just the panel
        HTML so HTMX swaps it in place."""
@@ -1614,7 +1869,8 @@ async def lore_clone_status(request: Request):
 
 
 @router.post("/settings/lore-clone", response_class=HTMLResponse)
-async def lore_clone_trigger(request: Request):
+async def lore_clone_trigger(request: Request,
+                              _: auth.SessionUser = Depends(auth.require_session)):
     """Operator-triggered lore provision (the Settings 'Provision now'
        button). Kicks off a background clone unless one is already running,
        then returns the panel partial — now showing 'cloning', which starts
@@ -1684,7 +1940,8 @@ def _resolve_settings_tab(request):
 
 
 @router.get("/settings", response_class=HTMLResponse)
-async def settings(request: Request):
+async def settings(request: Request,
+                   current_user: auth.SessionUser = Depends(auth.require_session)):
     """View the deployment configuration and edit the operator-tunable
        settings. The page is organised into tabs (`?tab=gather` /
        `methodology` / `tags` / `deployment`); each tab renders only
@@ -1708,11 +1965,13 @@ async def settings(request: Request):
             _METHODOLOGY_ERROR_MESSAGES.get(meth_error or ""),
         "saved_settings":   saved == "1",
         "saved_tags":       saved == "tags",
-        "gather_triggered": saved == "triggered"})
+        "gather_triggered": saved == "triggered",
+        "current_user": current_user})
 
 
 @router.post("/settings")
-async def save_settings(request: Request):
+async def save_settings(request: Request,
+                         current_user: auth.SessionUser = Depends(auth.require_session)):
     """Validate a runtime-config submission, persist it to config.yaml, and
        update the live config — no restart needed. Invalid input re-renders
        the form with the fields flagged; config.yaml is left untouched.
@@ -1763,11 +2022,13 @@ async def save_settings(request: Request):
         "methodology": _methodology_view(request.app.state.db),
         "methodology_imported": None, "methodology_error": None,
         "saved_settings":   False, "saved_tags": False,
-        "gather_triggered": False}, status_code=400)
+        "gather_triggered": False,
+        "current_user": current_user}, status_code=400)
 
 
 @router.post("/settings/gather/trigger")
-async def trigger_gather(request: Request):
+async def trigger_gather(request: Request,
+                          _: auth.SessionUser = Depends(auth.require_session)):
     """Wake the GATHER supervisor and fire every idle enabled source on
        its next tick, bypassing the per-source cadence check. Sources
        mid-cycle keep running; the trigger only affects idle ones. The
@@ -1834,7 +2095,8 @@ def _dump_methodology_yaml(document):
 
 
 @router.get("/settings/methodology/export")
-async def export_methodology(request: Request):
+async def export_methodology(request: Request,
+                              _: auth.SessionUser = Depends(auth.require_session)):
     """Download the active methodology as YAML. Filename carries the
        DB version so an operator keeping a few revisions on disk can
        tell them apart without diffing. Style mirrors
@@ -1874,7 +2136,8 @@ def _canonical_methodology_bytes(document):
 
 @router.post("/settings/methodology/import")
 async def import_methodology(request: Request,
-                              file: UploadFile = File(...)):
+                              file: UploadFile = File(...),
+                              _: auth.SessionUser = Depends(auth.require_session)):
     """Upload a methodology YAML. Validates against
        common/schema/methodology.schema.yaml, then adds it to the DB
        as a new active version (superseding the current active row in
@@ -1962,7 +2225,8 @@ async def import_methodology(request: Request,
 
 
 @router.post("/settings/tags")
-async def save_tag_filter(request: Request):
+async def save_tag_filter(request: Request,
+                           _: auth.SessionUser = Depends(auth.require_session)):
     """Persist the list-tag gather filter — every known tag is shown as a
        switch; ticked tags are the new enabled set. Tags not in the form fall
        back to disabled (an unticked checkbox isn't posted)."""

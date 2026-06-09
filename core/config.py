@@ -18,6 +18,9 @@ class Config:
     cert_dir:        str   # HONE_CERT_DIR — the self-generated TLS material
     fleet_secret:    str   # HONE_FLEET_SECRET — the OAuth/enrollment gate
     admin_token:     str   # HONE_ADMIN_TOKEN — admin API credential
+    session_secret:  str   # HONE_SESSION_SECRET — signs UI session cookies
+    google_client_id:     str  # HONE_GOOGLE_CLIENT_ID — Google SSO (empty = disabled)
+    google_client_secret: str  # HONE_GOOGLE_CLIENT_SECRET
     http_port:       int   # HONE_HTTP_PORT — the port hone-core serves on
     hostname:        str   # HONE_HOSTNAME — the TLS cert / verification host
     public_url:      str   # HONE_PUBLIC_URL — base URL nodes/operators reach
@@ -40,6 +43,9 @@ class Config:
             cert_dir        = os.environ.get("HONE_CERT_DIR", f"{data}/tls"),
             fleet_secret    = os.environ.get("HONE_FLEET_SECRET", ""),
             admin_token     = os.environ.get("HONE_ADMIN_TOKEN", ""),
+            session_secret  = os.environ.get("HONE_SESSION_SECRET", ""),
+            google_client_id     = os.environ.get("HONE_GOOGLE_CLIENT_ID", ""),
+            google_client_secret = os.environ.get("HONE_GOOGLE_CLIENT_SECRET", ""),
             http_port       = port,
             hostname        = host,
             public_url      = (os.environ.get("HONE_PUBLIC_URL")

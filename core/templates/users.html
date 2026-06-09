@@ -1,0 +1,144 @@
+{% extends "base.html" %}
+{% block title %}Users — hone-core{% endblock %}
+{% block content %}
+<div class="d-flex align-items-center justify-content-between mb-3">
+  <h5 class="mb-0">Users</h5>
+</div>
+
+{# Pending approvals #}
+{% if pending %}
+<div class="card mb-4 border-warning">
+  <div class="card-header text-warning fw-semibold">
+    <i class="bi bi-person-exclamation me-1"></i>
+    Pending approval ({{ pending | length }})
+  </div>
+  <div class="table-responsive">
+    <table class="table table-sm table-hover mb-0">
+      <thead class="table-light">
+        <tr>
+          <th>Email</th>
+          <th>Display name</th>
+          <th>Provider</th>
+          <th>Registered</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for u in pending %}
+        <tr>
+          <td>{{ u.email }}</td>
+          <td class="text-muted">{{ u.display_name or "—" }}</td>
+          <td><span class="badge text-bg-secondary">{{ u.auth_provider }}</span></td>
+          <td class="text-muted small">{{ when(u.created_at) }}</td>
+          <td class="text-end">
+            <form method="post" action="/users/{{ u.id }}/approve" class="d-inline">
+              <button class="btn btn-success btn-sm">Approve</button>
+            </form>
+            <form method="post" action="/users/{{ u.id }}/delete" class="d-inline"
+                  data-confirm="Delete account for {{ u.email }}? This cannot be undone."
+                  data-confirm-button="Delete">
+              <button class="btn btn-outline-danger btn-sm">Delete</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+{# Active users #}
+<div class="card mb-4">
+  <div class="card-header fw-semibold">
+    <i class="bi bi-people me-1"></i>
+    Active ({{ approved | length }})
+  </div>
+  {% if approved %}
+  <div class="table-responsive">
+    <table class="table table-sm table-hover mb-0">
+      <thead class="table-light">
+        <tr>
+          <th>Email</th>
+          <th>Display name</th>
+          <th>Provider</th>
+          <th>Approved</th>
+          <th>Last login</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for u in approved %}
+        <tr>
+          <td>{{ u.email }}</td>
+          <td class="text-muted">{{ u.display_name or "—" }}</td>
+          <td><span class="badge text-bg-secondary">{{ u.auth_provider }}</span></td>
+          <td class="text-muted small">{{ when(u.approved_at) }}</td>
+          <td class="text-muted small">{{ when(u.last_login_at) }}</td>
+          <td class="text-end">
+            <form method="post" action="/users/{{ u.id }}/revoke" class="d-inline"
+                  data-confirm="Revoke access for {{ u.email }}?"
+                  data-confirm-button="Revoke">
+              <button class="btn btn-outline-warning btn-sm">Revoke</button>
+            </form>
+            <form method="post" action="/users/{{ u.id }}/delete" class="d-inline"
+                  data-confirm="Delete account for {{ u.email }}? This cannot be undone."
+                  data-confirm-button="Delete">
+              <button class="btn btn-outline-danger btn-sm">Delete</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="card-body text-muted small">No approved users yet.</div>
+  {% endif %}
+</div>
+
+{# Revoked #}
+{% if revoked %}
+<div class="card mb-4">
+  <div class="card-header fw-semibold text-muted">
+    <i class="bi bi-person-slash me-1"></i>
+    Revoked ({{ revoked | length }})
+  </div>
+  <div class="table-responsive">
+    <table class="table table-sm table-hover mb-0">
+      <thead class="table-light">
+        <tr>
+          <th>Email</th>
+          <th>Display name</th>
+          <th>Provider</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for u in revoked %}
+        <tr>
+          <td class="text-muted">{{ u.email }}</td>
+          <td class="text-muted">{{ u.display_name or "—" }}</td>
+          <td><span class="badge text-bg-secondary">{{ u.auth_provider }}</span></td>
+          <td class="text-end">
+            <form method="post" action="/users/{{ u.id }}/approve" class="d-inline">
+              <button class="btn btn-outline-success btn-sm">Re-approve</button>
+            </form>
+            <form method="post" action="/users/{{ u.id }}/delete" class="d-inline"
+                  data-confirm="Delete account for {{ u.email }}? This cannot be undone."
+                  data-confirm-button="Delete">
+              <button class="btn btn-outline-danger btn-sm">Delete</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+{% if not pending and not approved and not revoked %}
+<div class="text-muted">No user accounts yet. Users can register at <a href="/register">/register</a>.</div>
+{% endif %}
+{% endblock %}

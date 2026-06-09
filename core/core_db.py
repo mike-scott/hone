@@ -667,7 +667,26 @@ ALTER TABLE nodes ADD COLUMN health TEXT;
 ALTER TABLE nodes ADD COLUMN health_at INTEGER;
 """
 
-_MIGRATIONS = [_SCHEMA_V1, _SCHEMA_V2]
+# Migration v3 — operator user accounts (self-registration + admin approval).
+# state: 'pending' on signup, 'approved' after admin approves, 'revoked' to block.
+# password_hash is NULL for Google-only users; google_sub is NULL for local users.
+_SCHEMA_V3 = """
+CREATE TABLE users (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    email         TEXT UNIQUE NOT NULL,
+    password_hash TEXT,
+    display_name  TEXT,
+    auth_provider TEXT NOT NULL DEFAULT 'local',
+    google_sub    TEXT UNIQUE,
+    state         TEXT NOT NULL DEFAULT 'pending'
+        CHECK (state IN ('pending', 'approved', 'revoked')),
+    created_at    INTEGER NOT NULL,
+    approved_at   INTEGER,
+    last_login_at INTEGER
+);
+"""
+
+_MIGRATIONS = [_SCHEMA_V1, _SCHEMA_V2, _SCHEMA_V3]
 
 
 def connect(path=None):
@@ -2783,6 +2802,68 @@ def update_node_health(db, node_id, snapshot):
         (json.dumps(snapshot), int(time.time()), node_id))
     db.commit()
     return cur.rowcount > 0
+
+
+# ===========================================================================
+# Operator users
+# ===========================================================================
+
+def get_user_by_email(db, email):
+    return db.execute(
+        "SELECT * FROM users WHERE email = ?", (email.lower().strip(),)
+    ).fetchone()
+
+
+def get_user_by_google_sub(db, sub):
+    return db.execute(
+        "SELECT * FROM users WHERE google_sub = ?", (sub,)
+    ).fetchone()
+
+
+def get_user_by_id(db, user_id):
+    return db.execute(
+        "SELECT * FROM users WHERE id = ?", (user_id,)
+    ).fetchone()
+
+
+def list_users(db):
+    return db.execute(
+        "SELECT * FROM users ORDER BY created_at ASC"
+    ).fetchall()
+
+
+def create_user(db, email, display_name, auth_provider, *,
+                password_hash=None, google_sub=None):
+    now = int(time.time())
+    cur = db.execute(
+        """INSERT INTO users (email, display_name, auth_provider,
+                              password_hash, google_sub, state, created_at)
+           VALUES (?, ?, ?, ?, ?, 'pending', ?)""",
+        (email.lower().strip(), display_name, auth_provider,
+         password_hash, google_sub, now))
+    db.commit()
+    return cur.lastrowid
+
+
+def set_user_state(db, user_id, state):
+    now = int(time.time())
+    approved_at = now if state == "approved" else None
+    db.execute(
+        "UPDATE users SET state = ?, approved_at = COALESCE(?, approved_at) WHERE id = ?",
+        (state, approved_at, user_id))
+    db.commit()
+
+
+def delete_user(db, user_id):
+    db.execute("DELETE FROM users WHERE id = ?", (user_id,))
+    db.commit()
+
+
+def touch_last_login(db, user_id):
+    db.execute(
+        "UPDATE users SET last_login_at = ? WHERE id = ?",
+        (int(time.time()), user_id))
+    db.commit()
 
 
 # ===========================================================================

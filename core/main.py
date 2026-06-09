@@ -11,8 +11,9 @@ import os
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI
+from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.sessions import SessionMiddleware
 
 from core import api, core_db, gather, runtime_config, tls, ui
 from core.config import Config
@@ -55,6 +56,11 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 async def lifespan(app: FastAPI):
     cfg: Config = app.state.config
     log.info("hone-core starting — db=%s", cfg.db_path)
+    if not cfg.session_secret:
+        log.warning(
+            "HONE_SESSION_SECRET is not set — session cookies are unsigned "
+            "and will not survive a restart. Set this to a random secret "
+            "(openssl rand -hex 32) in production.")
     db = core_db.connect(cfg.db_path)
     _project_root = os.path.dirname(_HERE)
     version = core_db.bootstrap_methodology(
@@ -223,12 +229,22 @@ def create_app() -> FastAPI:
     app = FastAPI(title="hone-core", lifespan=lifespan)
     app.state.config = Config.from_env()
 
+    # Session middleware must be added before routers so that route handlers
+    # can read/write request.session.  https_only=True keeps the cookie off
+    # plain-HTTP connections; same_site="lax" is safe for the redirect flow.
+    cfg: Config = app.state.config
+    app.add_middleware(SessionMiddleware,
+                       secret_key=cfg.session_secret or "dev-insecure",
+                       https_only=False,   # allow dev HTTP; production uses TLS
+                       same_site="lax",
+                       session_cookie="hone_session")
+
     app.include_router(api.router)   # /v1/* — the node-facing REST API
-    # The operator web UI is gated by HTTP Basic auth (HONE_ADMIN_TOKEN as the
-    # password) — it exposes the corpus + admin actions (enrollment approval,
-    # gather, settings) and must never be open to the internet. /v1/* keeps
-    # its own fleet-secret/bearer gates; /healthz + /static stay open.
-    app.include_router(ui.router, dependencies=[Depends(api.require_ui_auth)])
+    # The operator web UI now uses session-based auth (login page + signed
+    # cookie) with an admin-approval flow for self-registered users.  Auth
+    # is enforced per-route inside ui.py via auth.require_session /
+    # auth.require_config_admin; the old HTTP Basic gate is removed here.
+    app.include_router(ui.router)
     app.mount("/static",
               StaticFiles(directory=os.path.join(_HERE, "static")),
               name="static")
