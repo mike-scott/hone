@@ -365,6 +365,43 @@ def test_list_pending_enrollments(db):
     assert [e["node_name"] for e in pending] == ["n1"]
 
 
+def test_tag_pending_enrollment_first_lookup_wins_and_is_idempotent(db):
+    """The first user to tag a pending enrollment owns the pairing; the
+       same user re-tagging is a no-op success."""
+    alice = core_db.create_user(db, "alice@x", "alice", "local")
+    enr = core_db.create_enrollment(db, node_name="n1")
+    tagged = core_db.tag_pending_enrollment(db, enr["user_code"], alice)
+    assert tagged["requested_by_user_id"] == alice
+    again = core_db.tag_pending_enrollment(db, enr["user_code"], alice)
+    assert again["requested_by_user_id"] == alice
+
+
+def test_tag_pending_enrollment_guard_refuses_a_second_user(db):
+    """The tag is guarded inside the UPDATE itself (requested_by_user_id
+       IS NULL OR = caller), so a second user is refused at the write —
+       even a caller whose earlier read raced and saw the tag unset
+       cannot overwrite the first user's pairing."""
+    alice = core_db.create_user(db, "alice@x", "alice", "local")
+    bob = core_db.create_user(db, "bob@x", "bob", "local")
+    enr = core_db.create_enrollment(db, node_name="n1")
+    core_db.tag_pending_enrollment(db, enr["user_code"], alice)
+    assert core_db.tag_pending_enrollment(db, enr["user_code"], bob) is None
+    row = db.execute(
+        "SELECT requested_by_user_id FROM node_enrollments "
+        "WHERE user_code=?", (enr["user_code"],)).fetchone()
+    assert row["requested_by_user_id"] == alice
+
+
+def test_tag_pending_enrollment_refuses_decided_or_unknown(db):
+    """No tagging once the enrollment is decided; unknown codes give
+       None too."""
+    alice = core_db.create_user(db, "alice@x", "alice", "local")
+    enr = core_db.create_enrollment(db, node_name="n1")
+    core_db.deny_enrollment(db, enr["user_code"])
+    assert core_db.tag_pending_enrollment(db, enr["user_code"], alice) is None
+    assert core_db.tag_pending_enrollment(db, "ZZZZ-ZZZZ", alice) is None
+
+
 def test_enqueue_and_claim_one_review_per_patchset(db):
     # claim_work_item stamps methodology_version on the row at claim time,
     # which FK-references methodology_versions — so plant one.

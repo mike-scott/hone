@@ -181,6 +181,57 @@ def test_request_review_404_for_unknown_root(ctx):
     assert r.status_code == 404
 
 
+def test_request_review_stamps_admin_id_as_null(ctx):
+    """The fake-admin-session fixture installs the config-token admin
+       (SessionUser.id == None), so an admin-triggered review enqueue
+       produces a SYSTEM-origin work item (requested_by_user_id NULL).
+       That's the natural fit for admin actions — any system-handling
+       node can pick it up."""
+    _plant_patchset(ctx.db)
+    ctx.client.post(f"/review-requests/{quote('r1@x')}",
+                    follow_redirects=False)
+    row = ctx.db.execute(
+        "SELECT requested_by_user_id FROM work_items "
+        "WHERE type=? AND root_message_id=?",
+        (core_db.WORK_ITEM_TYPE_REVIEW, "r1@x")).fetchone()
+    assert row["requested_by_user_id"] is None
+
+
+def test_request_review_stamps_current_user_id_for_a_regular_user(tmp_path):
+    """A regular user clicking Request review enqueues a USER-origin
+       work item with requested_by_user_id pinned to their id — so the
+       resulting review item only feeds onto their own nodes' queue."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from core import auth, runtime_config
+    from types import SimpleNamespace
+
+    db = core_db.connect(str(tmp_path / "hone.db"))
+    uid = core_db.create_user(db, "alice@x", "alice", "local")
+    core_db.set_user_state(db, uid, "approved")
+    alice = auth.SessionUser(id=uid, email="alice@x",
+                              display_name="alice", is_config_admin=False)
+
+    app = FastAPI()
+    app.include_router(ui.router)
+    app.dependency_overrides[auth.require_session] = lambda: alice
+    app.dependency_overrides[auth.require_csrf] = lambda: None
+    app.state.db = db
+    app.state.runtime_config = runtime_config.load(
+        str(tmp_path / "config.yaml"))
+    client = TestClient(app)
+
+    _plant_patchset(db)
+    r = client.post(f"/review-requests/{quote('r1@x')}",
+                    follow_redirects=False)
+    assert r.status_code == 303
+    row = db.execute(
+        "SELECT requested_by_user_id FROM work_items "
+        "WHERE type=? AND root_message_id=?",
+        (core_db.WORK_ITEM_TYPE_REVIEW, "r1@x")).fetchone()
+    assert row["requested_by_user_id"] == uid
+
+
 # --- AI review producer attribution --------------------------------------
 
 def _approved_node(db, name):

@@ -29,7 +29,7 @@
         <table class="table table-sm table-hover align-middle"
                id="nodes-list-{{ b.key }}">
           <thead>
-            <tr><th>ID</th><th>Name</th><th>Capabilities</th>
+            <tr><th>ID</th><th>Name</th><th>Owner</th><th>Capabilities</th>
                 {% if b.key == "in_flight" %}<th>Current claim</th>
                 <th class="text-nowrap">Running</th>{% endif %}
                 {% if b.key == "errored" %}<th>Error</th>{% endif %}
@@ -49,6 +49,16 @@
                 <span class="badge {{ n.bucket_badge }} ms-2">
                   {{ n.bucket_label }}
                 </span>
+                {% if n.is_owner_or_admin and n.owner_user_id %}
+                <span class="badge text-bg-info ms-1" title="You own this node">Yours</span>
+                {% endif %}
+              </td>
+              <td class="small">
+                {% if n.owner_email %}
+                  <code>{{ n.owner_email }}</code>
+                {% else %}
+                  <span class="text-muted">system</span>
+                {% endif %}
               </td>
               <td>{{ n.task_types_display }}</td>
 
@@ -89,8 +99,9 @@
                 <code>{{ n.freshness_display }}</code>
               </td>
               <td class="text-nowrap">
-                {# Hard-delete the node. data-confirm gates with the
-                   shared modal from base.html. #}
+                {# Hard-delete the node — only the owner (or admin) sees
+                   this control. Other viewers see a placeholder. #}
+                {% if n.is_owner_or_admin %}
                 <form method="post" class="d-inline"
                       action="/nodes/{{ n.id }}/delete"
                       data-confirm-title="Delete node?"
@@ -100,6 +111,9 @@
                   <button class="btn btn-sm btn-outline-danger"
                           title="Hard-delete this node">Delete</button>
                 </form>
+                {% else %}
+                <span class="text-muted small">—</span>
+                {% endif %}
               </td>
             </tr>
           {% endfor %}

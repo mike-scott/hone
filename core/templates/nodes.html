@@ -1,12 +1,20 @@
 {% extends "base.html" %}
 {% block title %}Node management · hone-core{% endblock %}
 {% block content %}
-<h1 class="h3 mb-4">Node management</h1>
+<div class="d-flex align-items-center justify-content-between mb-4">
+  <h1 class="h3 mb-0">Node management</h1>
+  <form method="get" action="/enroll" class="d-flex" role="search">
+    <input type="text" name="code" class="form-control form-control-sm me-2"
+           style="max-width: 14em"
+           aria-label="Node pairing code (XXXX-XXXX)">
+    <button class="btn btn-sm btn-primary" type="submit">Pair a new node</button>
+  </form>
+</div>
 
 <h2 class="h5">Pending enrollments</h2>
 <p class="text-muted small">
-  A node joins the fleet by enrolling itself; approve it here. Approval is the
-  trust anchor for adding a node.
+  Nodes you've started pairing — enter the user code your node displayed using
+  "Pair a new node" above, then approve it to bring it into the fleet.
 </p>
 {% if pending %}
 <table class="table table-sm align-middle">

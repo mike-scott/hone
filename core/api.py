@@ -738,8 +738,17 @@ def claim_task(request: Request, body: ClaimRequest | None = None,
         wants_draft = "draft" in types_decl
 
     if work_type_ids is not False:
+        # Ownership-aware claim: serve this node's owner's user-requested
+        # items first; fall back to the system pool (system items, plus
+        # user items whose requester owns no active node — see
+        # claim_work_item's orphan rescue) only if the node opts in via
+        # handles_system. Legacy nodes (owner NULL, handles_system=1 by
+        # migration default) keep claiming the system pool as before.
+        owner_user_id = node.get("owner_user_id")
+        handles_system = bool(node.get("handles_system", 1))
         wi = core_db.claim_work_item(
-            db, worker_id, methodology_version=version, types=work_type_ids)
+            db, worker_id, methodology_version=version, types=work_type_ids,
+            owner_user_id=owner_user_id, handles_system=handles_system)
         if wi is not None:
             builder = _BUILD_PAYLOAD.get(wi["type"])
             if builder is not None:

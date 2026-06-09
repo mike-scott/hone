@@ -1083,6 +1083,7 @@ def _patchset_view(db, root):
     work_item_back_qs = "?back=" + quote(f"/patchsets/{root}", safe="")
     work_items = []
     has_review_item = False
+    owner_emails = _owner_email_map(db)
     for w in core_db.work_items_for_patchset(db, root):
         type_name  = core_db.WORK_ITEM_TYPE_NAMES.get(w["type"], "?")
         state_name = core_db.WORK_ITEM_STATE_NAMES.get(w["state"], "?")
@@ -1103,6 +1104,8 @@ def _patchset_view(db, root):
             "session_role":  w["session_role"],
             "stratum_label": w["stratum_label"],
             "detail_url":    f"/work-items/{w['id']}{work_item_back_qs}",
+            "requested_by_email": owner_emails.get(
+                                     w.get("requested_by_user_id")),
         })
 
     # Review-request availability for the manual trigger. Review is no
@@ -1179,7 +1182,7 @@ async def delete_review(request: Request, root_message_id: str,
 
 @router.post("/review-requests/{root_message_id:path}", dependencies=[Depends(auth.require_csrf)])
 async def request_review(request: Request, root_message_id: str,
-                          _: auth.SessionUser = Depends(auth.require_session)):
+                          current_user: auth.SessionUser = Depends(auth.require_session)):
     """Operator-triggered review enqueue. Review is not auto-enqueued
        (a gather run would flood the queue); the operator requests one
        patchset at a time here. Reuses core_db.maybe_enqueue_review — the
@@ -1194,7 +1197,11 @@ async def request_review(request: Request, root_message_id: str,
         raise HTTPException(status.HTTP_404_NOT_FOUND,
                             f"no patchset with root_message_id "
                             f"{root_message_id!r}")
-    core_db.maybe_enqueue_review(db, root_message_id)
+    # The user who clicked the button owns the resulting work item; this
+    # routes it onto their own nodes' user queue. The config-token admin
+    # has id=None — admin-triggered reviews are system items.
+    core_db.maybe_enqueue_review(db, root_message_id,
+                                  requested_by_user_id=current_user.id)
     return RedirectResponse(f"/patchsets/{quote(root_message_id)}",
                              status_code=303)
 
@@ -1320,7 +1327,25 @@ _NODE_BUCKET_BADGE = {"errored":   "text-bg-danger",
                        "idle":      "text-bg-secondary"}
 
 
-def _nodes_view(db, runtime_cfg):
+def _owner_email_map(db):
+    """A {user_id: email} index for decorating node rows with the
+       owner's email. Cheap (one scan of users), and the per-row lookup
+       is a dict access."""
+    return {u["id"]: u["email"] for u in core_db.list_users(db)}
+
+
+def _can_manage_node(node, current_user):
+    """True when `current_user` may mutate this node — its owner or the
+       config-token admin. Used as the `is_owner_or_admin` flag in node
+       view-models and as the gate inside mutation handlers."""
+    if current_user is None:
+        return False
+    if current_user.is_config_admin:
+        return True
+    return node.get("owner_user_id") == current_user.id
+
+
+def _nodes_view(db, runtime_cfg, current_user=None):
     """The view-model the /nodes table partial renders. Sorts each
        enrolled node into one of four buckets — errored / stale /
        in_flight / idle — and augments each row with the
@@ -1330,11 +1355,16 @@ def _nodes_view(db, runtime_cfg):
        chip uses: a node carrying an anthropic-error wins over
        staleness, in-flight wins over plain idle. Each bucket is
        sorted by last_seen DESC so the most-recently-active row
-       within the bucket appears first."""
+       within the bucket appears first.
+
+       Every approved node shows up regardless of who's viewing — the
+       per-row `is_owner_or_admin` flag is what gates the action
+       controls in the template."""
     now = int(time.time())
     stale_after = (runtime_cfg.heartbeat_seconds
                     * _FLEET_STALE_HEARTBEAT_MULT)
     back_qs = "?back=" + quote("/nodes", safe="")
+    owner_emails = _owner_email_map(db)
 
     # Build a name → in-flight claim index so we can attach the
     # claim to the right node row in a single pass below. One query,
@@ -1362,6 +1392,9 @@ def _nodes_view(db, runtime_cfg):
                                       status["bucket"], "text-bg-secondary"),
             "health_display":     _health_display(n.get("health")),
             "detail_url":         f"/nodes/{n['id']}{back_qs}",
+            "owner_email":        owner_emails.get(n.get("owner_user_id")),
+            "handles_system":     bool(n.get("handles_system", 1)),
+            "is_owner_or_admin":  _can_manage_node(n, current_user),
         })
         buckets[status["bucket"]].append(n)
 
@@ -1388,22 +1421,32 @@ async def nodes(request: Request,
        nodes, sorted into health buckets (errored / stale / in-flight
        / idle). The bucketed table partial polls /nodes/fleet-table
        every 10s so an operator sees rows move between buckets and
-       running-time tick without reloading."""
+       running-time tick without reloading.
+
+       Pending enrollments are scoped: a regular user sees only the
+       enrollments they tagged via /enroll (the lookup-er); the
+       config-token admin sees every pending row. Approved nodes are
+       global — every viewer sees every node, owner-specific controls
+       just render conditionally."""
     db = request.app.state.db
+    scope_user_id = (None if current_user.is_config_admin
+                     else current_user.id)
     pending = []
-    for e in core_db.list_pending_enrollments(db):
+    for e in core_db.list_pending_enrollments(
+            db, requested_by_user_id=scope_user_id):
         e = dict(e)
         e["task_types_display"] = _types(e.get("task_types"))
         e["requested_display"]  = _when(e.get("created_at"))
         pending.append(e)
     ctx = {"pending": pending, "current_user": current_user,
-            **_nodes_view(db, request.app.state.runtime_config)}
+            **_nodes_view(db, request.app.state.runtime_config,
+                          current_user=current_user)}
     return templates.TemplateResponse(request, "nodes.html", ctx)
 
 
 @router.get("/nodes/fleet-table", response_class=HTMLResponse)
 async def nodes_fleet_table(request: Request,
-                              _: auth.SessionUser = Depends(auth.require_session)):
+                              current_user: auth.SessionUser = Depends(auth.require_session)):
     """The bucketed enrolled-nodes table as an HTML partial — polled
        by the /nodes page every 10s. Skips the pending-enrollment
        table (static between approve/deny clicks; an unnecessary
@@ -1411,8 +1454,10 @@ async def nodes_fleet_table(request: Request,
        hover)."""
     return templates.TemplateResponse(
         request, "_nodes_fleet_table.html",
-        _nodes_view(request.app.state.db,
-                     request.app.state.runtime_config))
+        {"current_user": current_user,
+         **_nodes_view(request.app.state.db,
+                       request.app.state.runtime_config,
+                       current_user=current_user)})
 
 
 # --- per-node detail ------------------------------------------------------
@@ -1429,13 +1474,18 @@ def _node_claimed_by_label(node):
     return node.get("name") or str(node["id"])
 
 
-def _node_live_panel_view(db, node_id, runtime_cfg):
+def _node_live_panel_view(db, node_id, runtime_cfg, *, current_user=None):
     """Live-status fields the detail page's Node + Health cards render.
        Same bucket / running-time / freshness shape the /nodes table
        uses (via _node_status_fields), plus the bucket badge class
        and a pre-computed claim-link triple for the in-flight card.
        Returns None when the node is gone — the polling endpoint
-       reads that as a 404."""
+       reads that as a 404.
+
+       Decorates the row with `owner_email` and `is_owner_or_admin`
+       so the template can render the ownership line and gate the
+       per-node action controls. When `current_user` is None the
+       flag is conservatively False."""
     node = core_db.get_node(db, node_id)
     if node is None:
         return None
@@ -1458,6 +1508,14 @@ def _node_live_panel_view(db, node_id, runtime_cfg):
     node["health_at_display"]  = _when(node.get("health_at"))
     node["bucket_badge"]       = _NODE_BUCKET_BADGE.get(
                                      status["bucket"], "text-bg-secondary")
+    owner_email = None
+    if node.get("owner_user_id") is not None:
+        owner_row = core_db.get_user_by_id(db, node["owner_user_id"])
+        if owner_row is not None:
+            owner_email = owner_row["email"]
+    node["owner_email"]        = owner_email
+    node["handles_system"]     = bool(node.get("handles_system", 1))
+    node["is_owner_or_admin"]  = _can_manage_node(node, current_user)
     return {"node":              node,
              "node_state_active": core_db.NODE_STATE_ACTIVE}
 
@@ -1480,7 +1538,7 @@ def _claims_url(node_id, *, page=None, size=None, back=None):
 
 def _node_detail_view(db, node_id, runtime_cfg, *,
                        claims_page=1, claims_size=_DEFAULT_CLAIMS_PAGE_SIZE,
-                       back=None):
+                       back=None, current_user=None):
     """Build the per-node detail render context — node row + health
        snapshot + recent claims (paged) + recent reviews. Raises 404
        when the node is unknown (revoked tombstones are still
@@ -1495,7 +1553,8 @@ def _node_detail_view(db, node_id, runtime_cfg, *,
        (defaults 1 / 10). The paginator uses full-page navigation
        — the claims history isn't live like the cards above it, so
        there's no HTMX swap target to thread through."""
-    panel = _node_live_panel_view(db, node_id, runtime_cfg)
+    panel = _node_live_panel_view(db, node_id, runtime_cfg,
+                                    current_user=current_user)
     if panel is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND,
                             f"no node with id {node_id}")
@@ -1595,7 +1654,7 @@ async def node_detail(request: Request, node_id: int,
     ctx = _node_detail_view(request.app.state.db, node_id,
                              request.app.state.runtime_config,
                              claims_page=claims_page, claims_size=claims_size,
-                             back=safe_back)
+                             back=safe_back, current_user=current_user)
     ctx["back_url"] = safe_back or "/nodes"
     ctx["current_user"] = current_user
     return templates.TemplateResponse(request, "node_detail.html", ctx)
@@ -1603,7 +1662,7 @@ async def node_detail(request: Request, node_id: int,
 
 @router.get("/nodes/{node_id:int}/live", response_class=HTMLResponse)
 async def node_detail_live_panel(request: Request, node_id: int,
-                                  _: auth.SessionUser = Depends(auth.require_session)):
+                                  current_user: auth.SessionUser = Depends(auth.require_session)):
     """The live status panel for the per-node detail page — Node +
        Health cards with bucket badge, running time, and relative
        freshness. Polled every 10s by HTMX so an operator can leave
@@ -1611,7 +1670,8 @@ async def node_detail_live_panel(request: Request, node_id: int,
        reloading. The recent-claims and reviews tables below don't
        refresh on this poll — they're history, full reload is fine."""
     panel = _node_live_panel_view(request.app.state.db, node_id,
-                                    request.app.state.runtime_config)
+                                    request.app.state.runtime_config,
+                                    current_user=current_user)
     if panel is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND,
                             f"no node with id {node_id}")
@@ -1749,8 +1809,20 @@ async def retry_unappliable(request: Request, work_item_id: int,
 @router.get("/enroll", response_class=HTMLResponse)
 async def enroll(request: Request, code: str | None = None,
                  current_user: auth.SessionUser = Depends(auth.require_session)):
-    """A node's enrollment verification page — the `verification_uri` it logs.
-       The operator enters the user code and approves the node."""
+    """A node's enrollment verification page — the `verification_uri`
+       it logs. Pairing flow:
+
+       1. The user enters their node's user_code on /enroll.
+       2. On the first successful lookup we stamp
+          node_enrollments.requested_by_user_id = current_user.id
+          (tag_pending_enrollment). The pending row from then on shows
+          on this user's /nodes only.
+       3. A different user looking up the same code afterwards sees an
+          "already paired" error — first-lookup-wins.
+
+       The config-token admin (id=None) bypasses tagging — admins can
+       look up and approve any pending enrollment without claiming it
+       to themselves; the resulting node is created ownerless."""
     db = request.app.state.db
     ctx = {"code": code, "enrollment": None, "error": None}
     if code:
@@ -1762,24 +1834,58 @@ async def enroll(request: Request, code: str | None = None,
                 enr["state"], "?")
             ctx["error"] = f"That enrollment is already {state_name}."
         else:
-            enr = dict(enr)
-            enr["task_types_display"] = _types(enr.get("task_types"))
-            enr["requested_display"]  = _when(enr.get("created_at"))
-            ctx["enrollment"] = enr
+            if current_user.is_config_admin:
+                tagged = dict(enr)
+            else:
+                tagged = core_db.tag_pending_enrollment(
+                    db, code, current_user.id)
+                if tagged is None:
+                    # The only way tag fails for a still-pending,
+                    # unexpired row is another user already owns it.
+                    ctx["error"] = ("That enrollment has already been "
+                                    "paired with another user.")
+                    tagged = None
+            if tagged is not None:
+                tagged["task_types_display"] = _types(tagged.get("task_types"))
+                tagged["requested_display"]  = _when(tagged.get("created_at"))
+                ctx["enrollment"] = tagged
     ctx["current_user"] = current_user
     return templates.TemplateResponse(request, "enroll.html", ctx)
 
 
 @router.post("/nodes/enrollments/{user_code}/approve", dependencies=[Depends(auth.require_csrf)])
 async def approve_enrollment(request: Request, user_code: str,
-                              _: auth.SessionUser = Depends(auth.require_session)):
-    """Approve a pending enrollment — the node joins the fleet. Errors
-       (already decided / expired / unknown / name now conflicts with
-       an active node) silently redirect; the operator sees the row's
-       state on the refreshed page."""
+                              current_user: auth.SessionUser = Depends(auth.require_session)):
+    """Approve a pending enrollment — the node joins the fleet, owned
+       by the user who paired it. Regular users may only approve a
+       pending enrollment they previously tagged via /enroll (the
+       lookup-er); the config-token admin can approve any pending
+       enrollment. Ownership follows the pairing, not the approver:
+       an admin approving an enrollment a user tagged still creates
+       the node owned by that user — admin approval is a shortcut,
+       not an ownership grab. Only an untagged enrollment (admin
+       looked it up directly) yields an ownerless system-only node.
+
+       Errors (already decided / expired / unknown / name now
+       conflicts with an active node / not yours to approve) silently
+       redirect; the operator sees the row's state on the refreshed
+       page."""
+    db = request.app.state.db
+    enr = core_db.get_enrollment_by_user_code(db, user_code)
+    if enr is None or enr["state"] != core_db.NODE_ENROLLMENT_STATE_PENDING:
+        return RedirectResponse("/nodes", status_code=303)
+    if (not current_user.is_config_admin
+            and enr.get("requested_by_user_id") != current_user.id):
+        # Not the user who paired the device; not allowed to approve.
+        return RedirectResponse("/nodes", status_code=303)
+    # For a regular user the gate above pins requested_by_user_id to
+    # current_user.id, so the tag is the owner in both paths.
+    owner_user_id = enr.get("requested_by_user_id")
     try:
-        core_db.approve_enrollment(request.app.state.db, user_code,
-                                   decided_by="operator")
+        core_db.approve_enrollment(
+            db, user_code,
+            decided_by=current_user.email,
+            owner_user_id=owner_user_id)
     except (KeyError, ValueError, core_db.DuplicateNodeName):
         pass
     return RedirectResponse("/nodes", status_code=303)
@@ -1787,21 +1893,92 @@ async def approve_enrollment(request: Request, user_code: str,
 
 @router.post("/nodes/{node_id}/delete", dependencies=[Depends(auth.require_csrf)])
 async def delete_node(request: Request, node_id: int,
-                       _: auth.SessionUser = Depends(auth.require_session)):
+                       current_user: auth.SessionUser = Depends(auth.require_session)):
     """Hard-delete an enrolled node from the fleet — removes the row,
-       deletes its tokens, NULLs the audit references. A no-op if the
-       node was already deleted (e.g. a stale tab posting twice)."""
-    core_db.delete_node(request.app.state.db, node_id)
+       deletes its tokens, NULLs the audit references. Gated on
+       ownership: only the node's owner or the config-token admin may
+       delete it. A 404 if the node is unknown, 403 if the caller
+       isn't the owner. A no-op if the node was already deleted (e.g.
+       a stale tab posting twice) — under the gate, that means the
+       row is gone and we send the operator back to /nodes."""
+    db = request.app.state.db
+    node = core_db.get_node(db, node_id)
+    if node is None:
+        # Already deleted — no information leak (caller has access to
+        # the fleet listing anyway).
+        return RedirectResponse("/nodes", status_code=303)
+    if not _can_manage_node(node, current_user):
+        raise HTTPException(status.HTTP_403_FORBIDDEN,
+                            "only the node owner may delete it")
+    core_db.delete_node(db, node_id)
     return RedirectResponse("/nodes", status_code=303)
+
+
+@router.post("/nodes/{node_id}/configure", dependencies=[Depends(auth.require_csrf)])
+async def configure_node(request: Request, node_id: int,
+                          current_user: auth.SessionUser = Depends(auth.require_session)):
+    """Owner-controlled per-node settings — currently just the
+       handles_system flag (whether the node falls back to the system
+       work pool once its owner's user queue is empty). Form posts a
+       single `handles_system=on|off` field; missing == off (HTML
+       checkbox semantics). Gated on ownership (owner or
+       config-token admin); 403 otherwise."""
+    db = request.app.state.db
+    node = core_db.get_node(db, node_id)
+    if node is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND,
+                            f"no node with id {node_id}")
+    if not _can_manage_node(node, current_user):
+        raise HTTPException(status.HTTP_403_FORBIDDEN,
+                            "only the node owner may configure it")
+    form = await request.form()
+    handles_system = (form.get("handles_system") or "").lower() in (
+        "on", "1", "true", "yes")
+    core_db.set_node_handles_system(db, node_id, handles_system)
+    return RedirectResponse(f"/nodes/{node_id}", status_code=303)
+
+
+@router.post("/nodes/{node_id}/owner", dependencies=[Depends(auth.require_csrf)])
+async def change_node_owner(request: Request, node_id: int,
+                             _: auth.SessionUser = Depends(auth.require_config_admin)):
+    """Reassign a node's owner — admin-only. Posts `owner_email`; an
+       empty field makes the node ownerless (system-only). An unknown
+       email is a 404 (the form is admin-driven so a typo deserves a
+       loud error)."""
+    db = request.app.state.db
+    if core_db.get_node(db, node_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND,
+                            f"no node with id {node_id}")
+    form = await request.form()
+    raw = (form.get("owner_email") or "").strip()
+    if not raw:
+        core_db.set_node_owner(db, node_id, None)
+    else:
+        user = core_db.get_user_by_email(db, raw)
+        if user is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND,
+                                f"no user with email {raw!r}")
+        core_db.set_node_owner(db, node_id, user["id"])
+    return RedirectResponse(f"/nodes/{node_id}", status_code=303)
 
 
 @router.post("/nodes/enrollments/{user_code}/deny", dependencies=[Depends(auth.require_csrf)])
 async def deny_enrollment(request: Request, user_code: str,
-                           _: auth.SessionUser = Depends(auth.require_session)):
-    """Deny a pending enrollment."""
+                           current_user: auth.SessionUser = Depends(auth.require_session)):
+    """Deny a pending enrollment — same ownership rule as approve:
+       only the user who paired the device (or the config-token admin)
+       can deny it. Silent on errors (unknown / non-pending) to keep
+       the flow idempotent under double-submit."""
+    db = request.app.state.db
+    enr = core_db.get_enrollment_by_user_code(db, user_code)
+    if enr is None or enr["state"] != core_db.NODE_ENROLLMENT_STATE_PENDING:
+        return RedirectResponse("/nodes", status_code=303)
+    if (not current_user.is_config_admin
+            and enr.get("requested_by_user_id") != current_user.id):
+        return RedirectResponse("/nodes", status_code=303)
     try:
-        core_db.deny_enrollment(request.app.state.db, user_code,
-                                decided_by="operator")
+        core_db.deny_enrollment(db, user_code,
+                                decided_by=current_user.email)
     except (KeyError, ValueError):
         pass
     return RedirectResponse("/nodes", status_code=303)

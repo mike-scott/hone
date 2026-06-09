@@ -713,6 +713,34 @@ INSERT INTO users_new
            state, created_at, approved_at, last_login_at FROM users;
 DROP TABLE users;
 ALTER TABLE users_new RENAME TO users;
+
+-- Node ownership: every node is now optionally owned by a user. Legacy
+-- nodes (rows present before this migration) get NULL — they keep working
+-- as system-only workers (handles_system=1 default below). New nodes are
+-- stamped with owner_user_id by approve_enrollment().
+ALTER TABLE nodes ADD COLUMN owner_user_id INTEGER
+    REFERENCES users(id) ON DELETE SET NULL;
+-- Whether this node falls back to the system pool when its owner's user
+-- queue is empty. Default 1 keeps legacy nodes claiming as they did pre-
+-- migration; approve_enrollment() explicitly sets 0 for new nodes so a
+-- freshly-paired node is strictly user-only until its owner opts in from
+-- the /nodes/{id} detail page.
+ALTER TABLE nodes ADD COLUMN handles_system INTEGER NOT NULL DEFAULT 1
+    CHECK (handles_system IN (0, 1));
+CREATE INDEX idx_nodes_owner ON nodes(owner_user_id);
+
+-- Pending-enrollment ownership: stamped when a user first looks up the
+-- user_code on /enroll, so the pending row appears only on that user's
+-- /nodes page (first-lookup-wins pairing).
+ALTER TABLE node_enrollments ADD COLUMN requested_by_user_id INTEGER
+    REFERENCES users(id) ON DELETE SET NULL;
+
+-- Work-item origin: NULL = system (gather / orchestrator), non-NULL =
+-- user-requested. Drives the two-step claim in claim_work_item.
+ALTER TABLE work_items ADD COLUMN requested_by_user_id INTEGER
+    REFERENCES users(id) ON DELETE SET NULL;
+CREATE INDEX idx_work_items_user_claimable
+    ON work_items(requested_by_user_id, state, type, enqueued_at);
 """
 
 _MIGRATIONS = [_SCHEMA_V1, _SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4]
@@ -1408,11 +1436,12 @@ def tags_for_patchset(db, root_message_id):
 # Work queue  (prepare + review per-patchset, train per-patch-message)
 # ===========================================================================
 
-def enqueue_prepare(db, root_message_id):
+def enqueue_prepare(db, root_message_id, *, requested_by_user_id=None):
     """Enqueue a `prepare` work item for a gathered patchset. Returns the
        work-item id (or the existing one if a prepare item already exists
-       for this patchset). Raises ValueError if the patchset is not
-       gathered."""
+       for this patchset). `requested_by_user_id` stamps origin: NULL =
+       system (gather), non-NULL = user-requested. Raises ValueError if
+       the patchset is not gathered."""
     root = norm_msgid(root_message_id)
     ps = db.execute("SELECT state FROM patchsets WHERE root_message_id=?",
                     (root,)).fetchone()
@@ -1426,20 +1455,21 @@ def enqueue_prepare(db, root_message_id):
     if existing:
         return existing["id"]
     cur = db.execute(
-        "INSERT INTO work_items (type,root_message_id,state,enqueued_at) "
-        "VALUES (?,?,?,?)",
+        "INSERT INTO work_items (type,root_message_id,state,enqueued_at,"
+        "requested_by_user_id) VALUES (?,?,?,?,?)",
         (WORK_ITEM_TYPE_PREPARE, root, WORK_ITEM_STATE_CLAIMABLE,
-         int(time.time())))
+         int(time.time()), requested_by_user_id))
     db.commit()
     return cur.lastrowid
 
 
-def enqueue_review(db, root_message_id):
+def enqueue_review(db, root_message_id, *, requested_by_user_id=None):
     """Enqueue a `review` work item for a gathered patchset. Returns the
        work-item id (or the existing one if a review item already exists for
-       this patchset). Raises ValueError if the patchset is not gathered,
-       or if its prepare task has not produced a patchset_metadata row yet
-       (prepare gates review — see docs/ARCHITECTURE-WORK-LIFECYCLE.md)."""
+       this patchset). `requested_by_user_id` stamps origin: NULL = system,
+       non-NULL = user-requested. Raises ValueError if the patchset is not
+       gathered, or if its prepare task has not produced a patchset_metadata
+       row yet (prepare gates review — see docs/ARCHITECTURE-WORK-LIFECYCLE.md)."""
     root = norm_msgid(root_message_id)
     ps = db.execute("SELECT state FROM patchsets WHERE root_message_id=?",
                     (root,)).fetchone()
@@ -1458,17 +1488,18 @@ def enqueue_review(db, root_message_id):
     if existing:
         return existing["id"]
     cur = db.execute(
-        "INSERT INTO work_items (type,root_message_id,state,enqueued_at) "
-        "VALUES (?,?,?,?)",
+        "INSERT INTO work_items (type,root_message_id,state,enqueued_at,"
+        "requested_by_user_id) VALUES (?,?,?,?,?)",
         (WORK_ITEM_TYPE_REVIEW, root, WORK_ITEM_STATE_CLAIMABLE,
-         int(time.time())))
+         int(time.time()), requested_by_user_id))
     db.commit()
     return cur.lastrowid
 
 
 def enqueue_session_train(db, *, session_id, root_message_id,
                           patch_message_id, comment_message_id,
-                          session_role, stratum_label):
+                          session_role, stratum_label,
+                          requested_by_user_id=None):
     """Create one `train` work item, bound to a session at insertion.
        Called by the session orchestrator at `draft → ready` materialisation
        (once per `(patch, comment)` pair that passed the trainability
@@ -1486,10 +1517,12 @@ def enqueue_session_train(db, *, session_id, root_message_id,
     cur = db.execute(
         "INSERT INTO work_items (type,root_message_id,message_id,"
         "comment_message_id,state,training_session_id,session_role,"
-        "stratum_label,enqueued_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        "stratum_label,enqueued_at,requested_by_user_id) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
         (WORK_ITEM_TYPE_TRAIN, root, norm_msgid(patch_message_id),
          norm_msgid(comment_message_id), WORK_ITEM_STATE_CLAIMABLE,
-         session_id, session_role, stratum_label, int(time.time())))
+         session_id, session_role, stratum_label, int(time.time()),
+         requested_by_user_id))
     db.commit()
     return cur.lastrowid
 
@@ -1501,7 +1534,7 @@ def enqueue_session_train(db, *, session_id, root_message_id,
 # orchestrator at session materialisation (see enqueue_session_train).
 # ----------------------------------------------------------------------------
 
-def maybe_enqueue_prepare(db, root_message_id):
+def maybe_enqueue_prepare(db, root_message_id, *, requested_by_user_id=None):
     """Enqueue a `prepare` work item for `root_message_id` once the patchset
        row exists in state=GATHERED. Idempotent — re-calling once the
        prepare item exists is a no-op. Returns the work-item id if a
@@ -1513,10 +1546,10 @@ def maybe_enqueue_prepare(db, root_message_id):
         (root, PATCHSET_STATE_GATHERED)).fetchone()
     if ps is None:
         return None
-    return enqueue_prepare(db, root)
+    return enqueue_prepare(db, root, requested_by_user_id=requested_by_user_id)
 
 
-def maybe_enqueue_review(db, root_message_id):
+def maybe_enqueue_review(db, root_message_id, *, requested_by_user_id=None):
     """Enqueue a `review` work item for `root_message_id` once (a) the
        patchset has a `patchset_metadata` row (prepare has terminated), and
        (b) all of its patch messages are in the corpus (count of kind=PATCH
@@ -1541,12 +1574,32 @@ def maybe_enqueue_review(db, root_message_id):
         (root, MSG_TYPE_PATCH)).fetchone()["n"]
     if have < ps["n_patches"]:
         return None
-    return enqueue_review(db, root)
+    return enqueue_review(db, root, requested_by_user_id=requested_by_user_id)
 
 
 def claim_work_item(db, worker_id, *, methodology_version, types=None,
+                    owner_user_id=None, handles_system=True,
                     lease_seconds=1800):
     """Atomically claim the oldest claimable (or lease-expired) work item.
+
+       Claim order:
+         1. If `owner_user_id` is not None, prefer a USER item whose
+            `requested_by_user_id` matches the owner (FIFO).
+         2. Otherwise (or if no owner item is available) and
+            `handles_system` is True, fall back to the SYSTEM pool
+            (FIFO): system-origin items (`requested_by_user_id IS
+            NULL`) plus *orphan rescue* — USER items whose requester
+            currently owns no active node. Such an item has no
+            dedicated server, so the system pool absorbs it rather
+            than letting it starve (a user who pairs a node later
+            takes their queue back; a user who deletes their last
+            node releases pending items to the pool).
+         3. Return None.
+
+       A node with no owner *and* `handles_system=False` is configured for
+       nothing — it gets None. A node with no owner and handles_system=True
+       behaves as today: system-only (plus rescue).
+
        `types`, if given, restricts to that subset of WORK_ITEM_TYPE_*.
        Marks the item claimed under a fresh claim_id + lease and stamps
        `methodology_version` on the row — the version is frozen at
@@ -1561,14 +1614,39 @@ def claim_work_item(db, worker_id, *, methodology_version, types=None,
 
        SQLite serializes writers, so two workers cannot claim the same row;
        a crashed worker's claim is reclaimed once its lease elapses."""
+    if types is not None:
+        types = tuple(types)
+        if not types:
+            return None
+
+    if owner_user_id is not None:
+        row = _try_claim(db, worker_id, methodology_version, types,
+                         lease_seconds,
+                         origin_clause="AND requested_by_user_id=?",
+                         origin_params=(owner_user_id,))
+        if row is not None:
+            return row
+    if handles_system:
+        return _try_claim(
+            db, worker_id, methodology_version, types, lease_seconds,
+            origin_clause=(
+                "AND (requested_by_user_id IS NULL "
+                "     OR requested_by_user_id NOT IN "
+                "        (SELECT owner_user_id FROM nodes "
+                "         WHERE owner_user_id IS NOT NULL AND state=?))"),
+            origin_params=(NODE_STATE_ACTIVE,))
+    return None
+
+
+def _try_claim(db, worker_id, methodology_version, types, lease_seconds,
+               *, origin_clause, origin_params):
+    """Single atomic claim attempt, scoped by `origin_clause`. Internal
+       helper for claim_work_item's owner-then-system fallback."""
     now = int(time.time())
     claim_id = _new_claim_id()
     type_clause = ""
     type_params = ()
     if types is not None:
-        types = tuple(types)
-        if not types:
-            return None
         type_clause = f"AND type IN ({','.join('?' * len(types))}) "
         type_params = types
     row = db.execute(
@@ -1579,6 +1657,7 @@ def claim_work_item(db, worker_id, *, methodology_version, types=None,
         f"  SELECT id FROM work_items "
         f"  WHERE (state=? "
         f"         OR (state IN (?, ?) AND lease_expires<=?)) "
+        f"  {origin_clause} "
         f"  {type_clause}"
         f"  ORDER BY enqueued_at, id LIMIT 1) "
         f"RETURNING claim_id, id, type, root_message_id, message_id, "
@@ -1588,7 +1667,7 @@ def claim_work_item(db, worker_id, *, methodology_version, types=None,
          now + lease_seconds, now, methodology_version,
          WORK_ITEM_STATE_CLAIMABLE,
          WORK_ITEM_STATE_CLAIMED, WORK_ITEM_STATE_DEFERRED, now,
-         *type_params)).fetchone()
+         *origin_params, *type_params)).fetchone()
     db.commit()
     return dict(row) if row else None
 
@@ -1923,7 +2002,8 @@ def work_items_for_patchset(db, root_message_id):
         "SELECT id, type, state, message_id, comment_message_id, "
         "claimed_by, claimed_at, lease_expires, heartbeat_at, "
         "completed_at, enqueued_at, methodology_version, "
-        "training_session_id, session_role, stratum_label "
+        "training_session_id, session_role, stratum_label, "
+        "requested_by_user_id "
         "FROM work_items WHERE root_message_id=? "
         "ORDER BY enqueued_at, id",
         (norm_msgid(root_message_id),))
@@ -2524,12 +2604,60 @@ def get_enrollment_by_user_code(db, user_code):
     return dict(row) if row else None
 
 
-def list_pending_enrollments(db):
-    """Pending, unexpired enrollments awaiting an operator decision."""
+def list_pending_enrollments(db, *, requested_by_user_id=None):
+    """Pending, unexpired enrollments awaiting an operator decision.
+
+       When `requested_by_user_id` is given (the regular user case),
+       returns only enrollments stamped by that user via
+       tag_pending_enrollment — the lookup-er. When None (config-token
+       admin), returns every pending row (including untagged legacy
+       ones)."""
     now = int(time.time())
+    if requested_by_user_id is None:
+        return [dict(r) for r in db.execute(
+            "SELECT * FROM node_enrollments WHERE state=? AND expires_at>? "
+            "ORDER BY created_at", (NODE_ENROLLMENT_STATE_PENDING, now))]
     return [dict(r) for r in db.execute(
-        "SELECT * FROM node_enrollments WHERE state=? AND expires_at>? "
-        "ORDER BY created_at", (NODE_ENROLLMENT_STATE_PENDING, now))]
+        "SELECT * FROM node_enrollments "
+        "WHERE state=? AND expires_at>? AND requested_by_user_id=? "
+        "ORDER BY created_at",
+        (NODE_ENROLLMENT_STATE_PENDING, now, requested_by_user_id))]
+
+
+def tag_pending_enrollment(db, user_code, requested_by_user_id):
+    """Claim a pending enrollment for a user — the first user to look up
+       a `user_code` on the /enroll page owns the pairing. Idempotent for
+       the same (user_code, user) pair; subsequent calls by a different
+       user are refused so the original lookup-er retains the pairing.
+
+       Returns the enrollment row (as a dict) on success, or None if the
+       user_code is unknown, the enrollment is no longer pending /
+       expired, or another user already claimed it."""
+    now = int(time.time())
+    enr = get_enrollment_by_user_code(db, user_code)
+    if enr is None:
+        return None
+    if enr["state"] != NODE_ENROLLMENT_STATE_PENDING:
+        return None
+    if enr["expires_at"] is not None and enr["expires_at"] <= now:
+        return None
+    # Atomic first-lookup-wins: the UPDATE itself re-checks that the tag
+    # is still unset (or already ours — idempotent re-lookup) and that the
+    # row is still pending and unexpired, so two concurrent lookups race
+    # on the serialized write, not on the stale read above. The loser's
+    # rowcount is 0 and it gets the same None as any late lookup-er.
+    cur = db.execute(
+        "UPDATE node_enrollments SET requested_by_user_id=? "
+        "WHERE id=? AND state=? "
+        "  AND (requested_by_user_id IS NULL OR requested_by_user_id=?) "
+        "  AND (expires_at IS NULL OR expires_at>?)",
+        (requested_by_user_id, enr["id"], NODE_ENROLLMENT_STATE_PENDING,
+         requested_by_user_id, now))
+    db.commit()
+    if cur.rowcount == 0:
+        return None
+    enr["requested_by_user_id"] = requested_by_user_id
+    return enr
 
 
 def set_enrollment_polled(db, enrollment_id, when=None):
@@ -2540,14 +2668,23 @@ def set_enrollment_polled(db, enrollment_id, when=None):
     db.commit()
 
 
-def approve_enrollment(db, user_code, *, node_name=None, decided_by=None):
+def approve_enrollment(db, user_code, *, node_name=None, decided_by=None,
+                       owner_user_id=None):
     """Operator approval: create the enrollment's `nodes` row and mark the
        enrollment approved. Returns the new node id. Raises KeyError if the
        user_code is unknown, ValueError if the enrollment is not pending or
        has expired, DuplicateNodeName if approving would create a
        second active node with the same name (the race-protection
        check that guards the create_enrollment/approve_enrollment
-       window when two concurrent enrolments share a name)."""
+       window when two concurrent enrolments share a name).
+
+       `owner_user_id` stamps the new node's owner (typically the same
+       user who looked up the user_code on /enroll). An owned node is
+       created with `handles_system=0` — strictly user-only until the
+       owner opts in from the /nodes/{id} detail page. Pass None for
+       the config-token admin to leave the node ownerless: that node
+       gets `handles_system=1` (system-only), since an ownerless node
+       with no system fallback could never claim anything."""
     enr = get_enrollment_by_user_code(db, user_code)
     if enr is None:
         raise KeyError(user_code)
@@ -2560,11 +2697,17 @@ def approve_enrollment(db, user_code, *, node_name=None, decided_by=None):
         raise DuplicateNodeName(
             f"a node already exists with name {resolved_name!r}")
     now = int(time.time())
+    # handles_system=0 for owned nodes — the owner opts in later from the
+    # /nodes/{id} detail page. An ownerless (admin-approved) node must get
+    # 1 instead: with no owner queue to serve, no system fallback would
+    # leave it unable to claim anything at all.
+    handles_system = 1 if owner_user_id is None else 0
     node_id = db.execute(
-        "INSERT INTO nodes (name,task_types,state,enrolled_at) "
-        "VALUES (?,?,?,?)",
+        "INSERT INTO nodes (name,task_types,state,enrolled_at,"
+        "owner_user_id,handles_system) "
+        "VALUES (?,?,?,?,?,?)",
         (resolved_name, enr["task_types"],
-         NODE_STATE_ACTIVE, now)).lastrowid
+         NODE_STATE_ACTIVE, now, owner_user_id, handles_system)).lastrowid
     db.execute(
         "UPDATE node_enrollments SET state=?, node_id=?, decided_at=?, "
         "decided_by=? WHERE id=?",
@@ -2725,6 +2868,26 @@ def list_nodes(db):
     """Every enrolled node, as a list of dicts (health decoded)."""
     return [_decode_node(r)
             for r in db.execute("SELECT * FROM nodes ORDER BY id")]
+
+
+def set_node_handles_system(db, node_id, handles_system):
+    """Flip a node's `handles_system` flag (0 or 1). Returns True when a
+       row was updated."""
+    cur = db.execute(
+        "UPDATE nodes SET handles_system=? WHERE id=?",
+        (1 if handles_system else 0, node_id))
+    db.commit()
+    return cur.rowcount > 0
+
+
+def set_node_owner(db, node_id, owner_user_id):
+    """Reassign a node's owner (or set it ownerless with None). Returns
+       True when a row was updated."""
+    cur = db.execute(
+        "UPDATE nodes SET owner_user_id=? WHERE id=?",
+        (owner_user_id, node_id))
+    db.commit()
+    return cur.rowcount > 0
 
 
 def fleet_status(db, stale_after_seconds):

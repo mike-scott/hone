@@ -508,3 +508,141 @@ def test_claim_without_body_falls_back_to_enrolled_capabilities(ctx):
     r = ctx.http.post("/v1/claims", headers=HEADERS)
     assert r.status_code == 200
     assert r.json()["task_type"] == "review"
+
+
+# --- ownership-aware claim semantics --------------------------------------
+
+def _seed_prepare_for_user(db, root, *, user_id):
+    """Enqueue a prepare work item attributed to `user_id`. Helper for
+       the ownership-aware claim tests below — they only care that an
+       item exists, not what's inside it."""
+    core_db.upsert_patchset(db, root, subject="[PATCH 1/1] x", n_patches=1)
+    core_db.upsert_message(db, root.replace("r", "p"), root_message_id=root,
+                           type=core_db.MSG_TYPE_PATCH, body="diff",
+                           part_index=1)
+    core_db.maybe_enqueue_prepare(db, root, requested_by_user_id=user_id)
+
+
+def test_claim_serves_owner_user_item_before_system(ctx):
+    """A node owned by user A serves a user-A item before a system item
+       even when the system item was enqueued first — owner items have
+       priority by design (the whole point of per-user queues)."""
+    # Create user A.
+    uid = core_db.create_user(ctx.db, "a@x", "A", "local")
+    # System item first (older enqueued_at).
+    _seed_prepare_for_user(ctx.db, "<r1@x>", user_id=None)
+    # Owner-A item second.
+    _seed_prepare_for_user(ctx.db, "<r2@x>", user_id=uid)
+    # Configure the test node as owned by A, with system fallback on.
+    ctx.node["owner_user_id"] = uid
+    ctx.node["handles_system"] = 1
+
+    r = ctx.http.post("/v1/claims", headers=HEADERS)
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["patchset"]["root_message_id"] == "r2@x"     # owner's item
+
+
+def test_claim_owner_only_node_skips_system_pool(ctx):
+    """A node with handles_system=0 must not claim a system item, even
+       when its owner's queue is empty — 204 is the back-pressure
+       signal."""
+    uid = core_db.create_user(ctx.db, "a@x", "A", "local")
+    _seed_prepare_for_user(ctx.db, "<r1@x>", user_id=None)        # system
+    ctx.node["owner_user_id"] = uid
+    ctx.node["handles_system"] = 0
+    r = ctx.http.post("/v1/claims", headers=HEADERS)
+    assert r.status_code == 204
+
+
+def test_claim_owner_falls_back_to_system_when_owner_queue_drains(ctx):
+    """With handles_system=1 and no owner-A items queued, the node falls
+       back to the system pool. Mirrors the legacy-node behaviour."""
+    uid = core_db.create_user(ctx.db, "a@x", "A", "local")
+    _seed_prepare_for_user(ctx.db, "<r1@x>", user_id=None)        # system only
+    ctx.node["owner_user_id"] = uid
+    ctx.node["handles_system"] = 1
+    r = ctx.http.post("/v1/claims", headers=HEADERS)
+    assert r.status_code == 200
+    assert r.json()["patchset"]["root_message_id"] == "r1@x"
+
+
+def test_claim_legacy_ownerless_node_still_claims_system_items(ctx):
+    """Migration default: a pre-existing node with owner_user_id=NULL
+       and handles_system=1 keeps claiming the system pool — the
+       migration must not freeze the existing fleet."""
+    _seed_prepare_for_user(ctx.db, "<r1@x>", user_id=None)
+    ctx.node["owner_user_id"] = None                              # legacy
+    ctx.node["handles_system"] = 1
+    r = ctx.http.post("/v1/claims", headers=HEADERS)
+    assert r.status_code == 200
+    assert r.json()["patchset"]["root_message_id"] == "r1@x"
+
+
+def test_claim_owned_node_does_not_claim_other_users_items(ctx):
+    """A node owned by A must not pull B's items — the per-user queue
+       is the whole isolation guarantee."""
+    a = core_db.create_user(ctx.db, "a@x", "A", "local")
+    b = core_db.create_user(ctx.db, "b@x", "B", "local")
+    _seed_prepare_for_user(ctx.db, "<r1@x>", user_id=b)           # B's item
+    ctx.node["owner_user_id"] = a
+    ctx.node["handles_system"] = 0                                # no fallback
+    r = ctx.http.post("/v1/claims", headers=HEADERS)
+    assert r.status_code == 204                                   # 0 wins
+
+
+# --- orphan rescue: the system pool absorbs items of node-less users ------
+
+def _insert_node_row(db, *, name, owner_user_id,
+                     state=core_db.NODE_STATE_ACTIVE):
+    """Plant a real `nodes` row — the rescue clause in claim_work_item
+       decides 'does this user own an active node?' from the table, not
+       from the claiming node's identity."""
+    import json, time
+    db.execute(
+        "INSERT INTO nodes (name, task_types, state, enrolled_at, "
+        "owner_user_id, handles_system) VALUES (?, ?, ?, ?, ?, 0)",
+        (name, json.dumps(["prepare"]), state, int(time.time()),
+         owner_user_id))
+    db.commit()
+
+
+def test_claim_system_node_rescues_item_of_node_less_user(ctx):
+    """A user item whose requester owns no node has no dedicated server;
+       the system pool absorbs it so a node-less user's request is still
+       served (the pre-ownership behaviour)."""
+    b = core_db.create_user(ctx.db, "b@x", "B", "local")          # no nodes
+    _seed_prepare_for_user(ctx.db, "<r1@x>", user_id=b)
+    ctx.node["owner_user_id"] = None                              # system node
+    ctx.node["handles_system"] = 1
+    r = ctx.http.post("/v1/claims", headers=HEADERS)
+    assert r.status_code == 200
+    assert r.json()["patchset"]["root_message_id"] == "r1@x"
+
+
+def test_claim_system_node_leaves_items_of_user_with_an_active_node(ctx):
+    """No rescue while the requester owns an active node — the item
+       waits for the owner's own fleet (even if it's currently offline;
+       owning a node means owning the routing)."""
+    b = core_db.create_user(ctx.db, "b@x", "B", "local")
+    _insert_node_row(ctx.db, name="b-node", owner_user_id=b)
+    _seed_prepare_for_user(ctx.db, "<r1@x>", user_id=b)
+    ctx.node["owner_user_id"] = None
+    ctx.node["handles_system"] = 1
+    r = ctx.http.post("/v1/claims", headers=HEADERS)
+    assert r.status_code == 204
+
+
+def test_claim_rescue_resumes_once_users_last_node_is_revoked(ctx):
+    """A revoked node doesn't count as a dedicated server: once the
+       user's last active node is gone, their pending items flow back
+       to the system pool instead of starving."""
+    b = core_db.create_user(ctx.db, "b@x", "B", "local")
+    _insert_node_row(ctx.db, name="b-node", owner_user_id=b,
+                     state=core_db.NODE_STATE_REVOKED)
+    _seed_prepare_for_user(ctx.db, "<r1@x>", user_id=b)
+    ctx.node["owner_user_id"] = None
+    ctx.node["handles_system"] = 1
+    r = ctx.http.post("/v1/claims", headers=HEADERS)
+    assert r.status_code == 200
+    assert r.json()["patchset"]["root_message_id"] == "r1@x"

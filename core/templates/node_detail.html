@@ -13,12 +13,70 @@
 <h1 class="h4 mb-1">{{ node.name or "node " ~ node.id }}</h1>
 <div class="text-muted small mb-3">
   node id <code>{{ node.id }}</code>
+  · owner
+  {% if node.owner_email %}
+    <code>{{ node.owner_email }}</code>
+  {% else %}
+    <span class="badge text-bg-secondary">system</span>
+  {% endif %}
+  {% if node.is_owner_or_admin and node.owner_user_id %}
+  <span class="badge text-bg-info ms-1">Yours</span>
+  {% endif %}
 </div>
 
 {# Live status — Node + Health cards. Polls /nodes/{id}/live every
    10s; running time + relative freshness + bucket badge stay
    fresh without a reload. The history tables below don't poll. #}
 {% include "_node_live_panel.html" %}
+
+{% if node.is_owner_or_admin %}
+<div class="card mt-3">
+  <div class="card-body">
+    <h2 class="h6 card-title">Node settings</h2>
+
+    <form method="post" action="/nodes/{{ node.id }}/configure"
+          class="d-flex align-items-center mb-2">
+      {{ csrf_field(request) }}
+      <div class="form-check form-switch me-3">
+        <input class="form-check-input" type="checkbox"
+               id="handles_system" name="handles_system"
+               {% if node.handles_system %}checked{% endif %}>
+        <label class="form-check-label" for="handles_system">
+          Also handle system work
+        </label>
+      </div>
+      <button class="btn btn-sm btn-outline-primary">Save</button>
+      <span class="text-muted small ms-3">
+        When on, this node falls back to system-origin work (gather, sessions)
+        once your own queue is empty.
+      </span>
+    </form>
+
+    {% if current_user.is_config_admin %}
+    <form method="post" action="/nodes/{{ node.id }}/owner"
+          class="d-flex align-items-center mb-2">
+      {{ csrf_field(request) }}
+      <label for="owner_email" class="me-2 small">Owner email</label>
+      <input type="text" id="owner_email" name="owner_email"
+             class="form-control form-control-sm me-2"
+             style="max-width: 22em"
+             value="{{ node.owner_email or '' }}"
+             placeholder="leave blank to make ownerless (system)">
+      <button class="btn btn-sm btn-outline-secondary">Reassign</button>
+    </form>
+    {% endif %}
+
+    <form method="post" action="/nodes/{{ node.id }}/delete"
+          data-confirm-title="Delete node?"
+          data-confirm-button="Delete"
+          data-confirm="Delete node {{ node.name or node.id }}? This removes the row from the fleet, kills its tokens, and the node must re-enroll to return.">
+      {{ csrf_field(request) }}
+      <button class="btn btn-sm btn-outline-danger mt-2"
+              title="Hard-delete this node">Delete node</button>
+    </form>
+  </div>
+</div>
+{% endif %}
 
 <h2 class="h5 mt-4">Recent claims ({{ claims_paging.total }})</h2>
 {% if claims %}

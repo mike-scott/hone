@@ -150,7 +150,15 @@ def test_v4_migration_preserves_v3_user_rows_and_enables_the_check(tmp_path):
     """Existing databases stop at v3 (no CHECK); the v4 migration rebuilds the
        table and brings every column over without touching the data. Stand
        up a v3 DB by hand, plant a user, run core_db.connect (which applies
-       v4), and verify both halves."""
+       v4), and verify both halves.
+
+       Beyond the users-table rebuild, v4 also adds the node-ownership
+       columns (nodes.owner_user_id, nodes.handles_system),
+       node_enrollments.requested_by_user_id, and
+       work_items.requested_by_user_id. Verify that legacy rows planted
+       in v3 come through with sensible defaults: nodes get NULL owner +
+       handles_system=1 (so they keep claiming as before), and the new
+       indexes exist."""
     import sqlite3
     path = str(tmp_path / "v3.db")
     raw = sqlite3.connect(path)
@@ -162,6 +170,22 @@ def test_v4_migration_preserves_v3_user_rows_and_enables_the_check(tmp_path):
         "INSERT INTO users (email, display_name, auth_provider, state, "
         "created_at, approved_at) VALUES "
         "('kept@x', 'Kept', 'local', 'approved', 100, 200)")
+    # Plant a legacy node + pending enrollment + a patchset + a work_item
+    # so the migration's column additions on those tables are exercised
+    # against rows that pre-date the change.
+    raw.execute(
+        "INSERT INTO nodes (name, task_types, state, enrolled_at) "
+        "VALUES ('legacy', '[\"prepare\"]', 1, 100)")
+    raw.execute(
+        "INSERT INTO node_enrollments (device_code_hash, user_code, "
+        "node_name, state, interval_seconds, created_at, expires_at) "
+        "VALUES ('h1', 'AAAA-AAAA', 'pending-node', 1, 5, 100, 99999)")
+    raw.execute(
+        "INSERT INTO patchsets (root_message_id, subject, n_patches, "
+        "gathered_at) VALUES ('<r@x>', 's', 1, 100)")
+    raw.execute(
+        "INSERT INTO work_items (type, root_message_id, state, "
+        "enqueued_at) VALUES (1, '<r@x>', 1, 100)")
     raw.commit()
     raw.close()
 
@@ -181,6 +205,37 @@ def test_v4_migration_preserves_v3_user_rows_and_enables_the_check(tmp_path):
         db.execute(
             "INSERT INTO users (email, display_name, auth_provider, state, "
             "created_at) VALUES ('bad@x', 'B', 'facebook', 'pending', 0)")
+
+    # Legacy node: owner stays NULL, handles_system migrates to 1 so it
+    # keeps claiming the system pool just as it did pre-v4. The two
+    # defaults deliberately diverge — fresh nodes are strict (0) but
+    # legacy can't be retroactively pinned to any user.
+    legacy = db.execute(
+        "SELECT owner_user_id, handles_system FROM nodes "
+        "WHERE name='legacy'").fetchone()
+    assert legacy["owner_user_id"] is None
+    assert legacy["handles_system"] == 1
+
+    # Pending enrollment: requested_by_user_id NULL — pre-v4 the column
+    # didn't exist, and the lookup-er tag is set lazily on /enroll.
+    enr = db.execute(
+        "SELECT requested_by_user_id FROM node_enrollments "
+        "WHERE user_code='AAAA-AAAA'").fetchone()
+    assert enr["requested_by_user_id"] is None
+
+    # Pre-existing work-items default to system origin (NULL) so they
+    # keep flowing to any system-handling node.
+    wi = db.execute(
+        "SELECT requested_by_user_id FROM work_items").fetchone()
+    assert wi["requested_by_user_id"] is None
+
+    # And the two new claim-path indexes are present (the work-items one
+    # is what makes the owner-scoped claim fast; the nodes one supports
+    # ownership listings).
+    indexes = {r[0] for r in db.execute(
+        "SELECT name FROM sqlite_master WHERE type='index'").fetchall()}
+    assert "idx_nodes_owner" in indexes
+    assert "idx_work_items_user_claimable" in indexes
 
 
 # --- PasswordHasher singleton --------------------------------------------

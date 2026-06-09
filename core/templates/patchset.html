@@ -150,8 +150,9 @@
 {% if work_items %}
 <table class="table table-sm table-hover align-middle" id="work-item-history">
   <thead>
-    <tr><th>Type</th><th>Work state</th><th>Worker</th><th>Enqueued</th>
-        <th>Claimed</th><th>Completed</th><th>Methodology v</th></tr>
+    <tr><th>Type</th><th>Work state</th><th>Worker</th><th>Requested by</th>
+        <th>Enqueued</th><th>Claimed</th><th>Completed</th>
+        <th>Methodology v</th></tr>
   </thead>
   <tbody>
   {% for w in work_items %}
@@ -164,6 +165,13 @@
       </td>
       <td><span class="badge {{ w.state_badge }}">{{ w.state }}</span></td>
       <td>{{ w.claimed_by or "—" }}</td>
+      <td class="small">
+        {% if w.requested_by_email %}
+          <code>{{ w.requested_by_email }}</code>
+        {% else %}
+          <span class="text-muted">system</span>
+        {% endif %}
+      </td>
       <td class="text-nowrap small">{{ w.enqueued_display }}</td>
       <td class="text-nowrap small">{{ w.claimed_display }}</td>
       <td class="text-nowrap small">{{ w.completed_display }}</td>
