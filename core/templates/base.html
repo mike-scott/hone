@@ -185,6 +185,39 @@
   })();
 </script>
 <script>
+  // Local-time rendering — every server timestamp is a
+  // <time datetime="…Z"> whose text is the UTC fallback (core/ui.py
+  // _when). Rewrite the text to the browser's timezone, with a short
+  // tz label so the unit stays visible; the title attribute keeps the
+  // UTC string for correlating with server logs. Idempotent, re-run
+  // after every HTMX swap so polled partials localize too. If the
+  // Intl tz lookup fails we leave the UTC text alone.
+  (function () {
+    var pad = function (n) { return String(n).padStart(2, "0"); };
+    var tzLabel = "";
+    try {
+      var parts = new Intl.DateTimeFormat(
+        undefined, { timeZoneName: "short" }).formatToParts(new Date());
+      var tz = parts.find(function (p) { return p.type === "timeZoneName"; });
+      if (!tz) return;
+      tzLabel = " " + tz.value;
+    } catch (e) { return; }
+    function localize(root) {
+      root.querySelectorAll("time[datetime]").forEach(function (el) {
+        var d = new Date(el.getAttribute("datetime"));
+        if (isNaN(d)) return;
+        el.textContent =
+          d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" +
+          pad(d.getDate()) + " " + pad(d.getHours()) + ":" +
+          pad(d.getMinutes()) + tzLabel;
+      });
+    }
+    localize(document);
+    document.body.addEventListener("htmx:afterSwap", function () {
+      localize(document);   // idempotent; few dozen elements at most
+    });
+  })();
+
   // Light/dark toggle (user-menu item) — flip data-bs-theme, persist the
   // choice, repaint the icon + label to the mode a click switches TO.
   (function () {

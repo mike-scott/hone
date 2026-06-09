@@ -477,12 +477,31 @@ def _types(raw):
     return ", ".join(vals) if vals else "—"
 
 
-def _when(ts):
-    """Render a unix timestamp as a readable UTC string."""
+def _when_text(ts):
+    """Render a unix timestamp as a plain UTC string — for attribute
+       contexts (tooltips) where the <time> markup of _when can't
+       render. Body-text call sites use _when."""
     if not ts:
         return "—"
     return datetime.datetime.fromtimestamp(
         ts, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _when(ts):
+    """Render a unix timestamp as a <time> element: UTC text content
+       with a machine-readable `datetime` attribute. A script in
+       base.html rewrites the text to the browser's local timezone on
+       load and after every HTMX swap — so all dates in the UI read in
+       the viewer's local time with zero configuration. Degrades to the
+       UTC string with JS off, and the title attribute always keeps
+       UTC so hovering correlates with server logs."""
+    if not ts:
+        return "—"
+    text = _when_text(ts)
+    iso = datetime.datetime.fromtimestamp(
+        ts, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return Markup(
+        f'<time datetime="{iso}" title="{text}">{text}</time>')
 
 
 # --- fleet pulse (top-nav chip) -------------------------------------------
@@ -539,7 +558,8 @@ def _fleet_pulse_view(db, runtime_cfg):
     tooltip_parts.append(f"{in_flight} claim{'' if in_flight == 1 else 's'} "
                           "in flight")
     if s["last_activity_at"]:
-        tooltip_parts.append(f"last seen {_when(s['last_activity_at'])}")
+        # _when_text, not _when — this string lands in a title attribute.
+        tooltip_parts.append(f"last seen {_when_text(s['last_activity_at'])}")
     tooltip = " · ".join(tooltip_parts)
     return {"tone": tone, "label": label, "tooltip": tooltip}
 
@@ -1419,7 +1439,8 @@ def _node_status_fields(node, claim, runtime_cfg, *, now=None, back_qs=""):
         "bucket":               bucket,
         "bucket_label":         dict(_NODE_BUCKETS).get(bucket, bucket),
         "freshness_display":    _relative_duration(freshness),
-        "last_seen_tooltip":    _when(last_seen) if last_seen else "",
+        "last_seen_tooltip":    (_when_text(last_seen)       # title attr
+                                 if last_seen else ""),
         "health_age_display":   _relative_duration(health_age),
         "running_time_display": _relative_duration(running),
         "claim":                claim,

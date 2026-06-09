@@ -164,6 +164,12 @@ no single-page-app and no JavaScript build step (AdminLTE, Bootstrap,
 Bootstrap Icons and HTMX are vendored static assets, which is why the
 hone-core image needs no Node toolchain).
 
+Timestamps render in the **viewer's local timezone**: the server emits
+every timestamp as a `<time datetime="…Z">` element with a UTC text
+fallback, and a small script localizes the text on load and after every
+HTMX swap. No per-user setting needed; with JS off the UTC string
+stands, and hovering always shows UTC for correlating with server logs.
+
 Pages:
 - **Queue** (`/`) — the home page. The work queue (prepare + review + train
   items), with a two-axis chip filter — type (prepare / review / train) ×

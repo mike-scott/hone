@@ -125,7 +125,8 @@ REST API, from one FastAPI app: `/v1/*` for nodes (JSON), the rest for
 operators (HTML). The stack is **AdminLTE 4 + Jinja2 + Bootstrap 5 +
 HTMX** — live updates and in-page actions with no single-page-app and
 no JavaScript build step; the AdminLTE / Bootstrap / Bootstrap Icons /
-HTMX assets are vendored, not loaded from a CDN.
+HTMX assets are vendored, not loaded from a CDN. Timestamps display in
+the viewer's local timezone (UTC without JS; hover shows UTC).
 
 Operator pages: **Queue** (the work queue with type × state chip
 filter), **Nodes** (the fleet — every node visible, controls gated to
