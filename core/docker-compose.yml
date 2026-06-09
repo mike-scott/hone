@@ -24,9 +24,12 @@ services:
       - .env                             # every setting in .env reaches the container
     environment:
       # Required settings, re-asserted so `compose up` fails fast if missing.
-      HONE_FLEET_SECRET: "${HONE_FLEET_SECRET:?set it in .env}"
-      HONE_ADMIN_TOKEN:  "${HONE_ADMIN_TOKEN:?set it in .env}"
-      HONE_HOSTNAME:     "${HONE_HOSTNAME:?set it in .env}"
+      HONE_FLEET_SECRET:   "${HONE_FLEET_SECRET:?set it in .env}"
+      HONE_ADMIN_TOKEN:    "${HONE_ADMIN_TOKEN:?set it in .env}"
+      # Signs the operator UI's session cookies — must be a strong random
+      # value (`openssl rand -hex 32`). hone-core refuses to start without it.
+      HONE_SESSION_SECRET: "${HONE_SESSION_SECRET:?set it in .env (openssl rand -hex 32)}"
+      HONE_HOSTNAME:       "${HONE_HOSTNAME:?set it in .env}"
     volumes:
       - hone-core-data:/data             # db, config, methodology files, source archives
 

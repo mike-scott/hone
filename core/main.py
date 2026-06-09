@@ -3,7 +3,7 @@
 Builds the FastAPI app, wires the v1 REST API and the operator web UI, and
 runs the GATHER task in-process. See ../ARCHITECTURE.md.
 
-Run:  uvicorn core.main:app   (the container does this; see core/Dockerfile)
+Run:  python -m core.main   (the container does this; see core/Dockerfile)
 """
 import asyncio
 import logging
@@ -56,11 +56,6 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 async def lifespan(app: FastAPI):
     cfg: Config = app.state.config
     log.info("hone-core starting — db=%s", cfg.db_path)
-    if not cfg.session_secret:
-        log.warning(
-            "HONE_SESSION_SECRET is not set — session cookies are unsigned "
-            "and will not survive a restart. Set this to a random secret "
-            "(openssl rand -hex 32) in production.")
     db = core_db.connect(cfg.db_path)
     _project_root = os.path.dirname(_HERE)
     version = core_db.bootstrap_methodology(
@@ -228,13 +223,25 @@ def trigger_lore_clone(app: FastAPI) -> bool:
 def create_app() -> FastAPI:
     app = FastAPI(title="hone-core", lifespan=lifespan)
     app.state.config = Config.from_env()
+    cfg: Config = app.state.config
+
+    # Fail-closed on the session signing key. With no real secret the
+    # SessionMiddleware would otherwise fall back to a known-constant key and
+    # anyone reading the source could forge an admin session cookie. There is
+    # no safe "default" here — the operator must supply one.
+    if not cfg.session_secret:
+        raise RuntimeError(
+            "HONE_SESSION_SECRET is required — generate one with "
+            "`openssl rand -hex 32` and set it in core/.env. "
+            "Without it the session-cookie signing key would fall back to a "
+            "well-known constant and any reader of the source could forge an "
+            "admin session.")
 
     # Session middleware must be added before routers so that route handlers
     # can read/write request.session.  https_only=True keeps the cookie off
     # plain-HTTP connections; same_site="lax" is safe for the redirect flow.
-    cfg: Config = app.state.config
     app.add_middleware(SessionMiddleware,
-                       secret_key=cfg.session_secret or "dev-insecure",
+                       secret_key=cfg.session_secret,
                        https_only=False,   # allow dev HTTP; production uses TLS
                        same_site="lax",
                        session_cookie="hone_session")
@@ -257,14 +264,16 @@ def create_app() -> FastAPI:
     return app
 
 
-app = create_app()
-
-
 def run():
     """Container entry point — ensure the TLS material exists, then serve
        HTTPS directly with the self-generated server certificate (no external
        TLS-terminating proxy; see ARCHITECTURE.md → Auth, enrollment &
        transport).
+
+       The FastAPI app is constructed here rather than at module top so a
+       plain `import core.main` (in tests or by tooling) doesn't run the
+       config-validation gates (e.g. HONE_SESSION_SECRET) before the
+       container is actually starting.
 
        uvicorn installs its own SIGTERM / SIGINT handlers and shuts down
        gracefully on `docker stop`; `timeout_graceful_shutdown` bounds the
@@ -273,6 +282,7 @@ def run():
        (exit 137)."""
     import uvicorn
 
+    app = create_app()
     cfg: Config = app.state.config
     _, cert_file, key_file = tls.ensure_certs(cfg.cert_dir, [cfg.hostname])
     log.info("hone-core serving HTTPS on :%d", cfg.http_port)

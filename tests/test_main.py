@@ -1,9 +1,12 @@
 """Tests for core/main.py — the hone-core application entry point. Today
-we only cover the uvicorn access-log filter; the lifespan + container
-boot path is exercised end-to-end by the smoke / integration runs."""
+we cover the uvicorn access-log filter and the create_app() fail-closed
+checks; the lifespan + container boot path is exercised end-to-end by the
+smoke / integration runs."""
 import logging
 
-from core.main import _QuietIdlePollFilter
+import pytest
+
+from core.main import _QuietIdlePollFilter, create_app
 
 
 def _access_record(method, path, status):
@@ -45,6 +48,49 @@ def test_filter_keeps_other_endpoints():
     assert f.filter(_access_record("GET", "/nodes", 204)) is True
     assert f.filter(_access_record("POST", "/", 204)) is True
     assert f.filter(_access_record("GET", "/v1/claims", 204)) is True
+
+
+# --- create_app: fail-closed on a missing session secret ---
+
+def _set_required_env(monkeypatch, *, session_secret):
+    """Set the env vars create_app() reads, with `session_secret` controllable."""
+    monkeypatch.setenv("HONE_FLEET_SECRET", "fleet")
+    monkeypatch.setenv("HONE_ADMIN_TOKEN", "admin")
+    monkeypatch.setenv("HONE_HOSTNAME", "core.example")
+    if session_secret is None:
+        monkeypatch.delenv("HONE_SESSION_SECRET", raising=False)
+    else:
+        monkeypatch.setenv("HONE_SESSION_SECRET", session_secret)
+
+
+def test_create_app_refuses_to_start_without_a_session_secret(monkeypatch):
+    """No HONE_SESSION_SECRET → hone-core refuses to construct the app. The
+       alternative is a known-constant signing key that any reader of the
+       source could use to forge an admin session cookie — there is no safe
+       fallback, so we fail-closed at construction (before any middleware is
+       added). The error message tells the operator exactly what to do."""
+    _set_required_env(monkeypatch, session_secret=None)
+    with pytest.raises(RuntimeError) as ei:
+        create_app()
+    msg = str(ei.value)
+    assert "HONE_SESSION_SECRET" in msg
+    assert "openssl rand -hex 32" in msg   # tells them how to generate one
+
+
+def test_create_app_refuses_to_start_with_an_empty_session_secret(monkeypatch):
+    """An empty string is the same failure mode as unset — don't accept it."""
+    _set_required_env(monkeypatch, session_secret="")
+    with pytest.raises(RuntimeError, match="HONE_SESSION_SECRET"):
+        create_app()
+
+
+def test_create_app_succeeds_with_a_session_secret(monkeypatch):
+    """With a real secret set, app construction completes (the SessionMiddleware
+       and routers are wired). Lifespan still has to run for the DB to come
+       up — we don't exercise that here, just that create_app() doesn't raise."""
+    _set_required_env(monkeypatch, session_secret="x" * 64)
+    app = create_app()
+    assert app.title == "hone-core"
 
 
 def test_filter_passes_through_records_with_unexpected_args():
