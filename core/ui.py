@@ -60,6 +60,11 @@ def _tickcode(text):
 
 
 templates.env.filters["tickcode"] = _tickcode
+# Templates render the hidden CSRF input via `{{ csrf_field(request) }}` on
+# every state-changing form; the same token is also exposed in base.html as
+# a <meta> tag for the HTMX request hook (X-CSRF-Token).
+templates.env.globals["csrf_field"] = auth.csrf_field
+templates.env.globals["csrf_token"] = auth.csrf_token
 
 router = APIRouter(tags=["ui"])
 
@@ -100,7 +105,7 @@ async def login_page(request: Request, next: str | None = None,
     })
 
 
-@router.post("/login", response_class=HTMLResponse, include_in_schema=False)
+@router.post("/login", response_class=HTMLResponse, include_in_schema=False, dependencies=[Depends(auth.require_csrf)])
 async def login_submit(request: Request):
     cfg = request.app.state.config
     db  = request.app.state.db
@@ -175,7 +180,7 @@ async def register_page(request: Request):
     })
 
 
-@router.post("/register", response_class=HTMLResponse, include_in_schema=False)
+@router.post("/register", response_class=HTMLResponse, include_in_schema=False, dependencies=[Depends(auth.require_csrf)])
 async def register_submit(request: Request):
     cfg = request.app.state.config
     db  = request.app.state.db
@@ -315,21 +320,21 @@ async def users_list(request: Request,
     })
 
 
-@router.post("/users/{user_id}/approve", include_in_schema=False)
+@router.post("/users/{user_id}/approve", include_in_schema=False, dependencies=[Depends(auth.require_csrf)])
 async def user_approve(request: Request, user_id: int,
                        user: auth.SessionUser = Depends(auth.require_config_admin)):
     core_db.set_user_state(request.app.state.db, user_id, "approved")
     return RedirectResponse("/users", status_code=303)
 
 
-@router.post("/users/{user_id}/revoke", include_in_schema=False)
+@router.post("/users/{user_id}/revoke", include_in_schema=False, dependencies=[Depends(auth.require_csrf)])
 async def user_revoke(request: Request, user_id: int,
                       user: auth.SessionUser = Depends(auth.require_config_admin)):
     core_db.set_user_state(request.app.state.db, user_id, "revoked")
     return RedirectResponse("/users", status_code=303)
 
 
-@router.post("/users/{user_id}/delete", include_in_schema=False)
+@router.post("/users/{user_id}/delete", include_in_schema=False, dependencies=[Depends(auth.require_csrf)])
 async def user_delete(request: Request, user_id: int,
                       user: auth.SessionUser = Depends(auth.require_config_admin)):
     core_db.delete_user(request.app.state.db, user_id)
@@ -1135,7 +1140,7 @@ async def patchset_detail(request: Request, root_message_id: str,
     return templates.TemplateResponse(request, "patchset.html", ctx)
 
 
-@router.post("/review-requests/{root_message_id:path}/delete")
+@router.post("/review-requests/{root_message_id:path}/delete", dependencies=[Depends(auth.require_csrf)])
 async def delete_review(request: Request, root_message_id: str,
                          _: auth.SessionUser = Depends(auth.require_session)):
     """Operator-triggered deletion of a patchset's AI review and the review
@@ -1160,7 +1165,7 @@ async def delete_review(request: Request, root_message_id: str,
                              status_code=303)
 
 
-@router.post("/review-requests/{root_message_id:path}")
+@router.post("/review-requests/{root_message_id:path}", dependencies=[Depends(auth.require_csrf)])
 async def request_review(request: Request, root_message_id: str,
                           _: auth.SessionUser = Depends(auth.require_session)):
     """Operator-triggered review enqueue. Review is not auto-enqueued
@@ -1693,7 +1698,7 @@ async def work_item_detail(request: Request, work_item_id: int,
     return templates.TemplateResponse(request, "work_item.html", ctx)
 
 
-@router.post("/work-items/{work_item_id:int}/release-deferred")
+@router.post("/work-items/{work_item_id:int}/release-deferred", dependencies=[Depends(auth.require_csrf)])
 async def release_deferred(request: Request, work_item_id: int,
                            back: str | None = None,
                            _: auth.SessionUser = Depends(auth.require_session)):
@@ -1711,7 +1716,7 @@ async def release_deferred(request: Request, work_item_id: int,
                             status_code=303)
 
 
-@router.post("/work-items/{work_item_id:int}/retry-unappliable")
+@router.post("/work-items/{work_item_id:int}/retry-unappliable", dependencies=[Depends(auth.require_csrf)])
 async def retry_unappliable(request: Request, work_item_id: int,
                             back: str | None = None,
                             _: auth.SessionUser = Depends(auth.require_session)):
@@ -1753,7 +1758,7 @@ async def enroll(request: Request, code: str | None = None,
     return templates.TemplateResponse(request, "enroll.html", ctx)
 
 
-@router.post("/nodes/enrollments/{user_code}/approve")
+@router.post("/nodes/enrollments/{user_code}/approve", dependencies=[Depends(auth.require_csrf)])
 async def approve_enrollment(request: Request, user_code: str,
                               _: auth.SessionUser = Depends(auth.require_session)):
     """Approve a pending enrollment — the node joins the fleet. Errors
@@ -1768,7 +1773,7 @@ async def approve_enrollment(request: Request, user_code: str,
     return RedirectResponse("/nodes", status_code=303)
 
 
-@router.post("/nodes/{node_id}/delete")
+@router.post("/nodes/{node_id}/delete", dependencies=[Depends(auth.require_csrf)])
 async def delete_node(request: Request, node_id: int,
                        _: auth.SessionUser = Depends(auth.require_session)):
     """Hard-delete an enrolled node from the fleet — removes the row,
@@ -1778,7 +1783,7 @@ async def delete_node(request: Request, node_id: int,
     return RedirectResponse("/nodes", status_code=303)
 
 
-@router.post("/nodes/enrollments/{user_code}/deny")
+@router.post("/nodes/enrollments/{user_code}/deny", dependencies=[Depends(auth.require_csrf)])
 async def deny_enrollment(request: Request, user_code: str,
                            _: auth.SessionUser = Depends(auth.require_session)):
     """Deny a pending enrollment."""
@@ -1909,7 +1914,7 @@ async def lore_clone_status(request: Request,
         {"lore_clone": _lore_clone_view(request.app.state.lore_clone)})
 
 
-@router.post("/settings/lore-clone", response_class=HTMLResponse)
+@router.post("/settings/lore-clone", response_class=HTMLResponse, dependencies=[Depends(auth.require_csrf)])
 async def lore_clone_trigger(request: Request,
                               _: auth.SessionUser = Depends(auth.require_session)):
     """Operator-triggered lore provision (the Settings 'Provision now'
@@ -2010,7 +2015,7 @@ async def settings(request: Request,
         "current_user": current_user})
 
 
-@router.post("/settings")
+@router.post("/settings", dependencies=[Depends(auth.require_csrf)])
 async def save_settings(request: Request,
                          current_user: auth.SessionUser = Depends(auth.require_session)):
     """Validate a runtime-config submission, persist it to config.yaml, and
@@ -2067,7 +2072,7 @@ async def save_settings(request: Request,
         "current_user": current_user}, status_code=400)
 
 
-@router.post("/settings/gather/trigger")
+@router.post("/settings/gather/trigger", dependencies=[Depends(auth.require_csrf)])
 async def trigger_gather(request: Request,
                           _: auth.SessionUser = Depends(auth.require_session)):
     """Wake the GATHER supervisor and fire every idle enabled source on
@@ -2175,7 +2180,7 @@ def _canonical_methodology_bytes(document):
                        ensure_ascii=False).encode("utf-8")
 
 
-@router.post("/settings/methodology/import")
+@router.post("/settings/methodology/import", dependencies=[Depends(auth.require_csrf)])
 async def import_methodology(request: Request,
                               file: UploadFile = File(...),
                               _: auth.SessionUser = Depends(auth.require_session)):
@@ -2265,7 +2270,7 @@ async def import_methodology(request: Request,
         f"/settings?tab=methodology&methodology_imported={version}", status_code=303)
 
 
-@router.post("/settings/tags")
+@router.post("/settings/tags", dependencies=[Depends(auth.require_csrf)])
 async def save_tag_filter(request: Request,
                            _: auth.SessionUser = Depends(auth.require_session)):
     """Persist the list-tag gather filter — every known tag is shown as a

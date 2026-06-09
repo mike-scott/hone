@@ -24,10 +24,12 @@
     </dl>
     <form method="post" class="d-inline"
           action="/nodes/enrollments/{{ enrollment.user_code }}/approve">
+      {{ csrf_field(request) }}
       <button class="btn btn-success">Approve</button>
     </form>
     <form method="post" class="d-inline"
           action="/nodes/enrollments/{{ enrollment.user_code }}/deny">
+      {{ csrf_field(request) }}
       <button class="btn btn-outline-danger">Deny</button>
     </form>
   </div>

@@ -58,15 +58,29 @@ def _plant_user(ctx, *, email="alice@example.com", state="approved",
     return uid
 
 
+_CSRF_RE = __import__("re").compile(r'name="csrf_token" value="([^"]+)"')
+
+
+def _csrf(ctx, path):
+    """Fetch the real CSRF token by rendering the page (the GET seeds the
+       session cookie + hidden field), the way a browser does."""
+    r = ctx.client.get(path)
+    m = _CSRF_RE.search(r.text)
+    assert m, f"no csrf_token found on GET {path}"
+    return m.group(1)
+
+
 def _post_login(ctx, *, email, password):
-    return ctx.client.post(
-        "/login", data={"email": email, "password": password, "next": "/"})
+    return ctx.client.post("/login", data={
+        "email": email, "password": password, "next": "/",
+        "csrf_token": _csrf(ctx, "/login")})
 
 
 def _post_register(ctx, *, email, password="correct-horse-battery-staple",
                    display_name="A New User"):
     return ctx.client.post("/register", data={
-        "email": email, "password": password, "display_name": display_name})
+        "email": email, "password": password, "display_name": display_name,
+        "csrf_token": _csrf(ctx, "/register")})
 
 
 _GENERIC = "Invalid email or password."

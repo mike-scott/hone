@@ -33,6 +33,7 @@
   <div class="alert alert-success" style="max-width: 40rem">Settings saved.</div>
   {% endif %}
   <form method="post" action="/settings" style="max-width: 40rem">
+    {{ csrf_field(request) }}
     <input type="hidden" name="_group" value="{{ target_group }}">
     {% for group, fields in groups %}
       {% if group == target_group %}
@@ -83,6 +84,7 @@
   mid-cycle are unaffected.
 </p>
 <form method="post" action="/settings/gather/trigger" class="mb-3">
+  {{ csrf_field(request) }}
   <button class="btn btn-outline-primary">
     <i class="bi bi-play-circle me-1"></i>Trigger gather now
   </button>
@@ -170,6 +172,8 @@
       enctype="multipart/form-data"
       data-confirm="Replace the active methodology with the uploaded YAML? In-flight claims keep their pinned version; new claims use the new one."
       style="max-width: 40rem">
+
+  {{ csrf_field(request) }}
   <div class="input-group">
     <input type="file" class="form-control" name="file"
            accept=".yaml,.yml,application/x-yaml,text/yaml" required>
@@ -196,6 +200,7 @@
 
 {% if tags %}
 <form method="post" action="/settings/tags" style="max-width: 40rem">
+  {{ csrf_field(request) }}
   <table class="table table-sm align-middle">
     <thead>
       <tr><th>Enabled</th><th>Tag</th><th>Description</th><th>Origin</th></tr>

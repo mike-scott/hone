@@ -46,6 +46,8 @@
     {% endif %}
 
     <form method="post" action="/register">
+
+      {{ csrf_field(request) }}
       <div class="mb-3">
         <label for="email" class="form-label small">Email</label>
         <input type="email" class="form-control" id="email" name="email"

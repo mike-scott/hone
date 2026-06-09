@@ -3,6 +3,10 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  {# Per-session CSRF token — surfaced here so the HTMX hook below can attach
+     it to X-CSRF-Token on every hx-* request. Plain <form method=post>s
+     carry it as a hidden field via {{ csrf_field(request) }} instead. #}
+  <meta name="csrf-token" content="{{ csrf_token(request) }}">
   <title>{% block title %}hone-core{% endblock %}</title>
   <link rel="stylesheet" href="/static/bootstrap.min.css">
   <link rel="stylesheet" href="/static/bootstrap-icons.min.css">
@@ -152,6 +156,20 @@
 <script src="/static/bootstrap.bundle.min.js"></script>
 <script src="/static/adminlte.min.js"></script>
 <script src="/static/htmx.min.js"></script>
+<script>
+  // CSRF: attach the per-session token to X-CSRF-Token on every HTMX request.
+  // Plain <form method=post>s carry it as a hidden field via csrf_field();
+  // this covers HTMX-driven POSTs (e.g. the lore-clone trigger) that have
+  // no <form> element to carry the field.
+  (function () {
+    var meta = document.querySelector('meta[name="csrf-token"]');
+    var token = meta && meta.getAttribute("content");
+    if (!token) return;
+    document.body.addEventListener("htmx:configRequest", function (evt) {
+      evt.detail.headers["X-CSRF-Token"] = token;
+    });
+  })();
+</script>
 <script>
   // Light/dark toggle — flip data-bs-theme, persist the choice, swap the icon.
   (function () {

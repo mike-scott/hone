@@ -96,6 +96,7 @@
                       data-confirm-title="Delete node?"
                       data-confirm-button="Delete"
                       data-confirm="Delete node {{ n.name or n.id }}? This removes the row from the fleet, kills its tokens, and the node must re-enroll to return.">
+                  {{ csrf_field(request) }}
                   <button class="btn btn-sm btn-outline-danger"
                           title="Hard-delete this node">Delete</button>
                 </form>

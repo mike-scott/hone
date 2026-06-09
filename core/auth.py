@@ -190,6 +190,71 @@ def require_config_admin(
 
 
 # ---------------------------------------------------------------------------
+# CSRF
+# ---------------------------------------------------------------------------
+
+_CSRF_KEY = "csrf_token"
+
+
+def csrf_token(request: Request) -> str:
+    """The per-session CSRF token, lazily generated on first access. Stored in
+       request.session so the signed cookie binds it to this client; the token
+       itself is then echoed back on state-changing forms (or HTMX requests)
+       and matched in require_csrf.
+
+       Rotating per-session is sufficient: the session cookie is itsdangerous-
+       signed, so an attacker can't forge a token paired with a victim's
+       session. SameSite=lax already blocks most cross-site form posts; the
+       token closes the remaining gap (browser quirks, embedded contexts).
+
+       Returns "" when SessionMiddleware isn't installed — keeps template
+       rendering working in handler-focused tests that intentionally skip the
+       middleware (CSRF enforcement itself is covered against the real
+       dependency in tests/test_csrf.py)."""
+    try:
+        session = request.session
+    except (AssertionError, AttributeError):
+        return ""
+    tok = session.get(_CSRF_KEY)
+    if not tok:
+        tok = secrets.token_urlsafe(32)
+        session[_CSRF_KEY] = tok
+    return tok
+
+
+def csrf_field(request: Request):
+    """Jinja global: render the hidden CSRF input for a <form>. The value is
+       safe by construction (token_urlsafe) but we mark it explicitly so it
+       isn't double-escaped if a future template wraps it in Markup."""
+    from markupsafe import Markup
+    return Markup(
+        f'<input type="hidden" name="csrf_token" value="{csrf_token(request)}">')
+
+
+async def require_csrf(request: Request):
+    """Dependency: gate a state-changing route on a valid CSRF token. The token
+       can ride in the `csrf_token` form field (standard <form> POSTs) OR an
+       `X-CSRF-Token` header (HTMX / JSON requests). 403 on miss or mismatch.
+
+       Multipart parsing is cached by Starlette, so the route handler's own
+       `await request.form()` returns the same parsed dict — no double-read
+       cost."""
+    expected = request.session.get(_CSRF_KEY) or ""
+    header = request.headers.get("X-CSRF-Token", "")
+    submitted = header
+    if not submitted:
+        try:
+            form = await request.form()
+            submitted = str(form.get("csrf_token") or "")
+        except Exception:
+            submitted = ""
+    if not expected or not submitted or not secrets.compare_digest(
+            submitted, expected):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="CSRF token missing or invalid")
+
+
+# ---------------------------------------------------------------------------
 # Google OAuth helpers
 # ---------------------------------------------------------------------------
 

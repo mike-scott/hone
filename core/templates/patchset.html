@@ -55,6 +55,7 @@
   <form method="post"
         action="/review-requests/{{ patchset.root_message_id | urlencode }}"
         class="m-0">
+    {{ csrf_field(request) }}
     <button type="submit" class="btn btn-sm btn-primary">
       <i class="bi bi-play-circle me-1"></i>Request review
     </button>
@@ -73,6 +74,7 @@
         action="/review-requests/{{ patchset.root_message_id | urlencode }}/delete"
         class="m-0"
         onsubmit="return confirm('Delete this AI review and its review work-item? This cannot be undone.');">
+    {{ csrf_field(request) }}
     <button type="submit" class="btn btn-sm btn-outline-danger"
             title="delete the AI review and the review work-item that produced it">
       <i class="bi bi-trash me-1"></i>Delete review

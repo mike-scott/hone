@@ -24,10 +24,12 @@
       <td class="text-nowrap">
         <form method="post" class="d-inline"
               action="/nodes/enrollments/{{ e.user_code }}/approve">
+          {{ csrf_field(request) }}
           <button class="btn btn-sm btn-success">Approve</button>
         </form>
         <form method="post" class="d-inline"
               action="/nodes/enrollments/{{ e.user_code }}/deny">
+          {{ csrf_field(request) }}
           <button class="btn btn-sm btn-outline-danger">Deny</button>
         </form>
       </td>

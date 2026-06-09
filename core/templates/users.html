@@ -32,11 +32,13 @@
           <td class="text-muted small">{{ when(u.created_at) }}</td>
           <td class="text-end">
             <form method="post" action="/users/{{ u.id }}/approve" class="d-inline">
+              {{ csrf_field(request) }}
               <button class="btn btn-success btn-sm">Approve</button>
             </form>
             <form method="post" action="/users/{{ u.id }}/delete" class="d-inline"
                   data-confirm="Delete account for {{ u.email }}? This cannot be undone."
                   data-confirm-button="Delete">
+              {{ csrf_field(request) }}
               <button class="btn btn-outline-danger btn-sm">Delete</button>
             </form>
           </td>
@@ -79,11 +81,13 @@
             <form method="post" action="/users/{{ u.id }}/revoke" class="d-inline"
                   data-confirm="Revoke access for {{ u.email }}?"
                   data-confirm-button="Revoke">
+              {{ csrf_field(request) }}
               <button class="btn btn-outline-warning btn-sm">Revoke</button>
             </form>
             <form method="post" action="/users/{{ u.id }}/delete" class="d-inline"
                   data-confirm="Delete account for {{ u.email }}? This cannot be undone."
                   data-confirm-button="Delete">
+              {{ csrf_field(request) }}
               <button class="btn btn-outline-danger btn-sm">Delete</button>
             </form>
           </td>
@@ -122,11 +126,13 @@
           <td><span class="badge text-bg-secondary">{{ u.auth_provider }}</span></td>
           <td class="text-end">
             <form method="post" action="/users/{{ u.id }}/approve" class="d-inline">
+              {{ csrf_field(request) }}
               <button class="btn btn-outline-success btn-sm">Re-approve</button>
             </form>
             <form method="post" action="/users/{{ u.id }}/delete" class="d-inline"
                   data-confirm="Delete account for {{ u.email }}? This cannot be undone."
                   data-confirm-button="Delete">
+              {{ csrf_field(request) }}
               <button class="btn btn-outline-danger btn-sm">Delete</button>
             </form>
           </td>

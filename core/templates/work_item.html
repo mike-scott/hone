@@ -17,6 +17,7 @@
   <form method="post"
         action="/work-items/{{ id }}/release-deferred{{ ('?back=' ~ (back_url | urlencode)) if back_url else '' }}"
         class="d-inline">
+    {{ csrf_field(request) }}
     <button type="submit" class="badge border-0 {{ state_badge }} me-2"
             title="Release back to claimable">{{ state }} <i class="bi bi-arrow-repeat"></i></button>
   </form>
@@ -26,6 +27,7 @@
   <form method="post"
         action="/work-items/{{ id }}/retry-unappliable{{ ('?back=' ~ (back_url | urlencode)) if back_url else '' }}"
         class="d-inline">
+    {{ csrf_field(request) }}
     <button type="submit" class="badge border-0 {{ state_badge }} me-2"
             title="Try again — re-arm for review">{{ state }} <i class="bi bi-arrow-repeat"></i></button>
   </form>

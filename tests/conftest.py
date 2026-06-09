@@ -53,6 +53,11 @@ def fake_admin_session():
             is_config_admin=is_config_admin)
         app.dependency_overrides[auth.require_session]      = lambda: user
         app.dependency_overrides[auth.require_config_admin] = lambda: user
+        # Handler-focused tests POST without a real session/CSRF token; bypass
+        # the CSRF gate too so they exercise the route, not the gate. A
+        # dedicated test file covers CSRF enforcement against the real
+        # dependency.
+        app.dependency_overrides[auth.require_csrf]         = lambda: None
         return user
     return _install
 
