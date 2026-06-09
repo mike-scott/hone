@@ -56,13 +56,19 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 async def lifespan(app: FastAPI):
     cfg: Config = app.state.config
     log.info("hone-core starting — db=%s", cfg.db_path)
-    db = core_db.connect(cfg.db_path)
+    # Migrate + bootstrap on a dedicated startup connection, then serve the
+    # routes through ThreadLocalDB — one connection per thread, because
+    # FastAPI spreads sync dependencies/handlers across threadpool workers
+    # and a sqlite3 connection must never be used by two threads at once.
+    setup_db = core_db.connect(cfg.db_path)
     _project_root = os.path.dirname(_HERE)
     version = core_db.bootstrap_methodology(
-        db,
+        setup_db,
         os.path.join(_HERE, "default-methodology.yaml"),
         os.path.join(_project_root, "common", "schema",
                      "methodology.schema.yaml"))
+    setup_db.close()
+    db = core_db.ThreadLocalDB(cfg.db_path)
     app.state.db = db
     log.info("database ready — methodology active at version %d", version)
     # TLS: generate the CA + server certificate on first start, and hold the

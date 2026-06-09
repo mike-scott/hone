@@ -35,6 +35,7 @@ import os
 import secrets
 import sqlite3
 import sys
+import threading
 import time
 import uuid
 
@@ -746,20 +747,91 @@ CREATE INDEX idx_work_items_user_claimable
 _MIGRATIONS = [_SCHEMA_V1, _SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4]
 
 
+# How long a connection waits on another connection's write lock before
+# raising "database is locked". WAL writers are serialized across
+# connections; with sub-second writes throughout, 5s is generous.
+_BUSY_TIMEOUT_MS = 5000
+
+
 def connect(path=None):
     """Open the database (creating the file if absent), apply any pending
        schema migrations, and return the connection.
 
-       check_same_thread is off so one connection can be shared by the
-       lifespan and, for now, the route handlers; once the handlers do real
-       concurrent work the right model is a per-request connection or a pool.
+       This is the bootstrap / single-consumer entry point (lifespan
+       startup, gather worker cycles, tests, the CLI). The route
+       handlers share ThreadLocalDB below instead — one sqlite3
+       connection must never be used by two threads at once.
        SQLite's WAL mode gives concurrent readers + a serialized writer."""
     db = sqlite3.connect(path or DB, check_same_thread=False)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA journal_mode=WAL")
     migrate(db)                          # runs with foreign_keys off (default)
+    db.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
     db.execute("PRAGMA foreign_keys=ON")
     return db
+
+
+def _open(path):
+    """One configured connection, no migration — ThreadLocalDB's per-thread
+       opener. The caller guarantees the schema is already at head (connect()
+       ran once at startup). check_same_thread is off only so close() can
+       run from the shutdown thread; thread-locality is what prevents
+       concurrent use."""
+    db = sqlite3.connect(path, check_same_thread=False)
+    db.row_factory = sqlite3.Row
+    db.execute("PRAGMA journal_mode=WAL")
+    db.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
+    db.execute("PRAGMA foreign_keys=ON")
+    return db
+
+
+class ThreadLocalDB:
+    """One SQLite connection per thread, opened lazily, proxying the
+       sqlite3.Connection API via __getattr__.
+
+       Stored at app.state.db so every `request.app.state.db` consumer
+       transparently gets a connection private to its thread. FastAPI
+       runs sync dependencies and handlers in threadpool worker threads
+       while async handlers run on the event loop thread; sharing one
+       connection between them is a race — python's sqlite3 caches
+       prepared statements per connection, and two threads hitting the
+       same SQL string at the same instant collide on the cached
+       statement (SQLITE_MISUSE: "bad parameter or other API misuse"),
+       or worse, silently cross results. Per-thread connections remove
+       the shared object; WAL gives the concurrent readers + serialized
+       writer across them.
+
+       The pool is bounded by the threadpool size (anyio's default 40)
+       plus the event loop thread. close() closes every connection ever
+       opened — call it only at shutdown, after the server has drained."""
+
+    def __init__(self, path):
+        self._path = path
+        self._tlocal = threading.local()
+        self._all = []
+        self._lock = threading.Lock()
+
+    def _conn(self):
+        conn = getattr(self._tlocal, "conn", None)
+        if conn is None:
+            conn = _open(self._path)
+            self._tlocal.conn = conn
+            with self._lock:
+                self._all.append(conn)
+        return conn
+
+    def __getattr__(self, name):
+        return getattr(self._conn(), name)
+
+    def close(self):
+        """Close every per-thread connection (shutdown only). Closing
+           another thread's idle connection is safe — sqlite3 only
+           forbids *use* across threads, which check_same_thread guards
+           per-connection; by shutdown the worker threads are idle."""
+        with self._lock:
+            conns, self._all = self._all, []
+        for conn in conns:
+            conn.close()
 
 
 def migrate(db):
