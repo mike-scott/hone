@@ -1694,18 +1694,26 @@ def _node_status_fields(node, claim, runtime_cfg, *, now=None, back_qs=""):
                  if isinstance(health, dict) else None)
     last_seen = node.get("last_seen") or 0
     health_at = node.get("health_at") or 0
+    # A claim whose lease has lapsed is no longer this node's work —
+    # the node went silent past the whole lease window and the row will
+    # be re-offered. It must not read as "in flight" (nor show a
+    # forever-growing Running timer); the claim stays attached, flagged,
+    # so the row can say "lease expired" instead of pretending.
+    claim_expired = bool(claim and claim.get("lease_expires")
+                         and claim["lease_expires"] <= now)
     if anth_err:
         bucket = "errored"
     elif last_seen and (now - last_seen) > stale_after:
         bucket = "stale"
-    elif claim:
+    elif claim and not claim_expired:
         bucket = "in_flight"
     else:
         bucket = "idle"
     freshness = (now - last_seen) if last_seen else None
     health_age = (now - health_at) if health_at else None
     running = (now - claim["claimed_at"]
-                if claim and claim["claimed_at"] else None)
+                if claim and claim["claimed_at"] and not claim_expired
+                else None)
     return {
         "bucket":               bucket,
         "bucket_label":         dict(_NODE_BUCKETS).get(bucket, bucket),
@@ -1714,6 +1722,7 @@ def _node_status_fields(node, claim, runtime_cfg, *, now=None, back_qs=""):
                                  if last_seen else ""),
         "health_age_display":   _relative_duration(health_age),
         "running_time_display": _relative_duration(running),
+        "claim_expired":        claim_expired,
         "claim":                claim,
         "claim_subject":        (claim["subject"] or claim["root_message_id"]
                                   if claim else None),

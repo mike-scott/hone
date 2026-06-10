@@ -2066,7 +2066,7 @@ def list_work_items(db, *, type=None, state=None, requested_by_user_id=None,
        `count_work_items` for the UI's pagination."""
     sql = ("SELECT w.id, w.type, w.state, w.root_message_id, w.message_id, "
            "w.claimed_by, w.claimed_at, w.completed_at, w.enqueued_at, "
-           "w.requested_by_user_id, p.subject "
+           "w.lease_expires, w.requested_by_user_id, p.subject "
            "FROM work_items w "
            "LEFT JOIN patchsets p ON p.root_message_id=w.root_message_id ")
     params = []
@@ -3109,7 +3109,7 @@ def fleet_status(db, stale_after_seconds):
            "errored":          1,   # last health snapshot carries
                                     # a non-null last_anthropic_error
            "stale":            1,   # last_seen older than the cutoff
-           "in_flight":        3,   # work_items in CLAIMED state
+           "in_flight":        3,   # CLAIMED work_items, lease unexpired
            "last_activity_at": <unix>  # max(nodes.last_seen) or None
          }
 
@@ -3144,9 +3144,14 @@ def fleet_status(db, stale_after_seconds):
             stale += 1
         else:
             healthy += 1
+    # A CLAIMED row whose lease has lapsed is no longer in flight — the
+    # node went silent and the claim protocol will re-offer the row (the
+    # periodic reclaim sweep flips it back to claimable; this filter
+    # keeps the count honest in the window before the sweep fires).
     in_flight = db.execute(
-        "SELECT COUNT(*) FROM work_items WHERE state=?",
-        (WORK_ITEM_STATE_CLAIMED,)).fetchone()[0]
+        "SELECT COUNT(*) FROM work_items WHERE state=? "
+        "AND (lease_expires IS NULL OR lease_expires > ?)",
+        (WORK_ITEM_STATE_CLAIMED, now)).fetchone()[0]
     return {"total":            len(rows),
              "healthy":          healthy,
              "errored":          errored,

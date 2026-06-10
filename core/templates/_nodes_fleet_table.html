@@ -60,7 +60,14 @@
             </a>
             {% else %}<span class="text-muted">—</span>{% endif %}
           </td>
-          <td class="text-nowrap"><code>{{ n.running_time_display }}</code></td>
+          <td class="text-nowrap">
+            {% if n.claim_expired %}
+            <span class="badge text-bg-warning"
+                  title="the node went silent past its lease; the work will be re-offered">lease expired</span>
+            {% else %}
+            <code>{{ n.running_time_display }}</code>
+            {% endif %}
+          </td>
 
           <td class="small">
             {% if n.health_display and n.health_display.error %}

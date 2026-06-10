@@ -103,9 +103,18 @@ async def lifespan(app: FastAPI):
         autoclone_task = asyncio.create_task(
             _autoclone_lore(app), name="lore-autoclone")
     gather_task = asyncio.create_task(gather.gather_supervisor(app))
+    # Crash-recovery sweep: flip lease-expired CLAIMED rows back to
+    # claimable on a timer. The claim protocol already re-offers expired
+    # rows lazily inside the next claim request, but on a quiet fleet
+    # (the dead node was the only poller) nothing ever claims — without
+    # the sweep the row sits CLAIMED forever and every status surface
+    # (node row, queue, fleet pulse) reads stale state.
+    reclaim_task = asyncio.create_task(
+        _reclaim_sweep(app), name="reclaim-sweep")
     try:
         yield
     finally:
+        reclaim_task.cancel()
         if autoclone_task and not autoclone_task.done():
             autoclone_task.cancel()
         manual_task = getattr(app.state, "lore_clone_task", None)
@@ -123,6 +132,33 @@ async def lifespan(app: FastAPI):
                 pass
         db.close()
         log.info("hone-core stopping")
+
+
+# --- reclaim sweep ----------------------------------------------------------
+
+_RECLAIM_SWEEP_SECONDS = 60     # cheap: one indexed UPDATE per queue
+
+
+def _run_reclaim(app):
+    """One sweep: return lease-expired claims to their queues. Failures
+       are logged and swallowed — a transient DB hiccup must not kill
+       the loop. Factored out of the timer task so tests can drive a
+       single pass synchronously."""
+    try:
+        w, d = core_db.reclaim_expired(app.state.db)
+        if w or d:
+            log.info("reclaim sweep: re-offered %d work item(s), "
+                     "%d draft task(s)", w, d)
+    except Exception:
+        log.exception("reclaim sweep failed")
+
+
+async def _reclaim_sweep(app):
+    """The periodic reclaim timer — runs for the app's lifetime,
+       cancelled at shutdown."""
+    while True:
+        await asyncio.sleep(_RECLAIM_SWEEP_SECONDS)
+        _run_reclaim(app)
 
 
 # --- lore-clone status (UI-readable) ---------------------------------------

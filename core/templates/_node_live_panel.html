@@ -39,7 +39,12 @@
           {% if node.claim %}
           <dt class="col-sm-4">Running</dt>
           <dd class="col-sm-8">
+            {% if node.claim_expired %}
+            <span class="badge text-bg-warning"
+                  title="the node went silent past its lease; the work will be re-offered">lease expired</span>
+            {% else %}
             <code>{{ node.running_time_display }}</code>
+            {% endif %}
             <a href="{{ node.claim_url }}"
                class="link-body-emphasis text-decoration-none ms-2 small">
               <span class="badge text-bg-secondary me-1">{{ node.claim_type }}</span>{{ node.claim_subject[:40] }}

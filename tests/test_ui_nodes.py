@@ -47,18 +47,21 @@ def _patchset(db, root):
     db.commit()
 
 
-def _claim(db, *, claimed_by, claimed_at, root="<r1@x>"):
+def _claim(db, *, claimed_by, claimed_at, root="<r1@x>",
+           lease_expires=None):
     """Create a CLAIMED work_item owned by the named node — the table
-       joins by `claimed_by == node.name`."""
+       joins by `claimed_by == node.name`. `lease_expires` defaults to
+       NULL (treated as unexpired); pass a past timestamp to model a
+       node that died mid-claim."""
     if not db.execute("SELECT 1 FROM patchsets WHERE root_message_id=?",
                        (root,)).fetchone():
         _patchset(db, root)
     db.execute(
         "INSERT INTO work_items (type,root_message_id,state,claimed_by,"
-        "claimed_at,enqueued_at) VALUES (?,?,?,?,?,?)",
+        "claimed_at,enqueued_at,lease_expires) VALUES (?,?,?,?,?,?,?)",
         (core_db.WORK_ITEM_TYPE_PREPARE, root,
          core_db.WORK_ITEM_STATE_CLAIMED, claimed_by, claimed_at,
-         claimed_at - 30))
+         claimed_at - 30, lease_expires))
     db.commit()
 
 
@@ -355,3 +358,34 @@ def test_recent_claims_pagination_preserves_back(ctx):
                            params={"back": "/nodes?tab=x"}).text
     # The paginator's next-page link round-trips the back param.
     assert "back=" in body
+
+
+# --- lease-expired claims must not read as "in flight" ----------------------
+
+def test_expired_lease_claim_is_not_in_flight(ctx):
+    """A node whose claim's lease has lapsed went silent past the whole
+       lease window — the work will be re-offered, so the row must not
+       show In flight or a forever-growing Running timer. The claim
+       stays attached, flagged 'lease expired'."""
+    now = int(time.time())
+    _node(ctx.db, name="dead-1", last_seen=now,    # fresh, isolates the lease
+          health={"last_anthropic_error": None})
+    _claim(ctx.db, claimed_by="dead-1", claimed_at=now - 3600,
+           lease_expires=now - 1800)
+    body = ctx.client.get("/nodes").text
+    assert "In flight" not in body
+    assert "lease expired" in body
+
+
+def test_unexpired_claim_still_reads_in_flight(ctx):
+    """The happy path is untouched: a live lease renders In flight with
+       the running timer."""
+    now = int(time.time())
+    _node(ctx.db, name="busy-1", last_seen=now,
+          health={"last_anthropic_error": None})
+    _claim(ctx.db, claimed_by="busy-1", claimed_at=now - 47,
+           lease_expires=now + 1700)
+    body = ctx.client.get("/nodes").text
+    assert "In flight" in body
+    assert "47s" in body
+    assert "lease expired" not in body

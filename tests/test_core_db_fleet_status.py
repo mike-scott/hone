@@ -153,3 +153,25 @@ def test_fleet_with_30_plus_nodes(db):
     assert s["healthy"] == 20
     assert s["stale"] == 7
     assert s["errored"] == 3
+
+
+def test_in_flight_excludes_lease_expired_claims(db):
+    """A CLAIMED row whose lease has lapsed is dead work awaiting
+       re-offer, not an in-flight task — the pulse chip must not count
+       it."""
+    now = int(time.time())
+    _node(db, name="n1", last_seen=now)
+    db.execute(
+        "INSERT INTO patchsets (root_message_id,subject,submitter_email,sent,"
+        "n_patches,gathered_at) VALUES (?,?,?,?,?,?)",
+        ("<r1@x>", "subj", "a@b", now, 1, now))
+    for lease in (now + 1700,        # live
+                  now - 60,          # expired
+                  None):             # legacy NULL — treated as unexpired
+        db.execute("INSERT INTO work_items (type,root_message_id,state,"
+                    "enqueued_at,lease_expires) VALUES (?,?,?,?,?)",
+                    (core_db.WORK_ITEM_TYPE_PREPARE, "<r1@x>",
+                     core_db.WORK_ITEM_STATE_CLAIMED, now, lease))
+    db.commit()
+    s = core_db.fleet_status(db, stale_after_seconds=900)
+    assert s["in_flight"] == 2

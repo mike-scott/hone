@@ -175,9 +175,14 @@ task payload* below.
 
 **Crash recovery:** a dead node's claim goes stale; once the lease
 elapses the claim protocol re-offers it (to whichever nodes the item's
-origin makes eligible). No work is lost or stuck. This is what makes
-the worker tier a pool of interchangeable nodes — within their
-ownership scope — rather than one-shot tasks.
+origin makes eligible). Re-offer happens two ways: lazily inside the
+next claim request, and via a **periodic reclaim sweep** (every minute,
+`core/main.py`) that flips lease-expired rows back to claimable even on
+a quiet fleet — so the queue, the node status line, and the fleet pulse
+never show a dead claim as in flight (the node row shows "lease
+expired" in the window before the sweep fires). No work is lost or
+stuck. This is what makes the worker tier a pool of interchangeable
+nodes — within their ownership scope — rather than one-shot tasks.
 
 ## Review output: concerns and scoping
 

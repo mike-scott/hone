@@ -145,3 +145,37 @@ def test_filter_passes_through_records_with_unexpected_args():
         name="uvicorn.access", level=logging.INFO, pathname="",
         lineno=0, msg="some other format", args=(), exc_info=None)
     assert f.filter(rec) is True
+
+
+# --- the reclaim sweep -------------------------------------------------------
+
+def test_run_reclaim_returns_expired_claims_to_the_queue(tmp_path):
+    """One sweep pass flips a lease-expired CLAIMED row back to
+       claimable — the crash-recovery loop the lifespan runs every
+       minute, driven synchronously here."""
+    from types import SimpleNamespace
+    from core import core_db, main
+
+    db = core_db.connect(str(tmp_path / "hone.db"))
+    core_db.add_methodology_version(db, {"name": "t", "version": 1})
+    core_db.upsert_patchset(db, "<r1@x>", subject="s", n_patches=1)
+    core_db.enqueue_prepare(db, "<r1@x>")
+    # Claim with a zero-second lease — expired the moment it's taken.
+    wi = core_db.claim_work_item(db, "w1", methodology_version=1,
+                                 lease_seconds=0)
+    assert wi is not None
+    main._run_reclaim(SimpleNamespace(state=SimpleNamespace(db=db)))
+    row = db.execute("SELECT state FROM work_items").fetchone()
+    assert row["state"] == core_db.WORK_ITEM_STATE_CLAIMABLE
+
+
+def test_run_reclaim_swallows_db_failures(tmp_path):
+    """A transient DB error must not kill the sweep loop — logged and
+       swallowed."""
+    from types import SimpleNamespace
+    from core import main
+
+    class _Boom:
+        def execute(self, *a, **kw):
+            raise RuntimeError("db down")
+    main._run_reclaim(SimpleNamespace(state=SimpleNamespace(db=_Boom())))
