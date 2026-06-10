@@ -8,7 +8,8 @@
     <p class="text-muted small mb-3">
       Upload the files <code>git format-patch</code> produces — one
       <code>.patch</code>/<code>.eml</code> per patch plus the optional
-      cover letter — or a single mbox of the series, or paste one diff.
+      cover letter — or a single mbox of the series (gzipped is fine:
+      lore's <code>t.mbox.gz</code> works as-is), or paste one diff.
       Generate the series with a base so review can run authoritatively:
       <code>git format-patch --base=&lt;commit&gt; -vN -o out/ &lt;range&gt;</code>.
       Uploaded patchsets are reviewed on your behalf; they are kept apart
@@ -18,7 +19,8 @@
       {{ csrf_field(request) }}
       <div class="mb-3">
         <label for="files" class="form-label small">Patch files
-          (<code>.patch</code> / <code>.eml</code> / <code>.mbox</code>)</label>
+          (<code>.patch</code> / <code>.eml</code> / <code>.mbox</code> /
+          <code>.mbox.gz</code>)</label>
         <input type="file" id="files" name="files" multiple
                class="form-control form-control-sm">
       </div>

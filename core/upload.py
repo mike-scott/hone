@@ -2,8 +2,9 @@
 
 Accepts the artifacts `git format-patch` produces — one RFC-822 message
 per patch (.patch / .eml), an optional 0/N cover letter — either as
-individual files or concatenated into a single mbox, plus a bare pasted
-diff as the no-tooling fallback. Produces a structured series preview
+individual files or concatenated into a single mbox (optionally
+gzipped: lore.kernel.org's t.mbox.gz drops straight in), plus a bare
+pasted diff as the no-tooling fallback. Produces a structured series preview
 the upload page renders for confirmation; on confirm the same structure
 drives ingest through the gather primitives (core/ui.py →
 upload_confirm).
@@ -14,6 +15,8 @@ series totals, the `base-commit:` trailer) — an upload is the same
 artifact lore gathers, minus the mailing-list threading.
 """
 import email
+import gzip
+import io
 import re
 import uuid
 from email import policy
@@ -190,6 +193,28 @@ def parse_upload(blobs, *, pasted=None):
         return {"ok": False, "errors":
                 [f"upload exceeds the {MAX_UPLOAD_BYTES // (1024*1024)} MiB "
                  f"cap"], "warnings": []}
+
+    # Transparently decompress gzipped members — lore.kernel.org serves
+    # thread mboxes as t.mbox.gz, so they should drop straight in. The
+    # read is bounded to the cap + 1 byte: a crafted bomb can't expand
+    # past it, and anything that does is rejected on its DECOMPRESSED
+    # size (the cap is about parseable text, not wire bytes).
+    expanded = []
+    for fname, data in blobs:
+        if data[:2] == b"\x1f\x8b":                  # gzip magic
+            try:
+                with gzip.GzipFile(fileobj=io.BytesIO(data)) as gz:
+                    data = gz.read(MAX_UPLOAD_BYTES + 1)
+            except (OSError, EOFError):
+                errors.append(f"{fname}: not a valid gzip file")
+                continue
+        expanded.append((fname, data))
+    blobs = expanded
+    total_bytes = sum(len(b) for _, b in blobs) + len(pasted or "")
+    if total_bytes > MAX_UPLOAD_BYTES:
+        return {"ok": False, "errors":
+                [f"upload exceeds the {MAX_UPLOAD_BYTES // (1024*1024)} MiB "
+                 f"cap once decompressed"], "warnings": []}
 
     raw_messages = []                       # (origin_label, bytes)
     for fname, data in blobs:

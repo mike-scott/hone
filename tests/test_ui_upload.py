@@ -763,3 +763,64 @@ def test_delete_unknown_patchset_404(tmp_path):
     ctx = _ctx(tmp_path)
     r = ctx.client.post("/patchsets/nope@x/delete", follow_redirects=False)
     assert r.status_code == 404
+
+
+# --- gzipped mbox uploads ---------------------------------------------------
+
+def _gz(data):
+    import gzip
+    return gzip.compress(data)
+
+
+def test_parse_gzipped_mbox(tmp_path):
+    """lore's t.mbox.gz drops straight in — the parser decompresses
+       transparently and the series parses as if it were plain."""
+    mbox = (b"From x Mon Jan 1 00:00:00 2026\n"
+            + _mail("[PATCH 0/1] one thing", "<c@x>", base=_BASE)
+            + b"\nFrom x Mon Jan 1 00:00:01 2026\n"
+            + _mail("[PATCH 1/1] the thing", "<p1@x>"))
+    parsed = upload.parse_upload([("t.mbox.gz", _gz(mbox))])
+    assert parsed["ok"], parsed["errors"]
+    assert parsed["root_message_id"] == "<c@x>"
+    assert parsed["n_patches"] == 1
+    assert parsed["base_commit"] == _BASE
+
+
+def test_parse_corrupt_gzip_is_an_error():
+    parsed = upload.parse_upload(
+        [("t.mbox.gz", b"\x1f\x8b" + b"this is not gzip at all")])
+    assert not parsed["ok"]
+    assert any("not a valid gzip" in e for e in parsed["errors"])
+
+
+def test_gzip_bomb_rejected_on_decompressed_size():
+    """The cap applies to DECOMPRESSED content — a tiny .gz that
+       expands past it is rejected, and the bounded read means the
+       expansion stops at cap+1 (no memory blowup)."""
+    bomb = _gz(b"\0" * (upload.MAX_UPLOAD_BYTES + 1024))
+    assert len(bomb) < upload.MAX_UPLOAD_BYTES   # wire size sails through
+    parsed = upload.parse_upload([("bomb.mbox.gz", bomb)])
+    assert not parsed["ok"]
+    assert any("once decompressed" in e for e in parsed["errors"])
+
+
+def test_upload_flow_accepts_gzipped_mbox(tmp_path):
+    """End to end: the /upload form takes the .mbox.gz, previews the
+       series, and confirm ingests it."""
+    ctx = _ctx(tmp_path)
+    mbox = (b"From x Mon Jan 1 00:00:00 2026\n"
+            + _mail("[PATCH v2 0/2] net: fix things", "<cover@x>",
+                    base=_BASE)
+            + b"\nFrom x Mon Jan 1 00:00:01 2026\n"
+            + _mail("[PATCH v2 1/2] net: part one", "<p1@x>")
+            + b"\nFrom x Mon Jan 1 00:00:02 2026\n"
+            + _mail("[PATCH v2 2/2] net: part two", "<p2@x>"))
+    r = _post_files(ctx.client, [("t.mbox.gz", _gz(mbox))])
+    assert r.status_code == 200
+    assert "net: fix things" in r.text
+    token = r.text.split('name="token" value="')[1].split('"')[0]
+    ctx.client.post("/upload/confirm", data={"token": token},
+                    follow_redirects=False)
+    ps = ctx.db.execute("SELECT n_patches FROM patchsets "
+                        "WHERE root_message_id='cover@x'").fetchone()
+    assert ps["n_patches"] == 2
