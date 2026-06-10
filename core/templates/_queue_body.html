@@ -34,7 +34,7 @@
           {% endif %}
         </td>
         <td><span class="badge {{ w.type_badge }}">{{ w.type }}</span></td>
-        <td><span class="badge {{ w.state_badge }}">{{ w.state }}</span></td>
+        <td><span class="badge {{ w.state_badge }}">{{ w.state }}{{ w.defer_suffix }}</span></td>
         <td>{{ w.claimed_by or "—" }}</td>
         <td class="small">
           {% if w.origin_email %}

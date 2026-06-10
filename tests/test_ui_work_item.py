@@ -404,3 +404,20 @@ def test_cancel_is_admin_only(tmp_path):
     assert r.status_code == 403
     assert db.execute("SELECT COUNT(*) AS n FROM work_items") \
              .fetchone()["n"] == 1
+
+
+# --- deferral count + parked rendering ---------------------------------------
+
+def test_work_item_page_shows_defer_count_and_parked(ctx):
+    """A deferred row's badge carries the retry count, and 'parked' once
+       the row hit DEFER_CAP (lease NULL); the queue badge matches."""
+    _plant_patchset(ctx.db)
+    wid = core_db.enqueue_review(ctx.db, "<r1@x>")
+    ctx.db.execute(
+        "UPDATE work_items SET state=?, defer_count=5, lease_expires=NULL "
+        "WHERE id=?", (core_db.WORK_ITEM_STATE_DEFERRED, wid))
+    ctx.db.commit()
+    body = ctx.client.get(f"/work-items/{wid}").text
+    assert "×5" in body and "parked" in body
+    body = ctx.client.get("/queue").text
+    assert "deferred ×5 · parked" in body

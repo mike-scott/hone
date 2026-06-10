@@ -121,6 +121,9 @@ after the lease elapses).
 
 - The same item repeatedly flipping to `deferred` → something is
   wrong upstream, usually base-tree access or patch reconstruction.
+  Retries back off exponentially and the item **parks** after 5
+  deferrals ("deferred ×5 · parked" on the queue) — release it from
+  the work-item page once the cause is fixed, or cancel it.
 - Reviews enqueued but no prepare completed for the patchset → the
   prepare task is blocking; check the prepare node's logs.
 - `claimed` items stuck for hours with no heartbeat → node is dead

@@ -119,11 +119,17 @@ field, persisted on the row under `work_items.record`.
   commit demotes the task to `heuristic` mode and it still terminates as
   `completed`.
 - **deferred** — the node could not obtain the base *tree*; the work-item
-  re-arms to `claimable` after the lease elapses. For `prepare` tasks
-  this is rare — even with no base commit available the node falls back
-  to heuristic mode and produces a row; `deferred` only fires if the
-  node's tree is entirely uninitialised. For `review` tasks it is the
-  normal degradation when the declared base isn't fetchable.
+  re-arms to `claimable` on an **exponential backoff** (lease × 4 per
+  deferral: 30 min, 2 h, 8 h, capped at 24 h — `defer_count` on the row
+  drives it). After `DEFER_CAP` (5) deferrals the row **parks**:
+  `lease_expires` goes NULL, which the re-offer clause never matches, so
+  a permanently-unobtainable base stops retrying forever. The queue and
+  detail pages show "deferred ×N" and "parked"; the admin's
+  release-deferred re-arm resets the budget. For `prepare` tasks
+  deferral is rare — even with no base commit available the node falls
+  back to heuristic mode and produces a row; `deferred` only fires if
+  the node's tree is entirely uninitialised. For `review` tasks it is
+  the normal degradation when the declared base isn't fetchable.
 
 **Patchset-level skip.** A `PatchsetRef` from a gather module can carry a
 `skip_reason` (e.g. lore's unresolved-date case) — or the list-tag filter

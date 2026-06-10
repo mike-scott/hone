@@ -783,8 +783,17 @@ ALTER TABLE users ADD COLUMN is_maintainer INTEGER NOT NULL DEFAULT 0
     CHECK (is_maintainer IN (0, 1));
 """
 
+_SCHEMA_V8 = """
+-- Deferral bookkeeping: how many times a work item has come back
+-- `deferred` (base tree unobtainable). Drives the exponential re-offer
+-- backoff and the park-after-cap rule in submit_work_result — without
+-- it a permanently-unobtainable base retries every lease window,
+-- forever. Reset to 0 by the admin's release-deferred re-arm.
+ALTER TABLE work_items ADD COLUMN defer_count INTEGER NOT NULL DEFAULT 0;
+"""
+
 _MIGRATIONS = [_SCHEMA_V1, _SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4, _SCHEMA_V5,
-               _SCHEMA_V6, _SCHEMA_V7]
+               _SCHEMA_V6, _SCHEMA_V7, _SCHEMA_V8]
 
 
 # How long a connection waits on another connection's write lock before
@@ -1853,25 +1862,62 @@ def heartbeat(db, claim_id, lease_seconds=1800):
     return False
 
 
+# Deferral retry policy. A DEFERRED row is re-offered once its
+# lease_expires passes (the claim picker's existing gate), so backoff is
+# expressed by pushing lease_expires out: lease × 4^(n-1), capped at a
+# day. After DEFER_CAP deferrals the row PARKS — lease_expires goes NULL,
+# which the re-offer clause (`lease_expires <= now`) never matches — so a
+# permanently-unobtainable base stops looping; the admin's
+# release-deferred button is the escape hatch (it resets the count).
+DEFER_CAP                  = 5
+_DEFER_BACKOFF_BASE        = 1800            # = the default claim lease
+_DEFER_BACKOFF_MULT        = 4
+_DEFER_BACKOFF_MAX_SECONDS = 24 * 3600
+
+
+def _defer_backoff_seconds(defer_count):
+    """Seconds until a row deferred for the n-th time is re-offered:
+       30 min, 2 h, 8 h, then capped at 24 h."""
+    return min(_DEFER_BACKOFF_BASE * _DEFER_BACKOFF_MULT ** (defer_count - 1),
+               _DEFER_BACKOFF_MAX_SECONDS)
+
+
 def submit_work_result(db, claim_id, *, state, record):
     """Record a node's verdict on a claimed work item and close it out.
        `state` is one of WORK_ITEM_STATE_COMPLETED|UNAPPLIABLE|DEFERRED;
        `record` (a dict) is stored as JSON. The row's methodology_version
-       was stamped at claim time and is not touched here. Returns:
+       was stamped at claim time and is not touched here.
+
+       A DEFERRED verdict additionally advances the retry policy above:
+       defer_count increments and lease_expires becomes the next re-offer
+       time (or NULL — parked — at DEFER_CAP). Returns:
          'ok'      recorded (or a no-op re-submit of the same claim)
          'lapsed'  the claim was reclaimed - the node must discard the result"""
     if state not in _WORK_ITEM_STATE_TERMINAL:
         raise ValueError(f"bad work-item terminal state: {state!r}")
-    row = db.execute("SELECT state FROM work_items WHERE claim_id=?",
-                     (claim_id,)).fetchone()
+    row = db.execute("SELECT state, defer_count FROM work_items "
+                     "WHERE claim_id=?", (claim_id,)).fetchone()
     if row is None:
         return "lapsed"                          # reclaimed (or never issued)
     if row["state"] != WORK_ITEM_STATE_CLAIMED:
         return "ok"                              # already recorded
-    db.execute(
-        "UPDATE work_items SET state=?, record=?, completed_at=? "
-        "WHERE claim_id=?",
-        (state, json.dumps(record), int(time.time()), claim_id))
+    now = int(time.time())
+    if state == WORK_ITEM_STATE_DEFERRED:
+        n = (row["defer_count"] or 0) + 1
+        lease = (None if n >= DEFER_CAP          # parked — never re-offered
+                 else now + _defer_backoff_seconds(n))
+        if lease is None:
+            log.info("submit_work_result: claim %s deferred ×%d — parked "
+                     "(admin release-deferred to retry)", claim_id, n)
+        db.execute(
+            "UPDATE work_items SET state=?, record=?, completed_at=?, "
+            "defer_count=?, lease_expires=? WHERE claim_id=?",
+            (state, json.dumps(record), now, n, lease, claim_id))
+    else:
+        db.execute(
+            "UPDATE work_items SET state=?, record=?, completed_at=? "
+            "WHERE claim_id=?",
+            (state, json.dumps(record), now, claim_id))
     db.commit()
     return "ok"
 
@@ -1937,10 +1983,12 @@ def release_deferred(db, item_id):
     if row["state"] != WORK_ITEM_STATE_DEFERRED:
         return "not_deferred"
     log.info("release_deferred: work item %s → claimable", item_id)
+    # defer_count resets — the admin's release grants a fresh retry
+    # budget, un-parking a row that hit DEFER_CAP.
     db.execute(
         "UPDATE work_items SET state=?, claim_id=NULL, claimed_by=NULL, "
         "claimed_at=NULL, lease_expires=NULL, heartbeat_at=NULL, "
-        "methodology_version=NULL "
+        "methodology_version=NULL, defer_count=0 "
         "WHERE id=?",
         (WORK_ITEM_STATE_CLAIMABLE, item_id))
     db.commit()
@@ -2066,7 +2114,8 @@ def list_work_items(db, *, type=None, state=None, requested_by_user_id=None,
        `count_work_items` for the UI's pagination."""
     sql = ("SELECT w.id, w.type, w.state, w.root_message_id, w.message_id, "
            "w.claimed_by, w.claimed_at, w.completed_at, w.enqueued_at, "
-           "w.lease_expires, w.requested_by_user_id, p.subject "
+           "w.lease_expires, w.defer_count, w.requested_by_user_id, "
+           "p.subject "
            "FROM work_items w "
            "LEFT JOIN patchsets p ON p.root_message_id=w.root_message_id ")
     params = []

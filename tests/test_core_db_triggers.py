@@ -525,3 +525,76 @@ def test_retry_unappliable_is_a_no_op_for_a_non_unappliable_item(db):
 
 def test_retry_unappliable_unknown_id(db):
     assert core_db.retry_unappliable(db, 999999) == "unknown"
+
+
+# --- deferral retry policy: backoff, park-at-cap, admin release -------------
+
+def _defer_once(db):
+    """Claim the (sole) work item and submit a deferred verdict.
+       Backdates lease_expires first so the claim picker re-offers a
+       previously-deferred row without waiting out the backoff."""
+    import time
+    db.execute("UPDATE work_items SET lease_expires=? "
+               "WHERE lease_expires IS NOT NULL",
+               (int(time.time()) - 1,))
+    db.commit()
+    wi = core_db.claim_work_item(db, "w1", methodology_version=1)
+    assert wi is not None, "expected the deferred row to be re-offered"
+    assert core_db.submit_work_result(
+        db, wi["claim_id"], state=core_db.WORK_ITEM_STATE_DEFERRED,
+        record={"outcome": "deferred"}) == "ok"
+    return db.execute("SELECT defer_count, lease_expires, state "
+                      "FROM work_items").fetchone()
+
+
+def _plant_one_prepare(db):
+    import time as _t
+    core_db.add_methodology_version(db, {"name": "t", "version": 1})
+    _planted_patchset(db, "<r1@x>", 1)
+    return core_db.enqueue_prepare(db, "<r1@x>")
+
+
+def test_deferral_backs_off_exponentially(db):
+    """Each deferral increments defer_count and pushes the re-offer time
+       out by lease × 4^(n-1) — 30 min, then 2 h — so a flaky base is
+       retried, but not every lease window forever."""
+    import time
+    _plant_one_prepare(db)
+    now = int(time.time())
+    row = _defer_once(db)
+    assert row["defer_count"] == 1
+    assert abs(row["lease_expires"] - (now + 1800)) < 30
+    row = _defer_once(db)
+    assert row["defer_count"] == 2
+    assert abs(row["lease_expires"] - (now + 7200)) < 30
+
+
+def test_fifth_deferral_parks_the_item(db):
+    """At DEFER_CAP the row parks: lease_expires goes NULL, which the
+       claim picker's re-offer clause never matches — no more retries
+       until an admin releases it."""
+    _plant_one_prepare(db)
+    for _ in range(core_db.DEFER_CAP - 1):
+        row = _defer_once(db)
+    row = _defer_once(db)                        # the capping deferral
+    assert row["defer_count"] == core_db.DEFER_CAP
+    assert row["lease_expires"] is None
+    assert row["state"] == core_db.WORK_ITEM_STATE_DEFERRED
+    # Parked: not claimable, and the reclaim sweep ignores it too.
+    assert core_db.claim_work_item(db, "w2", methodology_version=1) is None
+    assert core_db.reclaim_expired(db) == (0, 0)
+    assert core_db.claim_work_item(db, "w2", methodology_version=1) is None
+
+
+def test_release_deferred_unparks_with_a_fresh_retry_budget(db):
+    """The admin escape hatch: release-deferred re-arms a parked row to
+       claimable and resets defer_count, so the released item gets the
+       full backoff ladder again."""
+    wid = _plant_one_prepare(db)
+    for _ in range(core_db.DEFER_CAP):
+        _defer_once(db)
+    assert core_db.release_deferred(db, wid) == "ok"
+    row = db.execute("SELECT state, defer_count FROM work_items").fetchone()
+    assert row["state"] == core_db.WORK_ITEM_STATE_CLAIMABLE
+    assert row["defer_count"] == 0
+    assert core_db.claim_work_item(db, "w1", methodology_version=1) is not None

@@ -965,11 +965,19 @@ def _queue_view(db, type, state, page, size, current_user=None):
                                        limit=size, offset=offset):
         type_name  = core_db.WORK_ITEM_TYPE_NAMES.get(w["type"], "?")
         state_name = core_db.WORK_ITEM_STATE_NAMES.get(w["state"], "?")
+        # Deferral badge suffix: "deferred ×3" while retrying on backoff,
+        # "deferred ×5 · parked" once the cap is hit (admin re-arm only).
+        defer_suffix = ""
+        if state_name == "deferred" and (w.get("defer_count") or 0):
+            defer_suffix = f" ×{w['defer_count']}"
+            if w.get("lease_expires") is None:
+                defer_suffix += " · parked"
         items.append({
             "id":             w["id"],
             "type":           type_name,
             "type_badge":     _TYPE_BADGE.get(type_name, "text-bg-light"),
             "state":          state_name,
+            "defer_suffix":   defer_suffix,
             "state_badge":    _STATE_BADGE.get(state_name, "text-bg-light"),
             "subject":        w["subject"] or w["root_message_id"],
             "message_id":     w["message_id"],
@@ -2142,6 +2150,13 @@ def _work_item_view(db, work_item_id):
         "type_badge":        _TYPE_BADGE.get(type_name, "text-bg-light"),
         "state":             state_name,
         "state_badge":       _STATE_BADGE.get(state_name, "text-bg-light"),
+        # Deferral retry bookkeeping: ×N on the badge; "parked" once the
+        # row hit DEFER_CAP (lease_expires NULL — never re-offered until
+        # an admin releases it, which resets the budget).
+        "defer_count":       w.get("defer_count") or 0,
+        "defer_parked":      (w["state"] == core_db.WORK_ITEM_STATE_DEFERRED
+                              and w.get("lease_expires") is None
+                              and (w.get("defer_count") or 0) > 0),
         "root_message_id":   w["root_message_id"],
         "patchset_subject":  patchset_subject,
         "patchset_url":      patchset_url,

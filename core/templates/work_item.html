@@ -24,7 +24,7 @@
         class="d-inline">
     {{ csrf_field(request) }}
     <button type="submit" class="badge border-0 {{ state_badge }} me-2"
-            title="Release back to claimable">{{ state }} <i class="bi bi-arrow-repeat"></i></button>
+            title="Release back to claimable (resets the retry budget)">{{ state }}{% if defer_count %} ×{{ defer_count }}{% endif %}{% if defer_parked %} · parked{% endif %} <i class="bi bi-arrow-repeat"></i></button>
   </form>
   {% elif state == "unappliable" and current_user.is_config_admin %}
   {# An unappliable item is terminal and unheld — clicking the badge re-arms
@@ -37,7 +37,7 @@
             title="Try again — re-arm for review">{{ state }} <i class="bi bi-arrow-repeat"></i></button>
   </form>
   {% else %}
-  <span class="badge {{ state_badge }} me-2">{{ state }}</span>
+  <span class="badge {{ state_badge }} me-2">{{ state }}{% if defer_count and state == "deferred" %} ×{{ defer_count }}{% endif %}{% if defer_parked %} · parked{% endif %}</span>
   {% endif %}
   work-item <code>{{ id }}</code>
   {# Admin-only cancel for UNHELD items (claimable / deferred): deletes
