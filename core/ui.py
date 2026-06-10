@@ -2174,6 +2174,7 @@ def _work_item_view(db, work_item_id):
         "record_json":       json.dumps(record, indent=2)
                               if isinstance(record, dict) else None,
         "meta_schema_error":  meta.get("schema_error"),
+        "meta_claude_cli":    meta.get("claude_cli_version"),
         "meta_raw_response":  meta.get("raw_response"),
         "meta_raw_truncated": meta.get("raw_response_truncated"),
         # The captured Claude turn (node/ai.py → meta.trace): assistant text,

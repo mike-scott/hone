@@ -421,3 +421,19 @@ def test_work_item_page_shows_defer_count_and_parked(ctx):
     assert "×5" in body and "parked" in body
     body = ctx.client.get("/queue").text
     assert "deferred ×5 · parked" in body
+
+
+def test_work_item_page_shows_claude_cli_provenance(ctx):
+    """A record whose meta carries claude_cli_version renders it in the
+       Completion record header — permanent attribution to the build
+       that produced the result."""
+    _plant_patchset(ctx.db)
+    wid = core_db.enqueue_review(ctx.db, "<r1@x>")
+    wi = core_db.claim_work_item(ctx.db, "w1", methodology_version=1)
+    core_db.submit_work_result(
+        ctx.db, wi["claim_id"], state=core_db.WORK_ITEM_STATE_COMPLETED,
+        record={"task_type": "review", "outcome": "reviewed",
+                "meta": {"claude_cli_version": "2.1.161 (Claude Code)"}})
+    body = ctx.client.get(f"/work-items/{wid}").text
+    assert "Claude CLI" in body
+    assert "2.1.161 (Claude Code)" in body

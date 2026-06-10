@@ -90,10 +90,12 @@ $defs:
     description: >-
       Free-form node-reported metadata (provider, prompt hashes, cache
       token counts, the deterministic resolver version, a raw_response on
-      failure, etc.). hone-core stores it verbatim alongside the decomposed
-      record. Stays open (no additionalProperties:false) so the node can
-      attach new keys without a schema bump; `trace` is the one shaped key,
-      validated when present.
+      failure, the `claude_cli_version` build-provenance stamp the runner
+      adds at submit time on the cli backend, etc.). hone-core stores it
+      verbatim alongside the decomposed record. Stays open (no
+      additionalProperties:false) so the node can attach new keys without
+      a schema bump; `trace` is the one shaped key, validated when
+      present.
     properties:
       trace:
         type: array

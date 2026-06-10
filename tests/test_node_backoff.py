@@ -685,3 +685,43 @@ def test_run_once_claims_when_disk_ok(monkeypatch):
     monkeypatch.setattr(runner.time, "sleep", lambda _s: None)
     assert runner.run_once(_Cfg, _StubClient()) is False
     assert seen["claimed"] is True
+
+
+# --- record provenance stamping (node/runner._stamp_provenance) -------------
+
+class _ProvCfg:
+    def __init__(self, backend):
+        self.claude_backend = backend
+
+
+def test_stamp_provenance_adds_cli_version_on_cli_backend(monkeypatch):
+    from node import ai
+    monkeypatch.setattr(ai, "get_cli_version",
+                        lambda: "2.1.161 (Claude Code)")
+    record = {"task_type": "review", "outcome": "reviewed",
+              "meta": {"trace": []}}
+    runner._stamp_provenance(_ProvCfg("cli"), record)
+    assert record["meta"]["claude_cli_version"] == "2.1.161 (Claude Code)"
+    assert record["meta"]["trace"] == []          # existing keys preserved
+
+
+def test_stamp_provenance_creates_meta_when_absent(monkeypatch):
+    from node import ai
+    monkeypatch.setattr(ai, "get_cli_version", lambda: "2.2.0")
+    record = {"task_type": "prepare", "outcome": "prepared"}
+    runner._stamp_provenance(_ProvCfg("cli"), record)
+    assert record["meta"] == {"claude_cli_version": "2.2.0"}
+
+
+def test_stamp_provenance_skips_sdk_backend_and_unknown_version(monkeypatch):
+    """An SDK-produced record must not claim CLI provenance, and an
+       unprobeable version stamps nothing rather than null."""
+    from node import ai
+    monkeypatch.setattr(ai, "get_cli_version",
+                        lambda: "2.1.161 (Claude Code)")
+    record = {"task_type": "review", "outcome": "reviewed"}
+    runner._stamp_provenance(_ProvCfg("sdk"), record)
+    assert "meta" not in record
+    monkeypatch.setattr(ai, "get_cli_version", lambda: None)
+    runner._stamp_provenance(_ProvCfg("cli"), record)
+    assert "meta" not in record

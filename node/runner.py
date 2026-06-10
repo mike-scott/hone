@@ -18,7 +18,7 @@ import anthropic
 import httpx
 
 from common.version import __version__ as VERSION
-from node import health, refrepo, tasks
+from node import ai, health, refrepo, tasks
 from node.ai import CallClaudeAuthError
 from node.client import EnrollmentError, HoneCoreClient, SchemaRejectedError
 from node.config import Config
@@ -311,6 +311,7 @@ def run_once(cfg: Config, client: HoneCoreClient) -> bool:
         # about to exit.
         _report_health_safely(cfg, client)
         raise
+    _stamp_provenance(cfg, record)
     try:
         _with_backoff(cfg, "submit result",
                       lambda: client.submit_result(claim["claim_id"], record))
@@ -328,11 +329,31 @@ def run_once(cfg: Config, client: HoneCoreClient) -> bool:
                                             "uncharacterisable"),
                      exc.detail[:200])
         fallback = _build_schema_rejected_fallback(claim, record, exc)
+        _stamp_provenance(cfg, fallback)
         _with_backoff(cfg, "submit fallback",
                       lambda: client.submit_result(
                           claim["claim_id"], fallback))
     log.info("submitted result for %s", claim.get("claim_id"))
     return True
+
+
+def _stamp_provenance(cfg, record):
+    """Stamp run provenance into the record's open `meta` before submit:
+       `claude_cli_version` — the CLI build that produced this result.
+       Permanently attributes every operation to the exact build (builds
+       drift across the fleet with per-prompt auto-update), so a
+       review-quality regression can be correlated with a CLI release
+       after the fact. Centralised at the submit chokepoint so every
+       task type and outcome — including future handlers and the
+       schema-rejected fallback — carries it. CLI backend only: an
+       SDK-produced record must not claim CLI provenance. The record
+       schema's `meta` is deliberately open, so no schema bump."""
+    if getattr(cfg, "claude_backend", None) != "cli":
+        return
+    version = ai.get_cli_version()
+    if not version or not isinstance(record, dict):
+        return
+    record.setdefault("meta", {})["claude_cli_version"] = version
 
 
 def _build_schema_rejected_fallback(claim: dict, record: dict,
