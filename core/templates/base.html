@@ -32,7 +32,10 @@
   {% set active = request.url.path %}
   <nav class="app-header navbar navbar-expand bg-body shadow-sm">
     <div class="container-fluid">
-      <a href="/" class="navbar-brand fw-light">hone-core</a>
+      {# Brand → the user's own dashboard: the right landing surface for
+         every role (the corpus stays one nav click away for those who
+         can see it). #}
+      <a href="/my-patchsets" class="navbar-brand fw-light">hone-core</a>
       <ul class="navbar-nav me-auto">
         <li class="nav-item">
           <a href="/my-patchsets" class="nav-link
