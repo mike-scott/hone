@@ -1560,6 +1560,16 @@ def _patchset_view(db, root):
         prepare_request = {"available": False, "reason": "done"}
     elif has_prepare_item:
         prepare_request = {"available": False, "reason": "queued"}
+        # Admin escape hatch for a stuck queue: cancel the queued prepare
+        # right from this page (the template additionally gates on
+        # is_config_admin; the work-item cancel endpoint enforces it).
+        # Only an UNHELD item is cancellable — an in-flight (claimed)
+        # prepare keeps its lease, same rule as the work-item detail page.
+        wid, wstate = latest[core_db.WORK_ITEM_TYPE_PREPARE]
+        if wstate in (core_db.WORK_ITEM_STATE_CLAIMABLE,
+                      core_db.WORK_ITEM_STATE_DEFERRED):
+            prepare_request["cancel_url"] = (
+                f"/work-items/{wid}/cancel{work_item_back_qs}")
     else:
         prepare_request = {"available": True, "reason": None}
 

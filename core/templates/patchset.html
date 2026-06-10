@@ -81,6 +81,21 @@
           title="{% if prepare_request.reason == 'queued' %}a prepare work-item already exists for this patchset{% else %}this patchset already has its preparation metadata{% endif %}">
     <i class="bi bi-play-circle me-1"></i>{{ _prep_label.get(prepare_request.reason, "Request prepare") }}
   </button>
+  {# Admin-only cancel for the queued (unheld) prepare — same endpoint
+     as the work-item detail page's Cancel button; deleting the row
+     re-arms Request prepare on the redirect back here. Absent while
+     the item is claimed (an in-flight prepare keeps its lease). #}
+  {% if prepare_request.cancel_url and current_user.is_config_admin %}
+  <form method="post" action="{{ prepare_request.cancel_url }}"
+        class="m-0"
+        onsubmit="return confirm('Cancel the queued prepare work-item? The request button re-arms afterwards.');">
+    {{ csrf_field(request) }}
+    <button type="submit" class="btn btn-sm btn-outline-danger"
+            title="cancel the queued prepare work-item">
+      <i class="bi bi-x-circle me-1"></i>Cancel prepare
+    </button>
+  </form>
+  {% endif %}
   {% endif %}
   {% if review_request.available %}
   <form method="post"

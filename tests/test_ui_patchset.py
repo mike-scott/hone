@@ -744,3 +744,67 @@ def test_detail_skipped_patchset_shows_decorated_corpus_state(ctx):
     assert "text-bg-warning" in body
     assert "bi-exclamation-triangle-fill" in body
     assert "list tag not enabled" in body
+
+
+# --- admin cancel of a queued prepare ----------------------------------------
+
+def test_admin_can_cancel_a_queued_prepare_from_the_patchset_page(ctx):
+    """The dimmed "Prepare queued" button gains an admin Cancel beside it
+       (the work-item cancel endpoint, back-linked here); cancelling
+       deletes the row and re-arms Request prepare."""
+    core_db.upsert_patchset(ctx.db, "<r1@x>", subject="[PATCH] x",
+                             n_patches=1, submitter_email="a@x")
+    core_db.maybe_enqueue_prepare(ctx.db, "<r1@x>")
+    body = ctx.client.get(f"/patchsets/{quote('r1@x')}").text
+    assert "Prepare queued" in body
+    assert "Cancel prepare" in body
+    m = re.search(r'action="(/work-items/\d+/cancel[^"]*)"', body)
+    assert m
+    r = ctx.client.post(m.group(1).replace("&amp;", "&"),
+                        follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"].startswith("/patchsets/")
+    n = ctx.db.execute("SELECT COUNT(*) FROM work_items").fetchone()[0]
+    assert n == 0
+    body = ctx.client.get(f"/patchsets/{quote('r1@x')}").text
+    assert "Request prepare" in body
+    assert "Cancel prepare" not in body
+
+
+def test_cancel_prepare_not_offered_while_the_item_is_claimed(ctx):
+    """An in-flight prepare keeps its lease — same unheld-only rule as
+       the work-item detail page's Cancel button."""
+    core_db.upsert_patchset(ctx.db, "<r1@x>", subject="[PATCH] x",
+                             n_patches=1, submitter_email="a@x")
+    core_db.maybe_enqueue_prepare(ctx.db, "<r1@x>")
+    assert core_db.claim_work_item(
+        ctx.db, "node-1", methodology_version=1,
+        types=(core_db.WORK_ITEM_TYPE_PREPARE,)) is not None
+    body = ctx.client.get(f"/patchsets/{quote('r1@x')}").text
+    assert "Prepare queued" in body
+    assert "Cancel prepare" not in body
+
+
+def test_cancel_prepare_is_admin_only(tmp_path, fake_admin_session):
+    """The uploader of a patchset can see the queued state but not the
+       cancel button — cancelling mutates fleet scheduling, an operator
+       action (the endpoint enforces the same gate)."""
+    from core import auth
+    db = core_db.connect(str(tmp_path / "hone.db"))
+    uid = core_db.create_user(db, "alice@x", "alice", "local")
+    core_db.set_user_state(db, uid, "approved")
+    user = auth.SessionUser(id=uid, email="alice@x", display_name="alice",
+                            is_config_admin=False)
+    app = FastAPI()
+    app.include_router(ui.router)
+    app.dependency_overrides[auth.require_session] = lambda: user
+    app.dependency_overrides[auth.require_csrf] = lambda: None
+    app.state.db = db
+    core_db.upsert_patchset(db, "<r1@x>", subject="[PATCH] mine",
+                             n_patches=1, submitter_email="alice@x",
+                             origin=core_db.PATCHSET_ORIGIN_UPLOADED,
+                             uploaded_by_user_id=uid)
+    core_db.maybe_enqueue_prepare(db, "<r1@x>", requested_by_user_id=uid)
+    body = TestClient(app).get(f"/patchsets/{quote('r1@x')}").text
+    assert "Prepare queued" in body
+    assert "Cancel prepare" not in body
