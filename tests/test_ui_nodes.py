@@ -389,3 +389,16 @@ def test_unexpired_claim_still_reads_in_flight(ctx):
     assert "In flight" in body
     assert "47s" in body
     assert "lease expired" not in body
+
+
+def test_node_detail_shows_claude_cli_version(ctx):
+    """The Health card surfaces the node's reported `claude --version`
+       string — provenance for a fleet whose CLI builds drift with
+       per-prompt auto-update."""
+    now = int(time.time())
+    nid = _node(ctx.db, name="n1", last_seen=now,
+                health={"last_anthropic_error": None,
+                        "claude_version": "2.1.161 (Claude Code)"})
+    body = ctx.client.get(f"/nodes/{nid}").text
+    assert "Claude CLI" in body
+    assert "2.1.161 (Claude Code)" in body

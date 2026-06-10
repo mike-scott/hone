@@ -690,3 +690,43 @@ def test_ensure_persistent_cli_seeds_the_volume_copy_once(monkeypatch, tmp_path)
     dst.write_bytes(b"self-updated")
     ai._ensure_persistent_cli()
     assert dst.read_bytes() == b"self-updated"
+
+
+# --- CLI version probe (health-snapshot provenance) --------------------------
+
+def test_get_cli_version_probes_once_and_caches(monkeypatch):
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(list(cmd))
+        class R: returncode, stdout, stderr = 0, "2.1.161 (Claude Code)\n", ""
+        return R()
+    monkeypatch.setattr(ai.subprocess, "run", fake_run)
+    monkeypatch.setitem(ai._CLI_VERSION_CACHE, "fresh", False)
+    assert ai.get_cli_version() == "2.1.161 (Claude Code)"
+    assert ai.get_cli_version() == "2.1.161 (Claude Code)"
+    assert calls == [["claude", "--version"]]      # one probe, then cached
+
+
+def test_get_cli_version_none_when_binary_missing(monkeypatch):
+    def raise_missing(*a, **kw):
+        raise FileNotFoundError("claude")
+    monkeypatch.setattr(ai.subprocess, "run", raise_missing)
+    monkeypatch.setitem(ai._CLI_VERSION_CACHE, "fresh", False)
+    assert ai.get_cli_version() is None
+
+
+def test_successful_update_invalidates_the_version_cache(monkeypatch):
+    """After `claude update` runs cleanly the cached version is re-probed
+       on the next health tick — the snapshot must report the build
+       actually in use."""
+    monkeypatch.setenv("HONE_CLAUDE_AUTOUPDATE", "1")
+    monkeypatch.delenv("HONE_CLAUDE_BIN_DIR", raising=False)
+
+    def fake_run(cmd, **kw):
+        class R: returncode, stdout, stderr = 0, "updated to 2.2.0", ""
+        return R()
+    monkeypatch.setattr(ai.subprocess, "run", fake_run)
+    monkeypatch.setitem(ai._CLI_VERSION_CACHE, "fresh", True)
+    ai._update_cli()
+    assert ai._CLI_VERSION_CACHE["fresh"] is False

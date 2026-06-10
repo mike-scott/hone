@@ -72,8 +72,14 @@ def collect(cfg):
            until space recovers (runner._disk_too_low). False when
            space is unknown or the guard is disabled, so the operator
            can tell a paused node from a merely idle one.
+         - claude_version: the `claude --version` string of the CLI
+           binary this node runs, or None when absent (sdk backend).
+           Versions drift across the fleet with per-prompt auto-update
+           (node/ai._update_cli); this is how the operator sees which
+           build each node is actually on.
 
-       Keep this fast — it runs every tick of the claim loop."""
+       Keep this fast — it runs every tick of the claim loop
+       (claude_version is cached per process in node/ai)."""
     free = _free_disk_mb(cfg.data_dir)
     floor = getattr(cfg, "min_free_disk_mb", 0) or 0
     return {
@@ -82,4 +88,5 @@ def collect(cfg):
         "last_anthropic_error": ai.get_last_error(),
         "disk_low":             bool(free is not None and floor > 0
                                      and free < floor),
+        "claude_version":       ai.get_cli_version(),
     }

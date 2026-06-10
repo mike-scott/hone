@@ -341,6 +341,38 @@ def _ensure_persistent_cli():
     log.info("claude CLI: seeded %s from %s", dst, src)
 
 
+# `claude --version` output, cached per process — health.collect runs
+# every claim-loop tick and must stay fast; spawning a subprocess per
+# tick is waste. _update_cli invalidates the cache after an update run,
+# so the next health snapshot reports the version actually in use.
+_CLI_VERSION_CACHE = {"value": None, "fresh": False}
+
+
+def get_cli_version():
+    """The `claude --version` string of the binary this node runs (e.g.
+       "2.1.161 (Claude Code)"), or None when the CLI is absent (sdk
+       backend) or unprobeable. Cached; refreshed after _update_cli
+       runs. node/health.collect ships it in the health snapshot so
+       hone-core's node detail page shows which CLI build the fleet is
+       actually on — versions drift once per-prompt auto-update is in
+       play."""
+    if not _CLI_VERSION_CACHE["fresh"]:
+        _CLI_VERSION_CACHE["value"] = _probe_cli_version()
+        _CLI_VERSION_CACHE["fresh"] = True
+    return _CLI_VERSION_CACHE["value"]
+
+
+def _probe_cli_version():
+    try:
+        r = subprocess.run(["claude", "--version"], capture_output=True,
+                           text=True, timeout=30)
+        if r.returncode == 0:
+            return (r.stdout or "").strip() or None
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return None
+
+
 def _update_cli():
     """Check for (and install) a CLI update before running a prompt.
 
@@ -361,6 +393,9 @@ def _update_cli():
         last = out.splitlines()[-1] if out else "ok"
         if r.returncode == 0:
             log.info("claude update: %s", last)
+            # Re-probe the version on the next health tick — an update
+            # may have just landed.
+            _CLI_VERSION_CACHE["fresh"] = False
         else:
             log.warning("claude update failed (rc=%d): %s — proceeding "
                         "on current version", r.returncode, last[:300])

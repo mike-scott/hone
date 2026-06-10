@@ -58,20 +58,22 @@ def test_refrepo_size_mb_none_when_path_absent():
 
 # --- collect --------------------------------------------------------------
 
-def test_collect_packages_the_three_first_cut_fields(monkeypatch):
-    """The first-cut snapshot carries the three operationally-cheap
-       fields the operator UI renders. Anthropic-error category
-       comes from node.ai.get_last_error (set by call_claude on
-       failure, cleared on success)."""
+def test_collect_packages_the_snapshot_fields(monkeypatch):
+    """The snapshot carries the operationally-cheap fields the operator
+       UI renders. Anthropic-error category comes from
+       node.ai.get_last_error (set by call_claude on failure, cleared on
+       success); claude_version from node.ai.get_cli_version (cached)."""
     monkeypatch.setattr(health, "_free_disk_mb", lambda p: 1024)
     monkeypatch.setattr(health, "_refrepo_size_mb", lambda p: 4500)
     monkeypatch.setattr(ai, "_LAST_ERROR", "rate_limit")
+    monkeypatch.setattr(ai, "get_cli_version", lambda: "2.1.161 (Claude Code)")
     snap = health.collect(_cfg())
     assert snap == {
         "free_disk_mb":         1024,
         "refrepo_size_mb":      4500,
         "last_anthropic_error": "rate_limit",
         "disk_low":             False,        # 1024 MB free, guard off (floor 0)
+        "claude_version":       "2.1.161 (Claude Code)",
     }
 
 

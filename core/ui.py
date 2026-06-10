@@ -1652,9 +1652,12 @@ def _health_display(health):
         return None
     err = health.get("last_anthropic_error")
     return {
-        "free_disk":  _mb_display(health.get("free_disk_mb")),
-        "repo_size":  _mb_display(health.get("refrepo_size_mb")),
-        "error":      _ANTHROPIC_ERROR_LABELS.get(err, err) if err else None,
+        "free_disk":      _mb_display(health.get("free_disk_mb")),
+        "repo_size":      _mb_display(health.get("refrepo_size_mb")),
+        "error":          _ANTHROPIC_ERROR_LABELS.get(err, err) if err else None,
+        # The node's `claude --version` string from its latest health
+        # snapshot — None for sdk-backend nodes or pre-field snapshots.
+        "claude_version": health.get("claude_version"),
     }
 
 

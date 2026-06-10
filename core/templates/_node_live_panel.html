@@ -84,6 +84,13 @@
             <span class="text-success">clean</span>
             {% endif %}
           </dd>
+          {# Which `claude` build this node actually runs — drifts across
+             the fleet with per-prompt auto-update. Absent for sdk-backend
+             nodes and snapshots from pre-field node versions. #}
+          {% if node.health_display.claude_version %}
+          <dt class="col-sm-5">Claude CLI</dt>
+          <dd class="col-sm-7"><code>{{ node.health_display.claude_version }}</code></dd>
+          {% endif %}
         </dl>
         {% else %}
         <p class="text-muted mb-0 small">
