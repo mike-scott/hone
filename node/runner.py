@@ -18,7 +18,7 @@ import anthropic
 import httpx
 
 from common.version import __version__ as VERSION
-from node import ai, health, refrepo, tasks
+from node import ai, budget, health, refrepo, tasks
 from node.ai import CallClaudeAuthError
 from node.client import EnrollmentError, HoneCoreClient, SchemaRejectedError
 from node.config import Config
@@ -244,11 +244,22 @@ def run_once(cfg: Config, client: HoneCoreClient) -> bool:
     below cfg.min_free_disk_mb the node idles instead of claiming, so a
     base fetch or ~1.5 GB review worktree can't fail mid-task with ENOSPC.
     The idle tick still runs _maybe_maintain (sweep + gc), which can
-    reclaim space and let the next tick resume."""
+    reclaim space and let the next tick resume.
+
+    A token-budget guard runs second: once the day's or week's accrued
+    Claude usage crosses its cap (cfg.token_limit_daily / _weekly), the
+    node idles instead of claiming and resumes by itself when the window
+    rolls over at UTC midnight (node/budget). Enforced between tasks
+    only — an in-flight task always runs to completion."""
     if _disk_too_low(cfg):
         log.warning("disk: free space on %s below the %d MB floor — pausing "
                     "claims until it recovers (sweep/gc run between ticks)",
                     cfg.data_dir, cfg.min_free_disk_mb)
+        return False
+    over = budget.exhausted(cfg)
+    if over:
+        log.warning("token budget: the %s limit is spent — pausing claims "
+                    "until the window rolls over at UTC midnight", over)
         return False
     claim = _with_backoff(cfg, "claim", client.claim)
     if claim is None:

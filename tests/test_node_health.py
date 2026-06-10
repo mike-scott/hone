@@ -74,6 +74,12 @@ def test_collect_packages_the_snapshot_fields(monkeypatch):
         "last_anthropic_error": "rate_limit",
         "disk_low":             False,        # 1024 MB free, guard off (floor 0)
         "claude_version":       "2.1.161 (Claude Code)",
+        # The stub cfg has no token caps and no ledger on disk, so the
+        # budget reads as empty/disabled — see test_node_budget for the
+        # accrual/rollover behaviour behind this field.
+        "token_budget":         {"day_tokens": 0, "day_limit": 0,
+                                 "week_tokens": 0, "week_limit": 0,
+                                 "exhausted": None},
     }
 
 

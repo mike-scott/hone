@@ -6,7 +6,7 @@ import os
 import socket
 from dataclasses import dataclass
 
-from node import cgit
+from node import budget, cgit
 
 # The supported Claude backends. `sdk` calls the Anthropic Python SDK and
 # requires ANTHROPIC_API_KEY (standard API-billing path). `cli`
@@ -61,6 +61,23 @@ class Config:
                                 # free space on the data volume is below this,
                                 # so a base fetch / ~1.5 GB review worktree
                                 # can't fail mid-task with ENOSPC; 0 disables
+    token_limit_daily:  int = 0
+                                # HONE_TOKEN_LIMIT_DAILY — pause claiming once
+                                # this many tokens (input + output) accrue in
+                                # the current UTC day; rolls at UTC midnight.
+                                # Unset/0 = no budget enforced (the default);
+                                # .env.example suggests 50M.
+    token_limit_weekly: int = 0
+                                # HONE_TOKEN_LIMIT_WEEKLY — same cap over the
+                                # weekly window, which rolls at UTC midnight
+                                # on token_week_reset_day. Unset/0 = no budget
+                                # enforced (the default); .env.example
+                                # suggests 300M.
+    token_week_reset_day: int = budget.DEFAULT_WEEK_RESET_DAY
+                                # HONE_TOKEN_WEEK_RESET_DAY — the weekday
+                                # whose UTC midnight starts a fresh weekly
+                                # window (datetime.weekday() numbering).
+                                # Default Friday. Optional in .env.
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -110,4 +127,12 @@ class Config:
             repo_gc_every      = int(os.environ.get("HONE_REPO_GC_EVERY", "25")),
             min_free_disk_mb   = int(os.environ.get("HONE_MIN_FREE_DISK_MB",
                                                     "5000")),
+            token_limit_daily  = int(os.environ.get("HONE_TOKEN_LIMIT_DAILY",
+                                                    "0")),
+            token_limit_weekly = int(os.environ.get("HONE_TOKEN_LIMIT_WEEKLY",
+                                                    "0")),
+            token_week_reset_day = budget.parse_week_reset_day(
+                                       os.environ.get(
+                                           "HONE_TOKEN_WEEK_RESET_DAY",
+                                           "friday")),
         )

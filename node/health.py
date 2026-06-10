@@ -19,7 +19,7 @@ import os
 import shutil
 import subprocess
 
-from node import ai
+from node import ai, budget
 
 log = logging.getLogger("hone.node.health")
 
@@ -77,9 +77,15 @@ def collect(cfg):
            Versions drift across the fleet with per-prompt auto-update
            (node/ai._update_cli); this is how the operator sees which
            build each node is actually on.
+         - token_budget: current-window token totals against the
+           daily/weekly caps (node/budget) — day_tokens / day_limit /
+           week_tokens / week_limit / exhausted ("daily" | "weekly" |
+           None). When exhausted is set, the node has paused claiming
+           until the window rolls over at UTC midnight.
 
        Keep this fast — it runs every tick of the claim loop
-       (claude_version is cached per process in node/ai)."""
+       (claude_version is cached per process in node/ai; the budget
+       status is one small JSON read)."""
     free = _free_disk_mb(cfg.data_dir)
     floor = getattr(cfg, "min_free_disk_mb", 0) or 0
     return {
@@ -89,4 +95,5 @@ def collect(cfg):
         "disk_low":             bool(free is not None and floor > 0
                                      and free < floor),
         "claude_version":       ai.get_cli_version(),
+        "token_budget":         budget.status(cfg),
     }

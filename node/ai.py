@@ -26,6 +26,8 @@ import subprocess
 import threading
 import time
 
+from node import budget
+
 log = logging.getLogger("hone.node.ai")
 
 
@@ -189,10 +191,16 @@ def call_claude(cfg, system, user_text, *, model=None,
        health snapshot picks up the category."""
     resolved = model or cfg.anthropic_model or None
     if cfg.claude_backend == "cli":
-        return _call_claude_cli(cfg, system, user_text, model=resolved,
-                                tools=tools, cwd=cwd)
-    return _call_claude_sdk(cfg, system, user_text, model=resolved,
-                             max_tokens=max_tokens)
+        out = _call_claude_cli(cfg, system, user_text, model=resolved,
+                               tools=tools, cwd=cwd)
+    else:
+        out = _call_claude_sdk(cfg, system, user_text, model=resolved,
+                               max_tokens=max_tokens)
+    # Single chokepoint for the daily/weekly token budget: every
+    # successful turn's reported usage accrues to the ledger here,
+    # whichever backend produced it (budget.record never raises).
+    budget.record(cfg, out.get("usage"))
+    return out
 
 
 def _call_claude_sdk(cfg, system, user_text, *, model, max_tokens):
