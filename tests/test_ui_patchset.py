@@ -197,10 +197,12 @@ def test_request_review_stamps_admin_id_as_null(ctx):
     assert row["requested_by_user_id"] is None
 
 
-def test_request_review_stamps_current_user_id_for_a_regular_user(tmp_path):
-    """A regular user clicking Request review enqueues a USER-origin
-       work item with requested_by_user_id pinned to their id — so the
-       resulting review item only feeds onto their own nodes' queue."""
+def test_request_review_stamps_current_user_id_for_a_maintainer(tmp_path):
+    """A maintainer clicking Request review enqueues a USER-origin work
+       item with requested_by_user_id pinned to their id — so the
+       resulting review item only feeds onto their own nodes' queue.
+       (Corpus review requests are maintainer-gated; a regular user
+       gets a 403 — see test_request_review_403_for_regular_user.)"""
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
     from core import auth, runtime_config
@@ -209,8 +211,10 @@ def test_request_review_stamps_current_user_id_for_a_regular_user(tmp_path):
     db = core_db.connect(str(tmp_path / "hone.db"))
     uid = core_db.create_user(db, "alice@x", "alice", "local")
     core_db.set_user_state(db, uid, "approved")
+    core_db.set_user_maintainer(db, uid, True)
     alice = auth.SessionUser(id=uid, email="alice@x",
-                              display_name="alice", is_config_admin=False)
+                              display_name="alice", is_config_admin=False,
+                              is_maintainer=True)
 
     app = FastAPI()
     app.include_router(ui.router)

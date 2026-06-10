@@ -1513,6 +1513,23 @@ _MSG_TYPE_BADGE = {"cover":   "text-bg-secondary",
                    "comment": "text-bg-info"}
 
 
+def _can_act_on_patchset(patchset, current_user):
+    """The corpus-action rule, shared by the POST handlers and the
+       templates that show / hide their buttons — so enforcement and
+       visibility can't drift. Maintainers and admins may act on any
+       patchset; a regular user only on their own uploaded one (review
+       is the upload's whole purpose, so re-requesting, deleting, or
+       retrying it must not need a grant). Future per-patchset action
+       buttons should gate through this too."""
+    if current_user is None:
+        return False
+    if current_user.is_config_admin or current_user.is_maintainer:
+        return True
+    ps = patchset or {}
+    return (ps.get("origin") == core_db.PATCHSET_ORIGIN_UPLOADED
+            and ps.get("uploaded_by_user_id") == current_user.id)
+
+
 @router.get("/patchsets/{root_message_id:path}", response_class=HTMLResponse)
 async def patchset_detail(request: Request, root_message_id: str,
                            back: str | None = None,
@@ -1524,12 +1541,14 @@ async def patchset_detail(request: Request, root_message_id: str,
     ctx = _patchset_view(request.app.state.db, root_message_id)
     ctx["back_url"] = _safe_back(back)
     ctx["current_user"] = current_user
+    ctx["can_act_on_patchset"] = _can_act_on_patchset(ctx["patchset"],
+                                                      current_user)
     return templates.TemplateResponse(request, "patchset.html", ctx)
 
 
 @router.post("/review-requests/{root_message_id:path}/delete", dependencies=[Depends(auth.require_csrf)])
 async def delete_review(request: Request, root_message_id: str,
-                         _: auth.SessionUser = Depends(auth.require_session)):
+                         current_user: auth.SessionUser = Depends(auth.require_session)):
     """Operator-triggered deletion of a patchset's AI review and the review
        work-item(s) that produced it — the "Delete review" button on the
        detail page POSTs here. Reuses core_db.delete_review, which removes
@@ -1541,12 +1560,19 @@ async def delete_review(request: Request, root_message_id: str,
 
        Registered before the catch-all request_review route below so this
        more specific `/delete` suffix wins — the `:path` converter there
-       would otherwise greedily swallow `<root>/delete`."""
+       would otherwise greedily swallow `<root>/delete`.
+
+       Gated by _can_act_on_patchset: maintainers / admins, or the
+       uploader for their own uploaded patchset."""
     db = request.app.state.db
-    if core_db.get_patchset(db, root_message_id) is None:
+    ps = core_db.get_patchset(db, root_message_id)
+    if ps is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND,
                             f"no patchset with root_message_id "
                             f"{root_message_id!r}")
+    if not _can_act_on_patchset(ps, current_user):
+        raise HTTPException(status.HTTP_403_FORBIDDEN,
+                            "maintainer access required")
     core_db.delete_review(db, root_message_id)
     return RedirectResponse(f"/patchsets/{quote(root_message_id)}",
                              status_code=303)
@@ -1561,14 +1587,22 @@ async def request_review(request: Request, root_message_id: str,
        same prepare-gated, idempotent enqueue the pipeline used to call —
        so a double-click or a patchset that already has a review is a safe
        no-op. Redirect-after-POST back to the detail page (the button
-       dims once the review item exists)."""
+       dims once the review item exists).
+
+       Gated by _can_act_on_patchset: maintainers / admins, or the
+       uploader for their own uploaded patchset (whose review normally
+       auto-chains — this is their re-request path after a delete)."""
     db = request.app.state.db
     # maybe_enqueue_review returns None (not KeyError) for an unknown or
     # not-yet-gathered patchset, so check existence explicitly to 404.
-    if core_db.get_patchset(db, root_message_id) is None:
+    ps = core_db.get_patchset(db, root_message_id)
+    if ps is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND,
                             f"no patchset with root_message_id "
                             f"{root_message_id!r}")
+    if not _can_act_on_patchset(ps, current_user):
+        raise HTTPException(status.HTTP_403_FORBIDDEN,
+                            "maintainer access required")
     # The user who clicked the button owns the resulting work item; this
     # routes it onto their own nodes' user queue. The config-token admin
     # has id=None — admin-triggered reviews are system items.
@@ -2140,19 +2174,41 @@ async def work_item_detail(request: Request, work_item_id: int,
     ctx = _work_item_view(request.app.state.db, work_item_id)
     ctx["back_url"] = _safe_back(back) if back else "/"
     ctx["current_user"] = current_user
+    ctx["can_act_on_patchset"] = _can_act_on_patchset(
+        core_db.get_patchset(request.app.state.db, ctx["root_message_id"]),
+        current_user)
     return templates.TemplateResponse(request, "work_item.html", ctx)
+
+
+def _require_work_item_action(db, work_item_id, current_user):
+    """Shared gate for the work-item action badges (release-deferred,
+       retry-unappliable): resolve the item's patchset and apply
+       _can_act_on_patchset. 404 on an unknown item, 403 when the
+       caller may not act."""
+    wi = db.execute("SELECT root_message_id FROM work_items WHERE id=?",
+                    (work_item_id,)).fetchone()
+    if wi is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND,
+                            f"no work-item with id {work_item_id}")
+    ps = core_db.get_patchset(db, wi["root_message_id"])
+    if not _can_act_on_patchset(ps, current_user):
+        raise HTTPException(status.HTTP_403_FORBIDDEN,
+                            "maintainer access required")
 
 
 @router.post("/work-items/{work_item_id:int}/release-deferred", dependencies=[Depends(auth.require_csrf)])
 async def release_deferred(request: Request, work_item_id: int,
                            back: str | None = None,
-                           _: auth.SessionUser = Depends(auth.require_session)):
+                           current_user: auth.SessionUser = Depends(auth.require_session)):
     """Operator-triggered release of a DEFERRED work item back to the
        CLAIMABLE pool — the deferred badge on the detail page POSTs here.
        Reuses core_db.release_deferred: a no-op ('not_deferred') if the row
        has since been re-claimed or completed, so a double-click is safe.
-       Redirect-after-POST back to the detail page (preserving ?back=)."""
-    result = core_db.release_deferred(request.app.state.db, work_item_id)
+       Redirect-after-POST back to the detail page (preserving ?back=).
+       Gated by _can_act_on_patchset via _require_work_item_action."""
+    db = request.app.state.db
+    _require_work_item_action(db, work_item_id, current_user)
+    result = core_db.release_deferred(db, work_item_id)
     if result == "unknown":
         raise HTTPException(status.HTTP_404_NOT_FOUND,
                             f"no work-item with id {work_item_id}")
@@ -2164,13 +2220,16 @@ async def release_deferred(request: Request, work_item_id: int,
 @router.post("/work-items/{work_item_id:int}/retry-unappliable", dependencies=[Depends(auth.require_csrf)])
 async def retry_unappliable(request: Request, work_item_id: int,
                             back: str | None = None,
-                            _: auth.SessionUser = Depends(auth.require_session)):
+                            current_user: auth.SessionUser = Depends(auth.require_session)):
     """Operator-triggered retry of an UNAPPLIABLE work item back to the
        CLAIMABLE pool — the 'try again' badge on the detail page POSTs here.
        Reuses core_db.retry_unappliable: a no-op ('not_unappliable') if the
        row has since been re-claimed or completed, so a double-click is safe.
-       Redirect-after-POST back to the detail page (preserving ?back=)."""
-    result = core_db.retry_unappliable(request.app.state.db, work_item_id)
+       Redirect-after-POST back to the detail page (preserving ?back=).
+       Gated by _can_act_on_patchset via _require_work_item_action."""
+    db = request.app.state.db
+    _require_work_item_action(db, work_item_id, current_user)
+    result = core_db.retry_unappliable(db, work_item_id)
     if result == "unknown":
         raise HTTPException(status.HTTP_404_NOT_FOUND,
                             f"no work-item with id {work_item_id}")

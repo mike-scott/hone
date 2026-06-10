@@ -141,7 +141,11 @@ are enqueued; they are never picked or re-offered.
   `core_db.maybe_enqueue_review`), which enqueues one `review` work-item per
   patchset (idempotent, one per root Message-ID), stamped with the
   requesting user as its origin so it routes onto their own nodes' queue
-  (an admin-triggered review is a system item). Auto-enqueueing review at
+  (an admin-triggered review is a system item). The trigger — like every
+  per-patchset action button (delete review, release-deferred,
+  retry-unappliable) — is **maintainer-gated**, with one exception: the
+  uploader of an uploaded patchset may act on their own (see
+  `core/ui.py` → `_can_act_on_patchset`). Auto-enqueueing review at
   gather time would flood the queue, so it is a deliberate per-patchset
   action. The request is only offered once a `patchset_metadata` row exists,
   so preparation still precedes the review — reviewers cited against the

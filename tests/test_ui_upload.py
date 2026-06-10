@@ -274,3 +274,93 @@ def test_enqueue_session_train_refuses_uploaded_patchsets(tmp_path):
             ctx.db, session_id=sid, root_message_id=root,
             patch_message_id="<p1@x>", comment_message_id="<c1@x>",
             session_role=core_db.SESSION_ROLE_POOL, stratum_label="x")
+
+
+# --- per-patchset actions: maintainer-gated, uploader-excepted --------------
+
+def _regular_ctx(tmp_path, db=None):
+    """A client over the SAME db pinned to a regular (no-grant) user."""
+    db = db or core_db.connect(str(tmp_path / "hone.db"))
+    uid = core_db.create_user(db, "rex@x", "rex", "local")
+    core_db.set_user_state(db, uid, "approved")
+    user = auth.SessionUser(id=uid, email="rex@x", display_name="rex",
+                            is_config_admin=False)
+    app = FastAPI()
+    app.include_router(ui.router)
+    app.dependency_overrides[auth.require_session] = lambda: user
+    app.dependency_overrides[auth.require_csrf] = lambda: None
+    app.state.db = db
+    return SimpleNamespace(client=TestClient(app), db=db, uid=uid)
+
+
+def test_review_request_403_for_regular_user_on_corpus_patchset(tmp_path):
+    """Request/delete review on a gathered patchset is maintainer
+       territory — a no-grant user gets a 403 and no buttons."""
+    ctx = _regular_ctx(tmp_path)
+    core_db.upsert_patchset(ctx.db, "<lkml@x>", subject="corpus row",
+                            n_patches=1)
+    r = ctx.client.post("/review-requests/lkml@x", follow_redirects=False)
+    assert r.status_code == 403
+    r = ctx.client.post("/review-requests/lkml@x/delete",
+                        follow_redirects=False)
+    assert r.status_code == 403
+    body = ctx.client.get("/patchsets/lkml@x").text
+    assert "Request review" not in body
+
+
+def test_uploader_can_request_review_of_their_own_upload(tmp_path):
+    """The uploader exception: review is the upload's whole purpose, so
+       the no-grant uploader can re-request (and delete) the review of
+       their own series — but a different no-grant user cannot."""
+    ctx = _ctx(tmp_path)                     # alice (maintainer fixture)...
+    root = _confirm_upload(ctx)
+    # ...but the rule must hold for a NO-grant uploader, so re-stamp the
+    # upload onto rex and act as rex.
+    rex = _regular_ctx(tmp_path, db=ctx.db)
+    ctx.db.execute("UPDATE patchsets SET uploaded_by_user_id=? "
+                   "WHERE root_message_id=?", (rex.uid, root))
+    ctx.db.commit()
+    # Prepare hasn't produced metadata, so the enqueue is a no-op — the
+    # gate is what's under test, and it must NOT 403.
+    r = rex.client.post(f"/review-requests/{root}", follow_redirects=False)
+    assert r.status_code == 303
+    body = rex.client.get(f"/patchsets/{root}").text
+    assert "Awaiting prepare" in body or "Request review" in body
+
+    # A different no-grant user still gets the 403 on the same upload.
+    bob_id = core_db.create_user(ctx.db, "bob2@x", "bob2", "local")
+    bob = auth.SessionUser(id=bob_id, email="bob2@x", display_name="bob2",
+                           is_config_admin=False)
+    app = FastAPI()
+    app.include_router(ui.router)
+    app.dependency_overrides[auth.require_session] = lambda: bob
+    app.dependency_overrides[auth.require_csrf] = lambda: None
+    app.state.db = ctx.db
+    r = TestClient(app).post(f"/review-requests/{root}",
+                             follow_redirects=False)
+    assert r.status_code == 403
+
+
+def test_work_item_actions_are_gated_too(tmp_path):
+    """release-deferred / retry-unappliable on a corpus item: 403 for a
+       no-grant user, allowed for the uploader of their own upload."""
+    ctx = _regular_ctx(tmp_path)
+    core_db.add_methodology_version(ctx.db, {"name": "t", "version": 1})
+    core_db.upsert_patchset(ctx.db, "<lkml@x>", subject="corpus row",
+                            n_patches=1)
+    wid = core_db.enqueue_prepare(ctx.db, "<lkml@x>")
+    r = ctx.client.post(f"/work-items/{wid}/retry-unappliable",
+                        follow_redirects=False)
+    assert r.status_code == 403
+    r = ctx.client.post(f"/work-items/{wid}/release-deferred",
+                        follow_redirects=False)
+    assert r.status_code == 403
+    # Flip the patchset to rex's upload: the same actions now pass the
+    # gate (and no-op harmlessly on a claimable item).
+    ctx.db.execute("UPDATE patchsets SET origin=?, uploaded_by_user_id=? "
+                   "WHERE root_message_id=?",
+                   (core_db.PATCHSET_ORIGIN_UPLOADED, ctx.uid, "lkml@x"))
+    ctx.db.commit()
+    r = ctx.client.post(f"/work-items/{wid}/retry-unappliable",
+                        follow_redirects=False)
+    assert r.status_code == 303

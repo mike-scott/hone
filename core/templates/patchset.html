@@ -55,7 +55,11 @@
      enqueued. Offered only when prepare is done and no review exists or
      is in flight; otherwise a dimmed button states why. When a review
      exists, a Delete button sits beside it: it drops the ai_review and
-     its review work-item so a fresh review can be requested. #}
+     its review work-item so a fresh review can be requested. The whole
+     cluster renders only for callers _can_act_on_patchset allows
+     (maintainers / admins, or the uploader of this uploaded patchset);
+     the POST handlers enforce the same rule. #}
+  {% if can_act_on_patchset %}
   <div class="d-flex gap-2">
   {% if review_request.available %}
   <form method="post"
@@ -88,6 +92,7 @@
   </form>
   {% endif %}
   </div>
+  {% endif %}
 </div>
 {% if ai_review %}
 <p class="text-muted small mb-2">
