@@ -17,9 +17,11 @@
      `?back=` to restore this exact view on its ← Back button. #}
   <table class="table table-sm table-hover align-middle">
     <thead>
+      {# Date columns ordered to match the sort: Started (the queue's
+         sort key) leads, Enqueued trails as backlog bookkeeping. #}
       <tr><th>Patchset / message</th><th>Type</th><th>Work state</th>
-          <th>Worker</th><th>Origin</th><th>Enqueued</th>
-          <th>Started</th><th>Completed</th></tr>
+          <th>Worker</th><th>Origin</th><th>Started</th>
+          <th>Completed</th><th>Enqueued</th></tr>
     </thead>
     <tbody>
     {% for w in items %}
@@ -43,9 +45,9 @@
             <span class="text-muted">system</span>
           {% endif %}
         </td>
-        <td class="text-nowrap">{{ w.enqueued_display }}</td>
         <td class="text-nowrap">{{ w.started_display }}</td>
         <td class="text-nowrap">{{ w.completed_display }}</td>
+        <td class="text-nowrap">{{ w.enqueued_display }}</td>
       </tr>
     {% endfor %}
     </tbody>

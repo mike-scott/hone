@@ -71,15 +71,14 @@ def test_queue_home_page_empty(ctx):
     assert f"hone-core-{__version__}" in r.text          # base-template footer
 
 
-def test_queue_sorted_by_most_recent_activity(ctx):
-    """list_work_items orders rows by COALESCE(completed_at, claimed_at,
-       enqueued_at) DESC, so any state change bubbles the row to the
-       top — the operator's open queue page always shows where the
-       fleet is currently working. See core_db.list_work_items."""
-    # Three patchsets, planted with explicit distinct enqueued_at
-    # timestamps. Real-world gather batches share a single second; the
-    # test fakes spread so the sort key isn't tied (the id DESC
-    # tiebreaker would otherwise mask the bubbling).
+def test_queue_sorted_by_start_date_then_backlog_by_enqueue(ctx):
+    """list_work_items orders by claimed_at DESC — the Started column
+       the queue renders — so the most recently started work reads
+       top-down first; never-started rows follow as the waiting
+       backlog, newest-enqueued first. See core_db.list_work_items."""
+    # Three patchsets with explicit distinct enqueued_at timestamps
+    # (real-world gather batches share a single second; the spread
+    # keeps the id DESC tiebreaker from masking the ordering).
     _enqueue_review(ctx.db, "<r-old@x>",    "oldest-subj")
     _enqueue_review(ctx.db, "<r-mid@x>",    "middle-subj")
     _enqueue_review(ctx.db, "<r-newest@x>", "newest-subj")
@@ -87,20 +86,24 @@ def test_queue_sorted_by_most_recent_activity(ctx):
         "UPDATE work_items SET enqueued_at=? WHERE root_message_id=?",
         [(1000, "r-old@x"), (2000, "r-mid@x"), (3000, "r-newest@x")])
     ctx.db.commit()
-    # The FIFO claim picker takes the oldest row — claimed_at is
-    # int(time.time()), several orders of magnitude larger than our
-    # synthetic 1000-3000 enqueued_at values, so the claimed row's
-    # COALESCE wins and it bubbles to the TOP.
-    claim = core_db.claim_work_item(
-        ctx.db, "worker-1", methodology_version=1,
-        types=(core_db.WORK_ITEM_TYPE_REVIEW,))
-    assert claim is not None
+    # The FIFO claim picker starts the two oldest rows; pin distinct
+    # synthetic start times (same-second claims would otherwise tie).
+    for started, root in ((5000, "r-old@x"), (6000, "r-mid@x")):
+        claim = core_db.claim_work_item(
+            ctx.db, "worker-1", methodology_version=1,
+            types=(core_db.WORK_ITEM_TYPE_REVIEW,))
+        assert claim is not None
+        ctx.db.execute(
+            "UPDATE work_items SET claimed_at=? WHERE root_message_id=?",
+            (started, root))
+    ctx.db.commit()
     body = ctx.client.get("/queue").text
-    # The just-claimed row's subject should appear BEFORE the others in
-    # the rendered listing — even though it was enqueued first.
-    assert (body.index("oldest-subj")
-            < body.index("newest-subj")
-            < body.index("middle-subj"))
+    # Most recently STARTED first (mid, then old); the never-started
+    # row sinks to the backlog at the bottom despite being the newest
+    # enqueue.
+    assert (body.index("middle-subj")
+            < body.index("oldest-subj")
+            < body.index("newest-subj"))
 
 
 def test_queue_pane_carries_htmx_polling_attributes(ctx):

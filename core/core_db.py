@@ -2089,17 +2089,13 @@ def work_item_counts(db, *, requested_by_user_id=None):
 
 def list_work_items(db, *, type=None, state=None, requested_by_user_id=None,
                     limit=200, offset=0):
-    """The work queue joined with patchset metadata — sorted by most-recent
-       activity, so any state change (enqueue → claim → complete) bubbles
-       the row to the top. The sort key is COALESCE(completed_at,
-       claimed_at, enqueued_at): a freshly-claimed row promotes via
-       claimed_at, a completed row via completed_at, an idle claimable
-       row sits at its enqueued_at. id DESC is the tiebreaker so within
-       a single-second gather batch the most-recently inserted row wins.
-
-       This is the order the operator UI wants: the active part of the
-       queue is always visible at the top, instead of buried under newer
-       work that the FIFO claim picker hasn't reached yet.
+    """The work queue joined with patchset metadata — sorted by start
+       date (claimed_at) DESC, matching the Started column the queue
+       renders: the most recently started work reads top-down first.
+       Never-started rows (claimed_at NULL — SQLite sorts NULLs last
+       under DESC) follow as the waiting backlog, newest-enqueued
+       first, with id DESC as the final tiebreaker so a single-second
+       gather batch keeps a stable order.
 
        Optionally filtered by type and/or state; `requested_by_user_id`
        scopes to one user's items (the non-admin queue view). `offset`
@@ -2124,8 +2120,7 @@ def list_work_items(db, *, type=None, state=None, requested_by_user_id=None,
         params.append(requested_by_user_id)
     if where:
         sql += "WHERE " + " AND ".join(where) + " "
-    sql += ("ORDER BY "
-            "COALESCE(w.completed_at, w.claimed_at, w.enqueued_at) DESC, "
+    sql += ("ORDER BY w.claimed_at DESC, w.enqueued_at DESC, "
             "w.id DESC LIMIT ? OFFSET ?")
     params.extend([limit, offset])
     return [dict(r) for r in db.execute(sql, params)]
