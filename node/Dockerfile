@@ -69,11 +69,10 @@ WORKDIR /app
 COPY node/requirements.txt node/requirements.txt
 RUN pip install --no-cache-dir -r node/requirements.txt
 
-# Application code. common/ is shared with hone-core; node/ is the worker.
-COPY common/ common/
-COPY node/   node/
-
-# Run unprivileged; the reference repo + scratch live on a persistent volume.
+# Unprivileged runtime user — created BEFORE the app COPYs so they can
+# stamp ownership at copy time (`COPY --chown`); a post-hoc `chown -R`
+# would rewrite every copied file into a second, duplicate image layer.
+# Only /data (created empty here) still needs an explicit chown.
 #
 # The container user's UID/GID are build-args so an operator can match
 # them to the host's user — important for the HONE_CLAUDE_BACKEND=cli
@@ -92,7 +91,13 @@ RUN (getent group ${HONE_CLAUDE_CLI_GROUP} \
             --uid ${HONE_CLAUDE_CLI_USER} \
             --gid ${HONE_CLAUDE_CLI_GROUP} hone \
  && mkdir -p /data/linux /data/scratch \
- && chown -R ${HONE_CLAUDE_CLI_USER}:${HONE_CLAUDE_CLI_GROUP} /app /data
+ && chown -R ${HONE_CLAUDE_CLI_USER}:${HONE_CLAUDE_CLI_GROUP} /data
+
+# Application code. common/ is shared with hone-core; node/ is the worker.
+COPY --chown=${HONE_CLAUDE_CLI_USER}:${HONE_CLAUDE_CLI_GROUP} common/ common/
+COPY --chown=${HONE_CLAUDE_CLI_USER}:${HONE_CLAUDE_CLI_GROUP} node/   node/
+
+# Run unprivileged; the reference repo + scratch live on a persistent volume.
 USER hone
 
 # Persistent state — one mapped volume holds the node's reference kernel git

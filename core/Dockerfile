@@ -33,15 +33,22 @@ WORKDIR /app
 COPY core/requirements.txt core/requirements.txt
 RUN pip install --no-cache-dir -r core/requirements.txt
 
-# Application code. common/ is shared with the node tier; core/ is
-# the service itself (its GATHER modules and the methodology seed live here).
-COPY common/       common/
-COPY core/ core/
-
-# Run unprivileged; hone.db lives on a persistent volume.
+# Unprivileged runtime user — created BEFORE the app COPYs so they can
+# stamp ownership at copy time (`COPY --chown`). A post-hoc `chown -R`
+# would rewrite every copied file into a second, duplicate image layer,
+# doubling the app payload's contribution to the image size. Only /data
+# (created empty here; hone.db lives on the mapped volume) still needs
+# an explicit chown.
 RUN useradd --create-home --uid 10001 hone \
  && mkdir -p /data/archive /data/methodology /data/tls \
- && chown -R hone:hone /app /data
+ && chown -R hone:hone /data
+
+# Application code. common/ is shared with the node tier; core/ is
+# the service itself (its GATHER modules and the methodology seed live here).
+COPY --chown=hone:hone common/ common/
+COPY --chown=hone:hone core/  core/
+
+# Run unprivileged; hone.db lives on a persistent volume.
 USER hone
 
 # Persistent state — one mapped volume holds everything hone-core
