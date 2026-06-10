@@ -64,10 +64,10 @@ def _claim(db, *, claimed_by, claimed_at, root="<r1@x>"):
 
 # --- bucket assignment -----------------------------------------------------
 
-def test_nodes_page_renders_buckets_in_loudest_order(ctx):
-    """Errored / Stale / In flight / Idle, each with its own table
-       and count. Empty buckets are hidden. Order is loudest-first
-       so the operator sees red before they scroll."""
+def test_nodes_page_renders_rows_in_loudest_order(ctx):
+    """One table, rows ordered loudest-first (errored → stale →
+       in flight → idle) with a per-row status badge — the operator
+       sees red before they scroll, and nothing is hidden."""
     now = int(time.time())
     _node(ctx.db, name="err-1",   last_seen=now,
           health={"last_anthropic_error": "auth"})
@@ -88,21 +88,20 @@ def test_nodes_page_renders_buckets_in_loudest_order(ctx):
 
 def test_errored_node_appears_in_errored_not_stale(ctx):
     """A node that's BOTH stale (last_seen old) AND carrying an
-       anthropic error lands in the errored bucket only. Mirrors the
+       anthropic error gets the errored badge only. Mirrors the
        fleet-pulse rollup's loudest-wins rule."""
     now = int(time.time())
     _node(ctx.db, name="loud", last_seen=now - 10_000,
           health={"last_anthropic_error": "rate_limit"})
     body = ctx.client.get("/nodes").text
-    # Errored bucket header has the row's name underneath; stale
-    # bucket either absent or doesn't carry this row.
+    # The row carries the Errored badge; no Stale badge anywhere.
     assert "Errored" in body and "loud" in body
-    assert "Stale" not in body          # no stale bucket rendered
+    assert "Stale" not in body
 
 
 def test_in_flight_bucket_shows_running_time_column(ctx):
-    """The In flight table is the only one with a Running column;
-       its values format as `47s` / `2m 12s` for the running claim."""
+    """The Running column shows the in-flight claim's elapsed time,
+       formatted `47s` / `2m 12s`; idle rows show a dash."""
     now = int(time.time())
     _node(ctx.db, name="busy", last_seen=now,
           health={"last_anthropic_error": None})
@@ -112,17 +111,17 @@ def test_in_flight_bucket_shows_running_time_column(ctx):
     assert "47s" in body                # rendered duration
 
 
-def test_idle_bucket_is_collapsed_by_default(ctx):
-    """Idle is the bulk of the table at scale — `<details>` keeps it
-       out of the way until the operator wants to inspect it."""
+def test_idle_nodes_are_visible_in_the_single_table(ctx):
+    """Idle nodes are NOT hidden or collapsed: the fleet renders as ONE
+       table, every node a visible row with its status badge — no
+       <details> wrapper anywhere."""
     now = int(time.time())
     _node(ctx.db, name="idle-1", last_seen=now,
           health={"last_anthropic_error": None})
     body = ctx.client.get("/nodes").text
-    # `<details>` element with the Idle summary, NOT open by default.
-    assert "<details" in body
-    assert "Idle" in body
-    assert "<details open" not in body  # collapsed
+    assert "<details" not in body
+    assert "idle-1" in body
+    assert 'id="nodes-list"' in body    # the one shared table
 
 
 def test_revoked_nodes_are_hidden_from_buckets(ctx):

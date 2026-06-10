@@ -1753,16 +1753,13 @@ def _can_manage_node(node, current_user):
 
 
 def _nodes_view(db, runtime_cfg, current_user=None):
-    """The view-model the /nodes table partial renders. Sorts each
-       enrolled node into one of four buckets — errored / stale /
-       in_flight / idle — and augments each row with the
-       running-time and freshness fields the table columns show.
-
-       Bucketing follows the same loudest-wins rule the fleet-pulse
-       chip uses: a node carrying an anthropic-error wins over
-       staleness, in-flight wins over plain idle. Each bucket is
-       sorted by last_seen DESC so the most-recently-active row
-       within the bucket appears first.
+    """The view-model the /nodes table partial renders: ONE table with
+       every active node, ordered loudest-first (errored → stale →
+       in-flight → idle, last_seen DESC within each class) — the same
+       loudest-wins rule the fleet-pulse chip uses, expressed as row
+       order plus a per-row status badge rather than separate bucket
+       tables, so no node (idle ones included) is ever hidden or
+       collapsed.
 
        Every approved node shows up regardless of who's viewing — the
        per-row `is_owner_or_admin` flag is what gates the action
@@ -1805,19 +1802,14 @@ def _nodes_view(db, runtime_cfg, current_user=None):
         })
         buckets[status["bucket"]].append(n)
 
-    # Sort within each bucket — most-recently-seen first.
+    # Sort within each status class — most-recently-seen first — then
+    # flatten loudest-first into the single row list the table renders.
     for key in buckets:
         buckets[key].sort(key=lambda r: r.get("last_seen") or 0,
                            reverse=True)
-
-    # Render-ready bucket list with counts; preserves the loudest-
-    # first order from _NODE_BUCKETS.
-    bucketed = [{"key": k, "label": label, "rows": buckets[k],
-                  "count": len(buckets[k]),
-                  "collapsed_by_default": k == "idle"}
-                 for k, label in _NODE_BUCKETS]
-    return {"buckets": bucketed,
-             "total":   sum(b["count"] for b in bucketed),
+    rows = [r for k, _ in _NODE_BUCKETS for r in buckets[k]]
+    return {"rows":  rows,
+             "total": len(rows),
              "node_state_active": core_db.NODE_STATE_ACTIVE}
 
 
