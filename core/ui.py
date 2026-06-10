@@ -1463,12 +1463,15 @@ def _patchset_view(db, root):
     work_item_back_qs = "?back=" + quote(f"/patchsets/{root}", safe="")
     work_items = []
     has_review_item = False
+    has_prepare_item = False
     owner_emails = _owner_email_map(db)
     for w in core_db.work_items_for_patchset(db, root):
         type_name  = core_db.WORK_ITEM_TYPE_NAMES.get(w["type"], "?")
         state_name = core_db.WORK_ITEM_STATE_NAMES.get(w["state"], "?")
         if w["type"] == core_db.WORK_ITEM_TYPE_REVIEW:
             has_review_item = True
+        if w["type"] == core_db.WORK_ITEM_TYPE_PREPARE:
+            has_prepare_item = True
         work_items.append({
             "id":            w["id"],
             "type":          type_name,
@@ -1503,6 +1506,19 @@ def _patchset_view(db, root):
     else:
         review_request = {"available": True, "reason": None}
 
+    # Prepare-request availability for its manual trigger, mirroring the
+    # review one. Prepare is normally enqueued by the pipeline (gather /
+    # upload), so this button mostly matters when that didn't happen or
+    # the prepare work-item was cancelled. "done" once the metadata row
+    # exists (prepare's terminal product), "queued" while an item exists
+    # without it.
+    if metadata is not None:
+        prepare_request = {"available": False, "reason": "done"}
+    elif has_prepare_item:
+        prepare_request = {"available": False, "reason": "queued"}
+    else:
+        prepare_request = {"available": True, "reason": None}
+
     return {
         "patchset":   patchset,
         "tags":       tags,
@@ -1513,6 +1529,7 @@ def _patchset_view(db, root):
         "messages":   messages,
         "work_items": work_items,
         "review_request": review_request,
+        "prepare_request": prepare_request,
     }
 
 
@@ -1616,6 +1633,33 @@ async def request_review(request: Request, root_message_id: str,
     # has id=None — admin-triggered reviews are system items.
     core_db.maybe_enqueue_review(db, root_message_id,
                                   requested_by_user_id=current_user.id)
+    return RedirectResponse(f"/patchsets/{quote(root_message_id)}",
+                             status_code=303)
+
+
+@router.post("/prepare-requests/{root_message_id:path}", dependencies=[Depends(auth.require_csrf)])
+async def request_prepare(request: Request, root_message_id: str,
+                           current_user: auth.SessionUser = Depends(auth.require_session)):
+    """Operator-triggered prepare enqueue — request_review's companion
+       for a patchset whose prepare never ran (or whose work-item was
+       cancelled before completing). Reuses core_db.maybe_enqueue_prepare,
+       the same gathered-gated, idempotent enqueue the pipeline calls, so
+       a double-click or an already-prepared patchset is a safe no-op.
+       Redirect-after-POST back to the detail page (the button dims once
+       the prepare item exists).
+
+       Gated by _can_act_on_patchset, same as request_review."""
+    db = request.app.state.db
+    ps = core_db.get_patchset(db, root_message_id)
+    if ps is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND,
+                            f"no patchset with root_message_id "
+                            f"{root_message_id!r}")
+    if not _can_act_on_patchset(ps, current_user):
+        raise HTTPException(status.HTTP_403_FORBIDDEN,
+                            "maintainer access required")
+    core_db.maybe_enqueue_prepare(db, root_message_id,
+                                   requested_by_user_id=current_user.id)
     return RedirectResponse(f"/patchsets/{quote(root_message_id)}",
                              status_code=303)
 

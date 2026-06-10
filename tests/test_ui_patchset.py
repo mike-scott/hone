@@ -588,3 +588,65 @@ def test_delete_review_clears_dependent_evaluations(ctx):
     assert core_db.get_ai_review(db, "<r1@x>") is None
     assert db.execute("SELECT COUNT(*) AS c FROM review_evaluations "
                       "WHERE ai_review_id=?", (rid,)).fetchone()["c"] == 0
+
+
+# --- manual prepare trigger -------------------------------------------------
+
+def test_prepare_button_offered_when_not_prepared(ctx):
+    """A gathered patchset with no prepare item and no metadata shows
+       the active Request prepare button — the pipeline normally
+       enqueues prepare, so this is the recovery path when it didn't
+       (or the item was cancelled)."""
+    core_db.upsert_patchset(ctx.db, "<r1@x>", subject="[PATCH] x",
+                             n_patches=1, submitter_email="a@x")
+    body = ctx.client.get(f"/patchsets/{quote('r1@x')}").text
+    assert "Request prepare" in body
+    assert f'action="/prepare-requests/{quote("r1@x")}"' in body
+
+
+def test_prepare_button_reads_complete_once_prepared(ctx):
+    """Once the patchset_metadata row exists (prepare's terminal
+       product) the button dims to 'Prepare complete'."""
+    _plant_patchset(ctx.db)                       # plants patchset_metadata
+    body = ctx.client.get(f"/patchsets/{quote('r1@x')}").text
+    assert "Prepare complete" in body
+    assert "Request prepare" not in body          # active button gone
+
+
+def test_request_prepare_enqueues_and_dims_button(ctx):
+    """POSTing the prepare request enqueues a prepare work-item (303
+       back to the detail page); the button then reads 'Prepare queued'
+       — same dim-once-present behaviour as the review trigger."""
+    core_db.upsert_patchset(ctx.db, "<r1@x>", subject="[PATCH] x",
+                             n_patches=1, submitter_email="a@x")
+    r = ctx.client.post(f"/prepare-requests/{quote('r1@x')}",
+                        follow_redirects=False)
+    assert r.status_code == 303
+    n = ctx.db.execute(
+        "SELECT COUNT(*) FROM work_items WHERE type=? AND root_message_id=?",
+        (core_db.WORK_ITEM_TYPE_PREPARE, "r1@x")).fetchone()[0]
+    assert n == 1
+    body = ctx.client.get(f"/patchsets/{quote('r1@x')}").text
+    assert "Prepare queued" in body
+    assert "Request prepare" not in body
+
+
+def test_request_prepare_is_idempotent(ctx):
+    """A double-submit is a safe no-op — still exactly one prepare
+       work-item (maybe_enqueue_prepare's existing guarantee)."""
+    core_db.upsert_patchset(ctx.db, "<r1@x>", subject="[PATCH] x",
+                             n_patches=1, submitter_email="a@x")
+    ctx.client.post(f"/prepare-requests/{quote('r1@x')}",
+                    follow_redirects=False)
+    ctx.client.post(f"/prepare-requests/{quote('r1@x')}",
+                    follow_redirects=False)
+    n = ctx.db.execute(
+        "SELECT COUNT(*) FROM work_items WHERE type=? AND root_message_id=?",
+        (core_db.WORK_ITEM_TYPE_PREPARE, "r1@x")).fetchone()[0]
+    assert n == 1
+
+
+def test_request_prepare_404_for_unknown_root(ctx):
+    r = ctx.client.post(f"/prepare-requests/{quote('nope@x')}",
+                        follow_redirects=False)
+    assert r.status_code == 404

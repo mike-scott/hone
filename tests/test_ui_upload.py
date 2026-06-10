@@ -294,8 +294,9 @@ def _regular_ctx(tmp_path, db=None):
 
 
 def test_review_request_403_for_regular_user_on_corpus_patchset(tmp_path):
-    """Request/delete review on a gathered patchset is maintainer
-       territory — a no-grant user gets a 403 and no buttons."""
+    """Request/delete review — and request prepare — on a gathered
+       patchset is maintainer territory: a no-grant user gets a 403
+       and no buttons."""
     ctx = _regular_ctx(tmp_path)
     core_db.upsert_patchset(ctx.db, "<lkml@x>", subject="corpus row",
                             n_patches=1)
@@ -304,8 +305,11 @@ def test_review_request_403_for_regular_user_on_corpus_patchset(tmp_path):
     r = ctx.client.post("/review-requests/lkml@x/delete",
                         follow_redirects=False)
     assert r.status_code == 403
+    r = ctx.client.post("/prepare-requests/lkml@x", follow_redirects=False)
+    assert r.status_code == 403
     body = ctx.client.get("/patchsets/lkml@x").text
     assert "Request review" not in body
+    assert "Request prepare" not in body
 
 
 def test_uploader_can_request_review_of_their_own_upload(tmp_path):

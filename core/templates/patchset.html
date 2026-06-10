@@ -61,6 +61,27 @@
      the POST handlers enforce the same rule. #}
   {% if can_act_on_patchset %}
   <div class="d-flex gap-2">
+  {# Manual prepare trigger — prepare is normally enqueued by the
+     pipeline, so an active button here means that didn't happen (or
+     the item was cancelled). Mirrors the review button's offered /
+     dimmed-with-reason pattern. #}
+  {% if prepare_request.available %}
+  <form method="post"
+        action="/prepare-requests/{{ patchset.root_message_id | urlencode }}"
+        class="m-0">
+    {{ csrf_field(request) }}
+    <button type="submit" class="btn btn-sm btn-primary">
+      <i class="bi bi-play-circle me-1"></i>Request prepare
+    </button>
+  </form>
+  {% else %}
+  {% set _prep_label = {"queued": "Prepare queued",
+                        "done":   "Prepare complete"} %}
+  <button type="button" class="btn btn-sm btn-outline-secondary" disabled
+          title="{% if prepare_request.reason == 'queued' %}a prepare work-item already exists for this patchset{% else %}this patchset already has its preparation metadata{% endif %}">
+    <i class="bi bi-play-circle me-1"></i>{{ _prep_label.get(prepare_request.reason, "Request prepare") }}
+  </button>
+  {% endif %}
   {% if review_request.available %}
   <form method="post"
         action="/review-requests/{{ patchset.root_message_id | urlencode }}"
