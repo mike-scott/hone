@@ -680,3 +680,59 @@ def test_is_provisioned_requires_every_configured_list(monkeypatch, tmp_path):
     assert lore.Lore.is_provisioned() is False          # b not cloned yet
     (tmp_path / "lore" / "b" / ".git").mkdir(parents=True)
     assert lore.Lore.is_provisioned() is True
+
+
+# --- per-cycle archive refresh ----------------------------------------------
+
+def test_list_refreshes_the_archive_before_walking(monkeypatch, tmp_path):
+    """Each gather cycle fast-forwards the clone before walking it —
+       _new_commits reads `cursor..HEAD`, so a frozen clone starves
+       gather the moment the backlog drains."""
+    monkeypatch.setattr(lore, "ARCHIVE", str(tmp_path))
+    monkeypatch.setattr(lore, "configured_lists", lambda: [])
+    calls = []
+    monkeypatch.setattr(
+        lore.Lore, "_refresh",
+        classmethod(lambda cls, a: calls.append(("refresh", a))))
+    monkeypatch.setattr(
+        lore.Lore, "_walk",
+        lambda self, archive, cursor, db, cap:
+            iter(calls.append(("walk", archive)) or ()))
+    list(lore.Lore().list())
+    assert calls == [("refresh", str(tmp_path)), ("walk", str(tmp_path))]
+
+
+def test_list_refreshes_each_configured_list_archive(monkeypatch, tmp_path):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    monkeypatch.setattr(lore, "configured_lists", lambda: ["a", "b"])
+    monkeypatch.setattr(lore, "_archive_for", lambda n: str(tmp_path / n))
+    refreshed = []
+    monkeypatch.setattr(lore.Lore, "_refresh",
+                        classmethod(lambda cls, a: refreshed.append(a)))
+    monkeypatch.setattr(lore.Lore, "_walk",
+                        lambda self, archive, cursor, db, cap: iter(()))
+    list(lore.Lore().list())
+    assert refreshed == [str(tmp_path / "a"), str(tmp_path / "b")]
+
+
+def test_refresh_is_best_effort(monkeypatch, tmp_path):
+    """Offline, a git error, or a timeout: the refresh logs and the
+       cycle proceeds on the stale archive — it must never raise into
+       the gather supervisor."""
+    def failing(*a, **kw):
+        class R:
+            returncode, stdout, stderr = 1, b"", b"fatal: unable to access"
+        return R()
+    monkeypatch.setattr(lore.subprocess, "run", failing)
+    lore.Lore._refresh(str(tmp_path))             # rc != 0 — no raise
+
+    def raise_timeout(*a, **kw):
+        raise lore.subprocess.TimeoutExpired(cmd="git pull", timeout=1)
+    monkeypatch.setattr(lore.subprocess, "run", raise_timeout)
+    lore.Lore._refresh(str(tmp_path))             # timeout — no raise
+
+    def raise_oserror(*a, **kw):
+        raise OSError("git not found")
+    monkeypatch.setattr(lore.subprocess, "run", raise_oserror)
+    lore.Lore._refresh(str(tmp_path))             # OSError — no raise

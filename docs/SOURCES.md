@@ -181,6 +181,14 @@ operator doesn't have to run the helper by hand: gather picks the archive
 up on the next supervisor tick once the clone completes. Useful for
 fully-automated CI / IaC deployments where the operator never logs in.
 
+**Per-cycle refresh.** Every gather cycle starts by fast-forwarding the
+archive from lore (`git pull --ff-only`, `Lore._refresh`) — without it
+the clone is frozen at clone-time HEAD and gather starves the moment it
+drains the initial backlog. public-inbox repos are append-only, so the
+fast-forward always succeeds when lore is reachable; a failure (offline,
+timeout) logs a warning and the cycle walks the stale archive — the next
+cycle retries.
+
 **Resume cursor — the archive HEAD SHA.** Because the archive is
 **append-only**, the cursor is just the last git commit hash gathered. Each
 pass runs `git log --reverse <cursor>..HEAD` and walks the new commits

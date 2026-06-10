@@ -457,6 +457,7 @@ class Lore(GatherModule):
                             "(see SOURCES.md); gather is a no-op for lore "
                             "until the archive exists", ARCHIVE)
                 return
+            self._refresh(ARCHIVE)
             yield from self._walk(ARCHIVE, state.cursor if state else None,
                                   db, MAX_PATCHSETS_PER_CYCLE)
             return
@@ -473,10 +474,42 @@ class Lore(GatherModule):
                 log.warning("lore list %r archive missing at %s — skipping "
                             "(clone pending)", name, archive)
                 continue
+            self._refresh(archive)
             for ref in self._walk(archive, cursors.get(name), db, cap):
                 cursors[name] = ref.cursor           # the per-archive SHA
                 ref.cursor = json.dumps(cursors, sort_keys=True)
                 yield ref
+
+    # Per-cycle refresh budget. The delta is ~one gather interval of list
+    # mail — seconds, normally; the timeout caps a pathological link well
+    # inside the supervisor's stall-cancel window.
+    REFRESH_TIMEOUT_SECONDS = 300
+
+    @classmethod
+    def _refresh(cls, archive):
+        """Fast-forward `archive` from lore before walking it. Without
+           this the clone is frozen at clone-time HEAD — _new_commits
+           walks `cursor..HEAD`, so gather drains the clone-time backlog
+           and then starves: no new patchsets, and no late-arriving
+           review comments. public-inbox repos are append-only, so
+           --ff-only always succeeds when lore is reachable. Best-effort
+           by design: offline / timeout / git error logs a warning and
+           the cycle walks the stale archive — the next cycle retries."""
+        try:
+            r = subprocess.run(
+                ["git", "-C", archive, "pull", "--ff-only", "--quiet"],
+                capture_output=True, timeout=cls.REFRESH_TIMEOUT_SECONDS)
+            if r.returncode != 0:
+                log.warning(
+                    "lore refresh: git pull failed for %s (rc=%d): %s — "
+                    "walking the stale archive", archive, r.returncode,
+                    r.stderr.decode(errors="replace").strip()[:200])
+        except subprocess.TimeoutExpired:
+            log.warning("lore refresh: git pull timed out after %ds for %s "
+                        "— walking the stale archive",
+                        cls.REFRESH_TIMEOUT_SECONDS, archive)
+        except OSError as exc:
+            log.warning("lore refresh: %s — walking the stale archive", exc)
 
     def _walk(self, archive, cursor, db, cap):
         # The archive is operator-provisioned (clone-it-first; see SOURCES.md).
