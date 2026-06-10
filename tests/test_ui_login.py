@@ -73,7 +73,10 @@ def _csrf(ctx, path):
     m = _CSRF_RE.search(r.text)
     if m:
         return m.group(1)
-    r = ctx.client.get("/")
+    # Follow redirects explicitly: "/" itself now 303s a non-maintainer
+    # to /my-patchsets, and the fixture's client doesn't follow (the
+    # login tests assert raw 303s). Any rendered page carries the meta.
+    r = ctx.client.get("/", follow_redirects=True)
     m = _CSRF_META_RE.search(r.text)
     assert m, f"no csrf_token found on GET {path} (and / didn't render either)"
     return m.group(1)

@@ -42,15 +42,21 @@
         </li>
         {# "Corpus" is the system's own word for the gathered patchset
            population (vs a user's uploaded submissions on My patchsets)
-           — see ARCHITECTURE.md → Data model. The /patchsets/* detail
-           routes are shared by both, so an uploaded patchset's detail
-           page highlights this entry too; harmless, and the uploaded
-           badge on the page carries the distinction. #}
+           — see ARCHITECTURE.md → Data model. Maintainers + admins
+           only: the / handler redirects everyone else to /my-patchsets,
+           and the nav entry hides accordingly. The /patchsets/* detail
+           routes are shared by both populations, so an uploaded
+           patchset's detail page highlights this entry too; harmless,
+           and the uploaded badge on the page carries the distinction. #}
+        {% if current_user is defined and current_user
+              and (current_user.is_config_admin
+                   or current_user.is_maintainer) %}
         <li class="nav-item">
           <a href="/" class="nav-link
              {%- if active == '/' or active.startswith('/patchsets') %} active{% endif %}">
             <i class="bi bi-collection me-1"></i>Corpus</a>
         </li>
+        {% endif %}
         <li class="nav-item">
           <a href="/queue" class="nav-link
              {%- if active.startswith('/queue') %} active{% endif %}">

@@ -774,8 +774,17 @@ ALTER TABLE patchsets ADD COLUMN uploaded_by_user_id INTEGER
     REFERENCES users(id) ON DELETE SET NULL;
 """
 
+_SCHEMA_V7 = """
+-- Per-user maintainer grant: maintainers (and admins) can browse the
+-- gathered corpus and select patchsets for review; a regular account
+-- only sees its own uploads. Granted from the Users screen, re-derived
+-- per request like is_admin (auth.current_session_user).
+ALTER TABLE users ADD COLUMN is_maintainer INTEGER NOT NULL DEFAULT 0
+    CHECK (is_maintainer IN (0, 1));
+"""
+
 _MIGRATIONS = [_SCHEMA_V1, _SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4, _SCHEMA_V5,
-               _SCHEMA_V6]
+               _SCHEMA_V6, _SCHEMA_V7]
 
 
 # How long a connection waits on another connection's write lock before
@@ -3244,6 +3253,17 @@ def set_user_admin(db, user_id, is_admin):
     cur = db.execute(
         "UPDATE users SET is_admin = ? WHERE id = ?",
         (1 if is_admin else 0, user_id))
+    db.commit()
+    return cur.rowcount > 0
+
+
+def set_user_maintainer(db, user_id, is_maintainer):
+    """Flip a user's `is_maintainer` grant (0 or 1). Returns True when a
+       row was updated. Same freshness as is_admin: re-derived per
+       request, so it takes effect on the user's next request."""
+    cur = db.execute(
+        "UPDATE users SET is_maintainer = ? WHERE id = ?",
+        (1 if is_maintainer else 0, user_id))
     db.commit()
     return cur.rowcount > 0
 

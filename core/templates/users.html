@@ -64,7 +64,7 @@
           <th>Email</th>
           <th>Display name</th>
           <th>Provider</th>
-          <th>Admin</th>
+          <th>Role</th>
           <th>Approved</th>
           <th>Last login</th>
           <th></th>
@@ -79,7 +79,11 @@
           <td>
             {% if u.is_admin %}
             <span class="badge text-bg-primary">admin</span>
-            {% else %}
+            {% endif %}
+            {% if u.is_maintainer %}
+            <span class="badge text-bg-info">maintainer</span>
+            {% endif %}
+            {% if not u.is_admin and not u.is_maintainer %}
             <span class="text-muted small">—</span>
             {% endif %}
           </td>
@@ -99,6 +103,21 @@
                   data-confirm-button="Grant admin">
               {{ csrf_field(request) }}
               <button class="btn btn-outline-secondary btn-sm">Make admin</button>
+            </form>
+            {% endif %}
+            {% if u.is_maintainer %}
+            <form method="post" action="/users/{{ u.id }}/revoke-maintainer" class="d-inline"
+                  data-confirm="Remove maintainer permission from {{ u.email }}?"
+                  data-confirm-button="Remove maintainer">
+              {{ csrf_field(request) }}
+              <button class="btn btn-outline-secondary btn-sm">Revoke maintainer</button>
+            </form>
+            {% else %}
+            <form method="post" action="/users/{{ u.id }}/grant-maintainer" class="d-inline"
+                  data-confirm="Grant maintainer permission to {{ u.email }}? Maintainers browse the corpus and select patchsets for review."
+                  data-confirm-button="Grant maintainer">
+              {{ csrf_field(request) }}
+              <button class="btn btn-outline-secondary btn-sm">Make maintainer</button>
             </form>
             {% endif %}
             <form method="post" action="/users/{{ u.id }}/revoke" class="d-inline"

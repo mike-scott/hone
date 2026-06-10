@@ -49,6 +49,12 @@ class SessionUser:
     email: str
     display_name: str
     is_config_admin: bool
+    # The maintainer grant (users.is_maintainer): corpus browsing +
+    # selecting patchsets for review. Defaulted so session cookies
+    # minted before the field existed still parse; like
+    # is_config_admin it is re-derived from the users row on every
+    # request, never trusted from the cookie.
+    is_maintainer: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -193,10 +199,11 @@ def current_session_user(request: Request) -> Optional[SessionUser]:
     if row is None or row["state"] != "approved":
         clear_session(request)
         return None
-    # Admin is a DB grant, re-derived per request rather than trusted from
-    # the cookie — granting / demoting takes effect on the user's next
-    # request, exactly like state revocation above.
+    # Admin and maintainer are DB grants, re-derived per request rather
+    # than trusted from the cookie — granting / demoting takes effect on
+    # the user's next request, exactly like state revocation above.
     user.is_config_admin = bool(row["is_admin"])
+    user.is_maintainer = bool(row["is_maintainer"])
     return user
 
 
@@ -212,6 +219,16 @@ def require_config_admin(
     if not user.is_config_admin:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
                             detail="admin access required")
+    return user
+
+
+def require_maintainer(
+        user: SessionUser = Depends(require_session)) -> SessionUser:
+    """Maintainer-or-admin gate — the corpus surfaces. Admin implies
+       maintainer access."""
+    if not (user.is_config_admin or user.is_maintainer):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="maintainer access required")
     return user
 
 

@@ -112,8 +112,10 @@ def _ctx(tmp_path):
     db = core_db.connect(str(tmp_path / "hone.db"))
     uid = core_db.create_user(db, "alice@x", "alice", "local")
     core_db.set_user_state(db, uid, "approved")
+    # Maintainer so the corpus-listing assertions below can render "/";
+    # uploading itself needs no grant.
     user = auth.SessionUser(id=uid, email="alice@x", display_name="alice",
-                            is_config_admin=False)
+                            is_config_admin=False, is_maintainer=True)
     app = FastAPI()
     app.include_router(ui.router)
     app.dependency_overrides[auth.require_session] = lambda: user

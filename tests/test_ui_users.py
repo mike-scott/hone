@@ -69,3 +69,40 @@ def test_admin_grant_routes_are_403_for_non_admin(tmp_path):
     assert client.post(f"/users/{target}/grant-admin").status_code == 403
     assert client.post(f"/users/{target}/revoke-admin").status_code == 403
     assert core_db.get_user_by_id(db, target)["is_admin"] == 0
+
+
+# --- the maintainer grant ---------------------------------------------------
+
+def test_grant_and_revoke_maintainer_endpoints_flip_the_flag(ctx):
+    uid = _approved_user(ctx.db)
+    r = ctx.client.post(f"/users/{uid}/grant-maintainer",
+                        follow_redirects=False)
+    assert r.status_code == 303
+    assert core_db.get_user_by_id(ctx.db, uid)["is_maintainer"] == 1
+    r = ctx.client.post(f"/users/{uid}/revoke-maintainer",
+                        follow_redirects=False)
+    assert r.status_code == 303
+    assert core_db.get_user_by_id(ctx.db, uid)["is_maintainer"] == 0
+
+
+def test_users_page_shows_maintainer_badge_and_controls(ctx):
+    uid = _approved_user(ctx.db)
+    core_db.set_user_maintainer(ctx.db, uid, True)
+    body = ctx.client.get("/users").text
+    assert ">maintainer<" in body
+    assert "Revoke maintainer" in body
+
+
+def test_maintainer_grant_routes_are_403_for_non_admin(tmp_path):
+    db = core_db.connect(str(tmp_path / "hone.db"))
+    target = _approved_user(db)
+    app = FastAPI()
+    app.include_router(ui.router)
+    user = auth.SessionUser(id=99, email="user@x", display_name="user",
+                            is_config_admin=False)
+    app.dependency_overrides[auth.require_session] = lambda: user
+    app.dependency_overrides[auth.require_csrf] = lambda: None
+    app.state.db = db
+    client = TestClient(app)
+    assert client.post(f"/users/{target}/grant-maintainer").status_code == 403
+    assert core_db.get_user_by_id(db, target)["is_maintainer"] == 0

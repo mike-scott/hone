@@ -173,7 +173,8 @@ async def login_submit(request: Request):
     auth.set_session_user(request, auth.SessionUser(
         id=user["id"], email=user["email"],
         display_name=user["display_name"] or user["email"],
-        is_config_admin=bool(user["is_admin"])))
+        is_config_admin=bool(user["is_admin"]),
+        is_maintainer=bool(user["is_maintainer"])))
     core_db.touch_last_login(db, user["id"])
     return RedirectResponse(next_url, status_code=303)
 
@@ -303,7 +304,8 @@ async def google_sso_callback(request: Request,
     auth.set_session_user(request, auth.SessionUser(
         id=user["id"], email=user["email"],
         display_name=user["display_name"] or user["email"],
-        is_config_admin=bool(user["is_admin"])))
+        is_config_admin=bool(user["is_admin"]),
+        is_maintainer=bool(user["is_maintainer"])))
     core_db.touch_last_login(db, user["id"])
     return RedirectResponse(next_url, status_code=303)
 
@@ -364,6 +366,23 @@ async def user_revoke_admin(request: Request, user_id: int,
        config-token admin (HONE_ADMIN_TOKEN, no users row) is the
        permanent backstop that can always re-grant."""
     core_db.set_user_admin(request.app.state.db, user_id, False)
+    return RedirectResponse("/users", status_code=303)
+
+
+@router.post("/users/{user_id}/grant-maintainer", include_in_schema=False, dependencies=[Depends(auth.require_csrf)])
+async def user_grant_maintainer(request: Request, user_id: int,
+                                user: auth.SessionUser = Depends(auth.require_config_admin)):
+    """Grant the maintainer permission — corpus browsing and selecting
+       patchsets for review. Takes effect on the target's next request."""
+    core_db.set_user_maintainer(request.app.state.db, user_id, True)
+    return RedirectResponse("/users", status_code=303)
+
+
+@router.post("/users/{user_id}/revoke-maintainer", include_in_schema=False, dependencies=[Depends(auth.require_csrf)])
+async def user_revoke_maintainer(request: Request, user_id: int,
+                                 user: auth.SessionUser = Depends(auth.require_config_admin)):
+    """Remove the maintainer permission."""
+    core_db.set_user_maintainer(request.app.state.db, user_id, False)
     return RedirectResponse("/users", status_code=303)
 
 
@@ -1196,7 +1215,14 @@ async def patchsets(request: Request,
        (lifecycle state, comments, mailing list, patch type), sortable
        columns, and a 25/50/100/200 paginator above and below the table.
        Default sort is newest patchset date first; each row links to the
-       per-patchset detail page."""
+       per-patchset detail page.
+
+       Maintainers and admins only — the corpus is the training /
+       review-selection population, not a general browsing surface. A
+       regular user landing on / is sent to their own dashboard
+       (/my-patchsets) rather than 403'd: it's the home page."""
+    if not (current_user.is_config_admin or current_user.is_maintainer):
+        return RedirectResponse("/my-patchsets", status_code=303)
     db = request.app.state.db
     ctx = _patchsets_view(db, q, state, comments, list_tag, patch_type,
                           sort, direction, page, size)

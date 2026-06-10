@@ -130,8 +130,8 @@ the viewer's local timezone (UTC without JS; hover shows UTC).
 
 Operator pages: **Corpus** (the home page — the gathered patchset
 corpus, searchable and filterable; what training and maintainer-selected
-reviews draw from), **Queue** (the work queue with type × state chip
-filter), **My patchsets** (your uploaded patchsets as a pipeline view,
+reviews draw from; visible to maintainers and admins only), **Queue**
+(the work queue with type × state chip filter), **My patchsets** (your uploaded patchsets as a pipeline view,
 plus the upload form — uploads are submissions for review, kept out of
 the corpus and never used as training data), **Nodes** (the fleet —
 every node visible, controls gated to the node's owner — plus your

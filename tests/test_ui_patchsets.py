@@ -331,3 +331,41 @@ def test_row_links_to_patchset_detail_with_back(ctx):
 def test_empty_state(ctx):
     body = ctx.client.get("/").text
     assert "No patchsets match." in body
+
+
+# --- corpus access: maintainers + admins only -------------------------------
+
+def test_corpus_redirects_a_regular_user_to_their_dashboard(tmp_path):
+    """A non-maintainer landing on / is sent to /my-patchsets — the
+       corpus is the training / review-selection population, gated to
+       maintainers and admins. The nav hides the Corpus entry too."""
+    from core import auth
+    db = core_db.connect(str(tmp_path / "hone.db"))
+    uid = core_db.create_user(db, "u@x", "u", "local")
+    user = auth.SessionUser(id=uid, email="u@x", display_name="u",
+                            is_config_admin=False)
+    app = FastAPI()
+    app.include_router(ui.router)
+    app.dependency_overrides[auth.require_session] = lambda: user
+    app.state.db = db
+    client = TestClient(app)
+    r = client.get("/", follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["Location"] == "/my-patchsets"
+    assert ">Corpus<" not in client.get("/my-patchsets").text
+
+
+def test_corpus_renders_for_a_maintainer(tmp_path):
+    from core import auth
+    db = core_db.connect(str(tmp_path / "hone.db"))
+    uid = core_db.create_user(db, "m@x", "m", "local")
+    core_db.set_user_maintainer(db, uid, True)
+    user = auth.SessionUser(id=uid, email="m@x", display_name="m",
+                            is_config_admin=False, is_maintainer=True)
+    app = FastAPI()
+    app.include_router(ui.router)
+    app.dependency_overrides[auth.require_session] = lambda: user
+    app.state.db = db
+    body = TestClient(app).get("/").text
+    assert "Corpus" in body
+    assert "Search by subject or author name" in body

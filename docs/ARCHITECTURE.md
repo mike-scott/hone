@@ -176,7 +176,9 @@ Pages:
   mailing list, patch type), sortable columns, and per-patchset detail
   pages (`/patchsets/<root>`). "Corpus" is the population training and
   maintainer-selected reviews draw from; a user's own uploads live on
-  *My patchsets*, not here.
+  *My patchsets*, not here. **Maintainers and admins only** — a regular
+  user landing on `/` is redirected to their dashboard, and the nav
+  hides the entry.
 - **Queue** (`/queue`) — the work queue (prepare + review + train items),
   with a two-axis chip filter — type (prepare / review / train) × state
   (claimable, claimed, completed, unappliable, deferred). Per-type and
@@ -362,10 +364,14 @@ for every user, so it is **admin-only**. The whole operator UI is gated
 by session-based login (`core/auth.py`): email/password (Argon2id) or
 Google SSO, with an admin-approval gate for self-registered accounts.
 The configured `HONE_ADMIN_TOKEN` is the bootstrap admin identity (no
-`users` row); an admin can grant the same admin permission to a regular
-account from the Users screen (`users.is_admin` — re-derived from the
-row on every request, so a demotion takes effect on the target's next
-request, exactly like revocation). The admin surfaces — user management
+`users` row); an admin can grant two per-account permissions from the
+Users screen, both re-derived from the row on every request (so a
+demotion takes effect on the target's next request, exactly like
+revocation): **admin** (`users.is_admin` — everything) and
+**maintainer** (`users.is_maintainer` — corpus browsing and selecting
+patchsets for review; admin implies it). A regular account without
+either grant sees only its own surfaces — My patchsets, its queue
+items, its nodes. The admin surfaces — user management
 and Site settings — sit in the admin section of the user menu;
 every DB-backed account additionally gets a **User settings** page
 (`/user-settings`: display name, password change for local accounts)
