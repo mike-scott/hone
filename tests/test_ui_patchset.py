@@ -696,3 +696,51 @@ def test_thread_comment_with_no_parent_stays_top_level(ctx):
     assert "lost@x" in body
     # Only bob's reply-to-the-patch comment is indented.
     assert body.count("margin-left:") == 1
+
+
+# --- the Pipeline chip + skipped-only corpus state --------------------------
+
+def test_detail_shows_pipeline_chip_not_corpus_state(ctx):
+    """The Patchset card carries a derived Pipeline field (the
+       /my-patchsets ladder); the corpus state row is gone for a normal
+       gathered patchset — "gathered" says nothing on a page that is
+       rendering the patchset."""
+    _plant_patchset(ctx.db)                       # plants patchset_metadata
+    body = ctx.client.get(f"/patchsets/{quote('r1@x')}").text
+    assert "Pipeline" in body
+    assert "prepared" in body                     # metadata row exists
+    assert "Corpus state" not in body
+
+
+def test_detail_pipeline_chip_walks_the_ladder(ctx):
+    """gathered (corpus base verb, no work yet) → prepared (metadata
+       lands) → reviewing (review item in flight) → reviewed (ai_review
+       row lands)."""
+    core_db.upsert_patchset(ctx.db, "<r1@x>", subject="[PATCH] x",
+                             n_patches=1, submitter_email="a@x")
+    assert ">gathered<" in ctx.client.get(
+        f"/patchsets/{quote('r1@x')}").text
+    core_db.upsert_patchset_metadata(
+        ctx.db, "<r1@x>", mode="heuristic",
+        tree_state={}, subsystem={}, patch_size={}, maintainer={},
+        patch_type={}, review_intensity={}, preparation_notes={})
+    assert ">prepared<" in ctx.client.get(
+        f"/patchsets/{quote('r1@x')}").text
+    core_db.enqueue_review(ctx.db, "<r1@x>")
+    assert ">reviewing<" in ctx.client.get(
+        f"/patchsets/{quote('r1@x')}").text
+    core_db.upsert_ai_review(ctx.db, "<r1@x>", concerns=[])
+    assert ">reviewed<" in ctx.client.get(
+        f"/patchsets/{quote('r1@x')}").text
+
+
+def test_detail_skipped_patchset_shows_decorated_corpus_state(ctx):
+    """Skipped is the abnormal disposition — it keeps a Corpus state row,
+       warning-badged, with the reason."""
+    core_db.mark_skipped(ctx.db, "<r1@x>", "list tag not enabled",
+                          subject="[PATCH] nope")
+    body = ctx.client.get(f"/patchsets/{quote('r1@x')}").text
+    assert "Corpus state" in body
+    assert "text-bg-warning" in body
+    assert "bi-exclamation-triangle-fill" in body
+    assert "list tag not enabled" in body

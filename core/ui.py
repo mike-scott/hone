@@ -510,11 +510,13 @@ def _pending_uploads(request):
     return store
 
 
-def _upload_status(row):
+def _upload_status(row, *, base_label="uploaded"):
     """The pipeline chip for a /my-patchsets row — uploaded → preparing
        → prepared → reviewing → reviewed, with the two failure states
        surfaced. Reads the booleans + latest work-item states
-       list_uploaded_patchsets computes."""
+       list_uploaded_patchsets computes. The patchset detail page shares
+       this for its Pipeline field, with `base_label="gathered"` for
+       corpus patchsets (same ladder, different ingest verb)."""
     if row["has_ai_review"]:
         return ("reviewed", "text-bg-success")
     for state, stage in ((row["review_state"], "review"),
@@ -529,7 +531,7 @@ def _upload_status(row):
         return ("prepared", "text-bg-info")
     if row["prepare_state"] is not None:
         return ("preparing", "text-bg-secondary")
-    return ("uploaded", "text-bg-secondary")
+    return (base_label, "text-bg-secondary")
 
 
 @router.get("/my-patchsets", response_class=HTMLResponse)
@@ -1379,6 +1381,11 @@ def _patchset_view(db, root):
     patchset["gathered_display"]  = _when(patchset.get("gathered_at"))
     patchset["state_display"] = core_db.PATCHSET_STATE_NAMES.get(
         patchset["state"], "?")
+    # Skipped is the abnormal ingest disposition — the only corpus state
+    # worth a row on the detail page (a page rendering the patchset is
+    # self-evidently looking at a gathered one).
+    patchset["is_skipped"] = (patchset["state"]
+                              == core_db.PATCHSET_STATE_SKIPPED)
     # Uploaded-origin patchsets are submissions, not corpus rows — badge
     # them so the shared detail page never reads as LKML data.
     patchset["is_uploaded"] = (patchset.get("origin")
@@ -1498,6 +1505,7 @@ def _patchset_view(db, root):
     work_items = []
     has_review_item = False
     has_prepare_item = False
+    latest = {}    # work-item type → (id, state) of the newest item
     owner_emails = _owner_email_map(db)
     for w in core_db.work_items_for_patchset(db, root):
         type_name  = core_db.WORK_ITEM_TYPE_NAMES.get(w["type"], "?")
@@ -1506,6 +1514,8 @@ def _patchset_view(db, root):
             has_review_item = True
         if w["type"] == core_db.WORK_ITEM_TYPE_PREPARE:
             has_prepare_item = True
+        if w["id"] > latest.get(w["type"], (-1, None))[0]:
+            latest[w["type"]] = (w["id"], w["state"])
         work_items.append({
             "id":            w["id"],
             "type":          type_name,
@@ -1553,6 +1563,20 @@ def _patchset_view(db, root):
     else:
         prepare_request = {"available": True, "reason": None}
 
+    # The Pipeline chip — the same derivation as /my-patchsets, fed from
+    # the facts this page already loads (the latest prepare / review
+    # work-item states come from the history walk above). A corpus
+    # patchset's base state reads "gathered" rather than "uploaded".
+    label, badge = _upload_status(
+        {"has_metadata":  metadata is not None,
+         "has_ai_review": ai_review is not None,
+         "prepare_state": latest.get(core_db.WORK_ITEM_TYPE_PREPARE,
+                                     (None, None))[1],
+         "review_state":  latest.get(core_db.WORK_ITEM_TYPE_REVIEW,
+                                     (None, None))[1]},
+        base_label="uploaded" if patchset["is_uploaded"] else "gathered")
+    pipeline = {"label": label, "badge": badge}
+
     return {
         "patchset":   patchset,
         "tags":       tags,
@@ -1564,6 +1588,7 @@ def _patchset_view(db, root):
         "work_items": work_items,
         "review_request": review_request,
         "prepare_request": prepare_request,
+        "pipeline":   pipeline,
     }
 
 

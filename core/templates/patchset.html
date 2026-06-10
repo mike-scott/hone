@@ -305,13 +305,27 @@
         {% if patchset.change_id %}<code class="text-break">{{ patchset.change_id }}</code>
         {% else %}—{% endif %}
       </dd>
+      {# Where the patchset sits in the pipeline — gathered/uploaded →
+         preparing → prepared → reviewing → reviewed, failure states in
+         red/yellow. Derived (same rule as /my-patchsets' chip), not the
+         corpus state column. #}
+      <dt class="col-5">Pipeline</dt>
+      <dd class="col-7">
+        <span class="badge {{ pipeline.badge }}">{{ pipeline.label }}</span>
+      </dd>
+      {% if patchset.is_skipped %}
+      {# Only the abnormal ingest disposition gets a Corpus state row —
+         gather refused this thread, so the pipeline above will never
+         advance. "gathered" would carry no information here. #}
       <dt class="col-5">Corpus state</dt>
       <dd class="col-7">
-        <span class="badge text-bg-secondary">{{ patchset.state_display }}</span>
+        <span class="badge text-bg-warning">
+          <i class="bi bi-exclamation-triangle-fill me-1"></i>skipped</span>
         {% if patchset.skip_reason %}
         <span class="text-muted ms-1">({{ patchset.skip_reason }})</span>
         {% endif %}
       </dd>
+      {% endif %}
       {% if tags %}
       <dt class="col-5">List tags</dt>
       <dd class="col-7">
