@@ -619,3 +619,74 @@ def test_cli_backend_failure_preserves_partial_trace(monkeypatch):
     assert exc.trace[0]["text"] == "Looking at the patch."
     assert exc.trace[1]["name"] == "Read"
     assert exc.trace[2]["chars"] == 42
+
+
+# --- pre-prompt CLI update (pinned image, current fleet) --------------------
+
+def test_cli_backend_checks_for_updates_before_the_prompt(monkeypatch):
+    """With HONE_CLAUDE_AUTOUPDATE on (the default), the CLI path runs
+       `claude update` before launching the prompt subprocess."""
+    monkeypatch.setenv("HONE_CLAUDE_AUTOUPDATE", "1")
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(list(cmd))
+        class R: returncode, stdout, stderr = 0, "already current", ""
+        return R()
+    monkeypatch.setattr(ai.subprocess, "run", fake_run)
+    state = _patch_popen(monkeypatch, events=[_envelope()])
+    ai.call_claude(_CliCfg(), "s", "u")
+    assert ["claude", "update"] in calls
+    assert state["cmd"][0] == "claude"            # the prompt still ran
+
+
+def test_update_cli_is_skipped_when_opted_out(monkeypatch):
+    """HONE_CLAUDE_AUTOUPDATE=0 (air-gapped deployments — and the test
+       suite's autouse default) never spawns the update subprocess."""
+    def boom(*a, **kw):
+        raise AssertionError("update must not run when opted out")
+    monkeypatch.setattr(ai.subprocess, "run", boom)
+    ai._update_cli()                              # opt-out via conftest
+
+
+def test_update_cli_swallows_every_failure_mode(monkeypatch):
+    """Offline, a bad exit, a timeout, or no binary at all: the update is
+       best-effort and the prompt proceeds on the current version."""
+    monkeypatch.setenv("HONE_CLAUDE_AUTOUPDATE", "1")
+    monkeypatch.delenv("HONE_CLAUDE_BIN_DIR", raising=False)
+
+    def failing(rc=1):
+        class R: returncode, stdout, stderr = rc, "", "registry unreachable"
+        return lambda *a, **kw: R()
+    monkeypatch.setattr(ai.subprocess, "run", failing())
+    ai._update_cli()                              # rc=1 — no raise
+
+    def raise_timeout(*a, **kw):
+        raise ai.subprocess.TimeoutExpired(cmd="claude update", timeout=1)
+    monkeypatch.setattr(ai.subprocess, "run", raise_timeout)
+    ai._update_cli()                              # timeout — no raise
+
+    def raise_missing(*a, **kw):
+        raise FileNotFoundError("claude")
+    monkeypatch.setattr(ai.subprocess, "run", raise_missing)
+    ai._update_cli()                              # no binary — no raise
+
+
+def test_ensure_persistent_cli_seeds_the_volume_copy_once(monkeypatch, tmp_path):
+    """First use copies the image's pinned binary into
+       HONE_CLAUDE_BIN_DIR (the persistent volume, first on PATH) so
+       self-updates land there — no overlay-layer churn, and the updated
+       CLI survives container recreates. A second call is a no-op."""
+    src = tmp_path / "image" / "claude"
+    src.parent.mkdir()
+    src.write_bytes(b"pinned-binary")
+    bin_dir = tmp_path / "data" / "bin"
+    monkeypatch.setenv("HONE_CLAUDE_BIN_DIR", str(bin_dir))
+    monkeypatch.setattr(ai.shutil, "which", lambda name: str(src))
+    ai._ensure_persistent_cli()
+    dst = bin_dir / "claude"
+    assert dst.read_bytes() == b"pinned-binary"
+    # Second call leaves an (updated) volume copy alone.
+    dst.write_bytes(b"self-updated")
+    ai._ensure_persistent_cli()
+    assert dst.read_bytes() == b"self-updated"

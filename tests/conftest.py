@@ -83,3 +83,12 @@ def pytest_configure(config):
             f"container images pin python:{want[0]}.{want[1]} — re-create the "
             f"venv with python{want[0]}.{want[1]} so the test environment "
             f"matches the runtime.")
+
+
+@pytest.fixture(autouse=True)
+def _no_claude_autoupdate(monkeypatch):
+    """node/ai runs `claude update` before every CLI prompt by default
+       (HONE_CLAUDE_AUTOUPDATE). Tests must never reach the network or
+       the dev machine's real `claude` binary — force the opt-out; the
+       dedicated update tests re-enable it explicitly."""
+    monkeypatch.setenv("HONE_CLAUDE_AUTOUPDATE", "0")

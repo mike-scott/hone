@@ -90,7 +90,7 @@ RUN (getent group ${HONE_CLAUDE_CLI_GROUP} \
  && useradd --create-home \
             --uid ${HONE_CLAUDE_CLI_USER} \
             --gid ${HONE_CLAUDE_CLI_GROUP} hone \
- && mkdir -p /data/linux /data/scratch \
+ && mkdir -p /data/linux /data/scratch /data/bin \
  && chown -R ${HONE_CLAUDE_CLI_USER}:${HONE_CLAUDE_CLI_GROUP} /data
 
 # Application code. common/ is shared with hone-core; node/ is the worker.
@@ -106,21 +106,30 @@ USER hone
 # $HOME/.claude (the operator bind-mounts ${HOME}/.claude from the host
 # in docker-compose when running HONE_CLAUDE_BACKEND=cli).
 #
-# CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC disables Claude Code's non-essential
-# outbound calls — telemetry (Statsig), error reporting (Sentry), the
-# auto-updater, and the bug-report command (umbrella flag for DISABLE_TELEMETRY
-# / DISABLE_ERROR_REPORTING / DISABLE_AUTOUPDATER / DISABLE_BUG_COMMAND). An
-# unattended review worker has no use for any of it, and crucially this traffic
-# does NOT honour ANTHROPIC_BASE_URL — it dials Anthropic's own domains, so
-# behind a corporate SSL-inspecting proxy it fails the TLS handshake with a
-# "self-signed certificate" error. Baked in; override via compose `environment`
-# if a deployment ever needs it on.
+# Telemetry (Statsig), error reporting (Sentry), and the bug-report
+# command are disabled individually — an unattended review worker has no
+# use for them, and crucially this traffic does NOT honour
+# ANTHROPIC_BASE_URL — it dials Anthropic's own domains, so behind a
+# corporate SSL-inspecting proxy it fails the TLS handshake with a
+# "self-signed certificate" error. Deliberately NOT the
+# CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC umbrella: that would also
+# kill the updater, and the node runs `claude update` before each
+# prompt (node/ai.py _update_cli; HONE_CLAUDE_AUTOUPDATE=0 opts out).
+#
+# The image's /usr/local/bin/claude stays the pinned, SHA-verified seed
+# (reproducible builds, never fails on a bad upstream release). Updates
+# live at HONE_CLAUDE_BIN_DIR on the persistent volume — first on PATH,
+# seeded from the pinned binary on first use — so self-updates never
+# churn the container's overlay layer and survive container recreates.
 ENV HOME=/home/hone \
     HONE_DATA=/data \
     HONE_REPO_DIR=/data/linux \
     HONE_SCRATCH_DIR=/data/scratch \
-    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
-    DISABLE_TELEMETRY=1
+    HONE_CLAUDE_BIN_DIR=/data/bin \
+    PATH=/home/hone/.local/bin:/data/bin:${PATH} \
+    DISABLE_TELEMETRY=1 \
+    DISABLE_ERROR_REPORTING=1 \
+    DISABLE_BUG_COMMAND=1
 VOLUME ["/data"]
 
 # No EXPOSE and no HEALTHCHECK: the node serves nothing and only dials out.

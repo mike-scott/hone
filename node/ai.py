@@ -19,7 +19,9 @@ Why a thin wrapper instead of calling the SDK from each handler:
 import contextlib
 import json
 import logging
+import os
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -305,6 +307,71 @@ def _cli_failure_text(stderr, result_event, trace):
 # truly-wedged subprocess won't pin the node forever.
 _CLI_TIMEOUT_SECONDS = 600
 
+# `claude update` budget before a prompt: a no-op check is ~a second; an
+# actual update downloads the ~230 MB binary. On timeout the turn just
+# proceeds on the current version.
+_CLI_UPDATE_TIMEOUT_SECONDS = 300
+
+
+def _ensure_persistent_cli():
+    """Seed the volume copy of the CLI from the image's pinned binary.
+
+       The image bakes a SHA-verified `claude` at /usr/local/bin (a
+       reproducible, pinned build); self-updates must NOT land in the
+       container's overlay layer (copy-up churn, lost on recreate), so
+       the Dockerfile sets HONE_CLAUDE_BIN_DIR=/data/bin — on the
+       persistent volume, first on PATH — and this copies the pinned
+       binary there once. `claude update` then maintains the volume
+       copy: zero layer churn, and the updated CLI survives container
+       recreates. No-op outside the container (env unset) or once the
+       copy exists."""
+    bin_dir = os.environ.get("HONE_CLAUDE_BIN_DIR")
+    if not bin_dir:
+        return
+    dst = os.path.join(bin_dir, "claude")
+    if os.path.exists(dst):
+        return
+    src = shutil.which("claude")
+    if not src or os.path.realpath(src) == os.path.realpath(dst):
+        return
+    os.makedirs(bin_dir, exist_ok=True)
+    tmp = dst + ".tmp"
+    shutil.copy2(src, tmp)
+    os.replace(tmp, dst)                 # atomic — a crash never leaves
+    log.info("claude CLI: seeded %s from %s", dst, src)
+
+
+def _update_cli():
+    """Check for (and install) a CLI update before running a prompt.
+
+       The image pins a SHA-verified version so builds are reproducible
+       and never fail on a bad upstream release; this keeps the RUNNING
+       fleet current without rebuilding. Best-effort by design: offline,
+       a registry error, a timeout, or a missing binary all log and fall
+       through — the prompt proceeds on the current version. Opt out
+       with HONE_CLAUDE_AUTOUPDATE=0 (air-gapped deployments)."""
+    if os.environ.get("HONE_CLAUDE_AUTOUPDATE", "1").lower() in (
+            "0", "false", "no", "off"):
+        return
+    try:
+        _ensure_persistent_cli()
+        r = subprocess.run(["claude", "update"], capture_output=True,
+                           text=True, timeout=_CLI_UPDATE_TIMEOUT_SECONDS)
+        out = ((r.stdout or "") + (r.stderr or "")).strip()
+        last = out.splitlines()[-1] if out else "ok"
+        if r.returncode == 0:
+            log.info("claude update: %s", last)
+        else:
+            log.warning("claude update failed (rc=%d): %s — proceeding "
+                        "on current version", r.returncode, last[:300])
+    except FileNotFoundError:
+        pass         # no CLI at all — the prompt path raises the real error
+    except subprocess.TimeoutExpired:
+        log.warning("claude update timed out after %ds — proceeding on "
+                    "current version", _CLI_UPDATE_TIMEOUT_SECONDS)
+    except OSError:
+        log.exception("claude update failed — proceeding on current version")
+
 
 def _parse_event(line):
     """One stream-json line → a dict, or None for blank / non-JSON lines
@@ -422,6 +489,10 @@ def _call_claude_cli(cfg, system, user_text, *, model, tools=None, cwd=None):
        auth-state signal: a non-zero exit with a message like 'Please run
        `claude` to log in', classified into the SDK path's category
        vocabulary."""
+    # Update check before every prompt (HONE_CLAUDE_AUTOUPDATE=0 opts
+    # out). The image pins a SHA-verified CLI; this keeps the running
+    # fleet current — see _update_cli / _ensure_persistent_cli.
+    _update_cli()
     chosen = model or DEFAULT_MODEL
     cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose",
            "--system-prompt", system]
