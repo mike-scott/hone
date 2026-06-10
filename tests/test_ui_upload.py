@@ -329,7 +329,9 @@ def test_uploader_can_request_review_of_their_own_upload(tmp_path):
     r = rex.client.post(f"/review-requests/{root}", follow_redirects=False)
     assert r.status_code == 303
     body = rex.client.get(f"/patchsets/{root}").text
-    assert "Awaiting prepare" in body or "Request review" in body
+    # The upload's auto-enqueued prepare is in the queue — the uploader
+    # sees the pipeline chip; no action is executable for them yet.
+    assert ">preparing<" in body
 
     # A different no-grant user still gets the 403 on the same upload.
     bob_id = core_db.create_user(ctx.db, "bob2@x", "bob2", "local")

@@ -132,20 +132,22 @@ def test_review_button_offered_once_prepared(ctx):
     assert f'action="/review-requests/{quote("r1@x")}"' in body
 
 
-def test_review_button_disabled_before_prepare(ctx):
-    """Without a patchset_metadata row (prepare not done), the button is
-       disabled — review can't be enqueued until prepare lands."""
+def test_no_review_action_before_prepare(ctx):
+    """Without a patchset_metadata row (prepare not done) no review
+       control renders at all — the pertinent action is Request prepare,
+       and the chip carries the status."""
     core_db.upsert_patchset(ctx.db, "<r1@x>", subject="[PATCH] x",
                              n_patches=1, submitter_email="a@x")
     body = ctx.client.get(f"/patchsets/{quote('r1@x')}").text
-    assert "Awaiting prepare" in body
-    assert "disabled" in body
+    assert "Request prepare" in body
+    assert "Request review" not in body
+    assert ">gathered<" in body
 
 
 def test_request_review_enqueues_and_dims_button(ctx):
     """POSTing the review request enqueues a review work-item (303 back to
-       the detail page), and the button then reads 'Review queued' and is
-       disabled — the dim-once-present behaviour."""
+       the detail page); the active button is then gone — the chip reads
+       reviewing and the pertinent action becomes the admin Cancel."""
     _plant_patchset(ctx.db)
     r = ctx.client.post(f"/review-requests/{quote('r1@x')}",
                         follow_redirects=False)
@@ -157,8 +159,9 @@ def test_request_review_enqueues_and_dims_button(ctx):
         (core_db.WORK_ITEM_TYPE_REVIEW, "r1@x")).fetchone()[0]
     assert n == 1
     body = ctx.client.get(f"/patchsets/{quote('r1@x')}").text
-    assert "Review queued" in body
     assert "Request review" not in body           # active button gone
+    assert ">reviewing<" in body                  # the chip carries status
+    assert "Cancel review" in body                # admin escape hatch
 
 
 def test_request_review_is_idempotent(ctx):
@@ -604,19 +607,21 @@ def test_prepare_button_offered_when_not_prepared(ctx):
     assert f'action="/prepare-requests/{quote("r1@x")}"' in body
 
 
-def test_prepare_button_reads_complete_once_prepared(ctx):
+def test_no_prepare_action_once_prepared(ctx):
     """Once the patchset_metadata row exists (prepare's terminal
-       product) the button dims to 'Prepare complete'."""
+       product) no prepare control renders — the pertinent action moves
+       on to Request review."""
     _plant_patchset(ctx.db)                       # plants patchset_metadata
     body = ctx.client.get(f"/patchsets/{quote('r1@x')}").text
-    assert "Prepare complete" in body
-    assert "Request prepare" not in body          # active button gone
+    assert "Request prepare" not in body
+    assert "Cancel prepare" not in body
+    assert "Request review" in body
 
 
 def test_request_prepare_enqueues_and_dims_button(ctx):
     """POSTing the prepare request enqueues a prepare work-item (303
-       back to the detail page); the button then reads 'Prepare queued'
-       — same dim-once-present behaviour as the review trigger."""
+       back to the detail page); the active button is then gone — the
+       chip reads preparing and the admin Cancel takes its place."""
     core_db.upsert_patchset(ctx.db, "<r1@x>", subject="[PATCH] x",
                              n_patches=1, submitter_email="a@x")
     r = ctx.client.post(f"/prepare-requests/{quote('r1@x')}",
@@ -627,8 +632,9 @@ def test_request_prepare_enqueues_and_dims_button(ctx):
         (core_db.WORK_ITEM_TYPE_PREPARE, "r1@x")).fetchone()[0]
     assert n == 1
     body = ctx.client.get(f"/patchsets/{quote('r1@x')}").text
-    assert "Prepare queued" in body
     assert "Request prepare" not in body
+    assert ">preparing<" in body
+    assert "Cancel prepare" in body
 
 
 def test_request_prepare_is_idempotent(ctx):
@@ -749,14 +755,14 @@ def test_detail_skipped_patchset_shows_decorated_corpus_state(ctx):
 # --- admin cancel of a queued prepare ----------------------------------------
 
 def test_admin_can_cancel_a_queued_prepare_from_the_patchset_page(ctx):
-    """The dimmed "Prepare queued" button gains an admin Cancel beside it
-       (the work-item cancel endpoint, back-linked here); cancelling
-       deletes the row and re-arms Request prepare."""
+    """A queued prepare's pertinent admin action is Cancel prepare (the
+       work-item cancel endpoint, back-linked here); cancelling deletes
+       the row and re-arms Request prepare."""
     core_db.upsert_patchset(ctx.db, "<r1@x>", subject="[PATCH] x",
                              n_patches=1, submitter_email="a@x")
     core_db.maybe_enqueue_prepare(ctx.db, "<r1@x>")
     body = ctx.client.get(f"/patchsets/{quote('r1@x')}").text
-    assert "Prepare queued" in body
+    assert ">preparing<" in body
     assert "Cancel prepare" in body
     m = re.search(r'action="(/work-items/\d+/cancel[^"]*)"', body)
     assert m
@@ -781,8 +787,9 @@ def test_cancel_prepare_not_offered_while_the_item_is_claimed(ctx):
         ctx.db, "node-1", methodology_version=1,
         types=(core_db.WORK_ITEM_TYPE_PREPARE,)) is not None
     body = ctx.client.get(f"/patchsets/{quote('r1@x')}").text
-    assert "Prepare queued" in body
+    assert ">preparing<" in body                  # the chip still tells
     assert "Cancel prepare" not in body
+    assert "Request prepare" not in body
 
 
 def test_cancel_prepare_is_admin_only(tmp_path, fake_admin_session):
@@ -806,5 +813,97 @@ def test_cancel_prepare_is_admin_only(tmp_path, fake_admin_session):
                              uploaded_by_user_id=uid)
     core_db.maybe_enqueue_prepare(db, "<r1@x>", requested_by_user_id=uid)
     body = TestClient(app).get(f"/patchsets/{quote('r1@x')}").text
-    assert "Prepare queued" in body
+    assert ">preparing<" in body                  # the chip still tells
     assert "Cancel prepare" not in body
+
+
+# --- pipeline action cluster: cancel review + per-role visibility ------------
+
+def test_admin_can_cancel_a_queued_review_from_the_patchset_page(ctx):
+    """Symmetry with cancel-prepare: a queued review's pertinent admin
+       action is Cancel review; cancelling deletes the row and re-arms
+       Request review."""
+    _plant_patchset(ctx.db)                       # prepared
+    ctx.client.post(f"/review-requests/{quote('r1@x')}",
+                    follow_redirects=False)
+    body = ctx.client.get(f"/patchsets/{quote('r1@x')}").text
+    assert "Cancel review" in body
+    m = re.search(r'action="(/work-items/\d+/cancel[^"]*)"', body)
+    assert m
+    r = ctx.client.post(m.group(1).replace("&amp;", "&"),
+                        follow_redirects=False)
+    assert r.status_code == 303
+    n = ctx.db.execute(
+        "SELECT COUNT(*) FROM work_items WHERE type=?",
+        (core_db.WORK_ITEM_TYPE_REVIEW,)).fetchone()[0]
+    assert n == 0
+    body = ctx.client.get(f"/patchsets/{quote('r1@x')}").text
+    assert "Request review" in body
+    assert "Cancel review" not in body
+
+
+def test_maintainer_sees_requests_and_delete_but_never_cancels(tmp_path):
+    """A maintainer can request work on any corpus patchset and delete a
+       review, but work-item cancellation is operator-only — in the
+       queued states they get the chip and no buttons."""
+    from core import auth
+    db = core_db.connect(str(tmp_path / "hone.db"))
+    uid = core_db.create_user(db, "м@x", "maint", "local")
+    core_db.set_user_state(db, uid, "approved")
+    core_db.set_user_maintainer(db, uid, True)
+    maint = auth.SessionUser(id=uid, email="м@x", display_name="maint",
+                             is_config_admin=False, is_maintainer=True)
+    app = FastAPI()
+    app.include_router(ui.router)
+    app.dependency_overrides[auth.require_session] = lambda: maint
+    app.dependency_overrides[auth.require_csrf] = lambda: None
+    app.state.db = db
+    client = TestClient(app)
+    url = f"/patchsets/{quote('r1@x')}"
+
+    core_db.upsert_patchset(db, "<r1@x>", subject="[PATCH] x",
+                             n_patches=1, submitter_email="a@x")
+    assert "Request prepare" in client.get(url).text
+
+    core_db.maybe_enqueue_prepare(db, "<r1@x>")
+    body = client.get(url).text
+    assert ">preparing<" in body
+    assert "Cancel prepare" not in body
+
+    core_db.upsert_patchset_metadata(
+        db, "<r1@x>", mode="heuristic",
+        tree_state={}, subsystem={}, patch_size={}, maintainer={},
+        patch_type={}, review_intensity={}, preparation_notes={})
+    assert "Request review" in client.get(url).text
+
+    core_db.enqueue_review(db, "<r1@x>")
+    body = client.get(url).text
+    assert ">reviewing<" in body
+    assert "Cancel review" not in body
+
+    core_db.upsert_ai_review(db, "<r1@x>", concerns=[])
+    body = client.get(url).text
+    assert "Delete review" in body
+    assert "Cancel prepare" not in body and "Cancel review" not in body
+
+
+def test_pipeline_chip_visible_to_a_user_with_no_actions(tmp_path):
+    """A regular user on a corpus patchset gets no buttons (no
+       _can_act_on_patchset grant) but still sees the pipeline chip —
+       'no action' must not mean 'no information'."""
+    from core import auth
+    db = core_db.connect(str(tmp_path / "hone.db"))
+    uid = core_db.create_user(db, "bob@x", "bob", "local")
+    core_db.set_user_state(db, uid, "approved")
+    bob = auth.SessionUser(id=uid, email="bob@x", display_name="bob",
+                           is_config_admin=False)
+    app = FastAPI()
+    app.include_router(ui.router)
+    app.dependency_overrides[auth.require_session] = lambda: bob
+    app.state.db = db
+    core_db.upsert_patchset(db, "<r1@x>", subject="[PATCH] x",
+                             n_patches=1, submitter_email="a@x")
+    body = TestClient(app).get(f"/patchsets/{quote('r1@x')}").text
+    assert ">gathered<" in body
+    assert "Request prepare" not in body
+    assert "Request review" not in body

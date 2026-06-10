@@ -51,84 +51,45 @@
 
 <div class="d-flex align-items-center justify-content-between">
   <h2 class="h5 mb-0">AI review</h2>
-  {# Manual review trigger — review is operator-requested, not auto-
-     enqueued. Offered only when prepare is done and no review exists or
-     is in flight; otherwise a dimmed button states why. When a review
-     exists, a Delete button sits beside it: it drops the ai_review and
-     its review work-item so a fresh review can be requested. The whole
-     cluster renders only for callers _can_act_on_patchset allows
-     (maintainers / admins, or the uploader of this uploaded patchset);
-     the POST handlers enforce the same rule. #}
-  {% if can_act_on_patchset %}
-  <div class="d-flex gap-2">
-  {# Manual prepare trigger — prepare is normally enqueued by the
-     pipeline, so an active button here means that didn't happen (or
-     the item was cancelled). Mirrors the review button's offered /
-     dimmed-with-reason pattern. #}
-  {% if prepare_request.available %}
-  <form method="post"
-        action="/prepare-requests/{{ patchset.root_message_id | urlencode }}"
-        class="m-0">
-    {{ csrf_field(request) }}
-    <button type="submit" class="btn btn-sm btn-primary">
-      <i class="bi bi-play-circle me-1"></i>Request prepare
-    </button>
-  </form>
-  {% else %}
-  {% set _prep_label = {"queued": "Prepare queued",
-                        "done":   "Prepare complete"} %}
-  <button type="button" class="btn btn-sm btn-outline-secondary" disabled
-          title="{% if prepare_request.reason == 'queued' %}a prepare work-item already exists for this patchset{% else %}this patchset already has its preparation metadata{% endif %}">
-    <i class="bi bi-play-circle me-1"></i>{{ _prep_label.get(prepare_request.reason, "Request prepare") }}
-  </button>
-  {# Admin-only cancel for the queued (unheld) prepare — same endpoint
-     as the work-item detail page's Cancel button; deleting the row
-     re-arms Request prepare on the redirect back here. Absent while
-     the item is claimed (an in-flight prepare keeps its lease). #}
-  {% if prepare_request.cancel_url and current_user.is_config_admin %}
-  <form method="post" action="{{ prepare_request.cancel_url }}"
-        class="m-0"
-        onsubmit="return confirm('Cancel the queued prepare work-item? The request button re-arms afterwards.');">
-    {{ csrf_field(request) }}
-    <button type="submit" class="btn btn-sm btn-outline-danger"
-            title="cancel the queued prepare work-item">
-      <i class="bi bi-x-circle me-1"></i>Cancel prepare
-    </button>
-  </form>
-  {% endif %}
-  {% endif %}
-  {% if review_request.available %}
-  <form method="post"
-        action="/review-requests/{{ patchset.root_message_id | urlencode }}"
-        class="m-0">
-    {{ csrf_field(request) }}
-    <button type="submit" class="btn btn-sm btn-primary">
-      <i class="bi bi-play-circle me-1"></i>Request review
-    </button>
-  </form>
-  {% else %}
-  {% set _label = {"queued":       "Review queued",
-                   "done":         "Review complete",
-                   "needs-prepare":"Awaiting prepare"} %}
-  <button type="button" class="btn btn-sm btn-outline-secondary" disabled
-          title="{% if review_request.reason == 'needs-prepare' %}a prepare task must complete before a review can be requested{% elif review_request.reason == 'queued' %}a review work-item already exists for this patchset{% else %}this patchset already has a completed review{% endif %}">
-    <i class="bi bi-play-circle me-1"></i>{{ _label.get(review_request.reason, "Request review") }}
-  </button>
-  {% endif %}
-  {% if ai_review %}
-  <form method="post"
-        action="/review-requests/{{ patchset.root_message_id | urlencode }}/delete"
-        class="m-0"
-        onsubmit="return confirm('Delete this AI review and its review work-item? This cannot be undone.');">
-    {{ csrf_field(request) }}
-    <button type="submit" class="btn btn-sm btn-outline-danger"
-            title="delete the AI review and the review work-item that produced it">
-      <i class="bi bi-trash me-1"></i>Delete review
-    </button>
-  </form>
-  {% endif %}
+  {# Pipeline cluster: the status chip (everyone — it carries what the
+     old dimmed placeholder buttons used to say), then only the actions
+     executable in the CURRENT state, at most one. _patchset_view
+     decides what's pertinent (pipeline_actions); each entry's
+     `permission` mirrors what its POST endpoint enforces — "act" =
+     _can_act_on_patchset (maintainers / admins / the uploader of this
+     uploaded patchset), "admin" = work-item cancellation, an operator
+     action (_require_work_item_action). #}
+  <div class="d-flex gap-2 align-items-center">
+    <span class="badge {{ pipeline.badge }}">{{ pipeline.label }}</span>
+    {% if can_act_on_patchset %}
+    {% set _action_ui = {
+        "request-prepare": ("bi-play-circle", "btn-primary",
+                            "Request prepare", none),
+        "request-review":  ("bi-play-circle", "btn-primary",
+                            "Request review", none),
+        "cancel-prepare":  ("bi-x-circle", "btn-outline-danger",
+                            "Cancel prepare",
+                            "Cancel the queued prepare work-item? The request button re-arms afterwards."),
+        "cancel-review":   ("bi-x-circle", "btn-outline-danger",
+                            "Cancel review",
+                            "Cancel the queued review work-item? The request button re-arms afterwards."),
+        "delete-review":   ("bi-trash", "btn-outline-danger",
+                            "Delete review",
+                            "Delete this AI review and its review work-item? This cannot be undone."),
+    } %}
+    {% for a in pipeline_actions
+         if a.permission == "act" or current_user.is_config_admin %}
+    {% set icon, style, label, confirm_msg = _action_ui[a.kind] %}
+    <form method="post" action="{{ a.url }}" class="m-0"
+          {% if confirm_msg %}onsubmit="return confirm('{{ confirm_msg }}');"{% endif %}>
+      {{ csrf_field(request) }}
+      <button type="submit" class="btn btn-sm {{ style }}">
+        <i class="bi {{ icon }} me-1"></i>{{ label }}
+      </button>
+    </form>
+    {% endfor %}
+    {% endif %}
   </div>
-  {% endif %}
 </div>
 {% if ai_review %}
 <p class="text-muted small mb-2">

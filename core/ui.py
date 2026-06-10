@@ -1535,57 +1535,62 @@ def _patchset_view(db, root):
                                      w.get("requested_by_user_id")),
         })
 
-    # Review-request availability for the manual trigger. Review is no
-    # longer auto-enqueued (see gather._ingest_ref); the operator asks for
-    # it here. The button is offered only when prepare has produced the
-    # patchset_metadata row (the enqueue gate) and there isn't already a
-    # review work-item or a completed ai_review — so it dims once a review
-    # exists or is in flight. `reason` explains a disabled button.
-    if has_review_item:
-        review_request = {"available": False, "reason": "queued"}
-    elif ai_review is not None:
-        review_request = {"available": False, "reason": "done"}
-    elif metadata is None:
-        review_request = {"available": False, "reason": "needs-prepare"}
-    else:
-        review_request = {"available": True, "reason": None}
-
-    # Prepare-request availability for its manual trigger, mirroring the
-    # review one. Prepare is normally enqueued by the pipeline (gather /
-    # upload), so this button mostly matters when that didn't happen or
-    # the prepare work-item was cancelled. "done" once the metadata row
-    # exists (prepare's terminal product), "queued" while an item exists
-    # without it.
-    if metadata is not None:
-        prepare_request = {"available": False, "reason": "done"}
-    elif has_prepare_item:
-        prepare_request = {"available": False, "reason": "queued"}
-        # Admin escape hatch for a stuck queue: cancel the queued prepare
-        # right from this page (the template additionally gates on
-        # is_config_admin; the work-item cancel endpoint enforces it).
-        # Only an UNHELD item is cancellable — an in-flight (claimed)
-        # prepare keeps its lease, same rule as the work-item detail page.
-        wid, wstate = latest[core_db.WORK_ITEM_TYPE_PREPARE]
-        if wstate in (core_db.WORK_ITEM_STATE_CLAIMABLE,
-                      core_db.WORK_ITEM_STATE_DEFERRED):
-            prepare_request["cancel_url"] = (
-                f"/work-items/{wid}/cancel{work_item_back_qs}")
-    else:
-        prepare_request = {"available": True, "reason": None}
-
     # The Pipeline chip — the same derivation as /my-patchsets, fed from
     # the facts this page already loads (the latest prepare / review
     # work-item states come from the history walk above). A corpus
     # patchset's base state reads "gathered" rather than "uploaded".
+    prep_id,  prep_state = latest.get(core_db.WORK_ITEM_TYPE_PREPARE,
+                                      (None, None))
+    rev_id,   rev_state  = latest.get(core_db.WORK_ITEM_TYPE_REVIEW,
+                                      (None, None))
     label, badge = _upload_status(
         {"has_metadata":  metadata is not None,
          "has_ai_review": ai_review is not None,
-         "prepare_state": latest.get(core_db.WORK_ITEM_TYPE_PREPARE,
-                                     (None, None))[1],
-         "review_state":  latest.get(core_db.WORK_ITEM_TYPE_REVIEW,
-                                     (None, None))[1]},
+         "prepare_state": prep_state,
+         "review_state":  rev_state},
         base_label="uploaded" if patchset["is_uploaded"] else "gathered")
     pipeline = {"label": label, "badge": badge}
+
+    # The pipeline action cluster: only what is actually executable in
+    # the current state — the chip above carries the status, so there
+    # are no dimmed placeholder buttons. At most one action renders.
+    # `permission` is the visibility gate the template applies: "act"
+    # for anyone _can_act_on_patchset allows (admin / maintainer / the
+    # uploader of their own upload), "admin" for operator-only work-item
+    # cancellation — mirroring what the POST endpoints enforce
+    # (_can_act_on_patchset, _require_work_item_action). Cancels are
+    # offered only while the item is UNHELD (claimable / deferred); an
+    # in-flight claimed item keeps its lease, the same rule as the
+    # work-item detail page.
+    unheld = (core_db.WORK_ITEM_STATE_CLAIMABLE,
+              core_db.WORK_ITEM_STATE_DEFERRED)
+    pipeline_actions = []
+    if metadata is None:
+        if not has_prepare_item:
+            # Prepare is normally pipeline-enqueued — this is the
+            # recovery path when that didn't happen or it was cancelled.
+            pipeline_actions.append({
+                "kind": "request-prepare", "permission": "act",
+                "url": f"/prepare-requests/{quote(root)}"})
+        elif prep_state in unheld:
+            pipeline_actions.append({
+                "kind": "cancel-prepare", "permission": "admin",
+                "url": f"/work-items/{prep_id}/cancel{work_item_back_qs}"})
+    elif ai_review is None:
+        if not has_review_item:
+            # Review is operator-requested, never auto-enqueued (see
+            # gather._ingest_ref) — prepare's metadata row gates it.
+            pipeline_actions.append({
+                "kind": "request-review", "permission": "act",
+                "url": f"/review-requests/{quote(root)}"})
+        elif rev_state in unheld:
+            pipeline_actions.append({
+                "kind": "cancel-review", "permission": "admin",
+                "url": f"/work-items/{rev_id}/cancel{work_item_back_qs}"})
+    else:
+        pipeline_actions.append({
+            "kind": "delete-review", "permission": "act",
+            "url": f"/review-requests/{quote(root)}/delete"})
 
     return {
         "patchset":   patchset,
@@ -1596,9 +1601,8 @@ def _patchset_view(db, root):
         "series_concerns": series_concerns,
         "messages":   messages,
         "work_items": work_items,
-        "review_request": review_request,
-        "prepare_request": prepare_request,
         "pipeline":   pipeline,
+        "pipeline_actions": pipeline_actions,
     }
 
 
