@@ -91,6 +91,23 @@
           <dt class="col-sm-5">Claude CLI</dt>
           <dd class="col-sm-7"><code>{{ node.health_display.claude_version }}</code></dd>
           {% endif %}
+          {# % of each enabled token-budget window spent — absent when
+             the node has no budget configured (it's opt-in). #}
+          {% if node.health_display.token_budget %}
+          <dt class="col-sm-5">Token budget used</dt>
+          <dd class="col-sm-7">
+            {% if node.health_display.token_budget.exhausted %}
+            <span class="text-danger">
+              <i class="bi bi-exclamation-triangle-fill"></i>
+              {{ node.health_display.token_budget.text }} —
+              {{ node.health_display.token_budget.exhausted }} budget spent,
+              claiming paused until rollover
+            </span>
+            {% else %}
+            <code>{{ node.health_display.token_budget.text }}</code>
+            {% endif %}
+          </dd>
+          {% endif %}
         </dl>
         {% else %}
         <p class="text-muted mb-0 small">

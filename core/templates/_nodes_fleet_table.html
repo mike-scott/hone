@@ -80,6 +80,16 @@
             <code>{{ n.health_display.free_disk }}</code>
             <span class="text-muted ms-2">repo:</span>
             <code>{{ n.health_display.repo_size }}</code>
+            {% if n.health_display.token_budget %}
+            <span class="text-muted ms-2">budget:</span>
+            {% if n.health_display.token_budget.exhausted %}
+            <span class="text-danger"
+                  title="the {{ n.health_display.token_budget.exhausted }} token budget is spent — claiming paused until the window rolls over at UTC midnight">
+              {{ n.health_display.token_budget.text }}</span>
+            {% else %}
+            <code>{{ n.health_display.token_budget.text }}</code>
+            {% endif %}
+            {% endif %}
             {% else %}
             <span class="text-muted">—</span>
             {% endif %}

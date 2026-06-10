@@ -402,3 +402,72 @@ def test_node_detail_shows_claude_cli_version(ctx):
     body = ctx.client.get(f"/nodes/{nid}").text
     assert "Claude CLI" in body
     assert "2.1.161 (Claude Code)" in body
+
+
+def test_node_detail_shows_token_budget_percentages(ctx):
+    """The Health card shows % of each enabled budget window spent.
+       Only configured windows render (limit 0 = that cap is off)."""
+    now = int(time.time())
+    nid = _node(ctx.db, name="budgeted", last_seen=now,
+                health={"last_anthropic_error": None,
+                        "token_budget": {"day_tokens": 12_000_000,
+                                         "day_limit": 50_000_000,
+                                         "week_tokens": 183_000_000,
+                                         "week_limit": 300_000_000,
+                                         "exhausted": None}})
+    body = ctx.client.get(f"/nodes/{nid}").text
+    assert "Token budget used" in body
+    assert "day 24% · week 61%" in body
+    assert "claiming paused" not in body
+
+
+def test_node_detail_marks_an_exhausted_budget(ctx):
+    """A budget-paused node is called out, not left looking idle — the
+       node stopped claiming on purpose and resumes at rollover."""
+    now = int(time.time())
+    nid = _node(ctx.db, name="spent", last_seen=now,
+                health={"last_anthropic_error": None,
+                        "token_budget": {"day_tokens": 52_000_000,
+                                         "day_limit": 50_000_000,
+                                         "week_tokens": 100_000_000,
+                                         "week_limit": 0,
+                                         "exhausted": "daily"}})
+    body = ctx.client.get(f"/nodes/{nid}").text
+    # Not clamped: between-task enforcement can overshoot the cap.
+    assert "day 104%" in body
+    assert "week" not in body.split("Token budget used")[1][:200]
+    assert "claiming paused until rollover" in body
+
+
+def test_node_detail_hides_the_budget_row_when_not_configured(ctx):
+    """The budget is opt-in on the node: no caps (or an old node that
+       doesn't report the field) means no row at all."""
+    now = int(time.time())
+    nid = _node(ctx.db, name="uncapped", last_seen=now,
+                health={"last_anthropic_error": None,
+                        "token_budget": {"day_tokens": 9999, "day_limit": 0,
+                                         "week_tokens": 9999, "week_limit": 0,
+                                         "exhausted": None}})
+    assert "Token budget" not in ctx.client.get(f"/nodes/{nid}").text
+    nid = _node(ctx.db, name="old-node", last_seen=now,
+                health={"last_anthropic_error": None})
+    assert "Token budget" not in ctx.client.get(f"/nodes/{nid}").text
+
+
+def test_fleet_table_shows_token_budget_percentages(ctx):
+    """The node list's health cell carries the same %-spent figures, so
+       an operator can scan fleet-wide burn without clicking through."""
+    now = int(time.time())
+    _node(ctx.db, name="budgeted", last_seen=now,
+          health={"last_anthropic_error": None,
+                  "token_budget": {"day_tokens": 12_000_000,
+                                   "day_limit": 50_000_000,
+                                   "week_tokens": 183_000_000,
+                                   "week_limit": 300_000_000,
+                                   "exhausted": None}})
+    _node(ctx.db, name="uncapped", last_seen=now,
+          health={"last_anthropic_error": None})
+    body = ctx.client.get("/nodes").text
+    assert "budget:" in body
+    assert "day 24% · week 61%" in body
+    assert body.count("budget:") == 1            # opt-in: uncapped shows none

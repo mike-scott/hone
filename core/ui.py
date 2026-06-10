@@ -1641,6 +1641,33 @@ _ANTHROPIC_ERROR_LABELS = {
 }
 
 
+def _token_budget_display(tb):
+    """The node's token-budget usage as a "% of cap spent" string, e.g.
+       "day 24% · week 61%". Only enabled windows (limit > 0) appear —
+       the budget is opt-in on the node, so None (nothing to render)
+       covers unconfigured nodes, pre-field snapshots, and malformed
+       data alike. Deliberately NOT clamped at 100%: the node enforces
+       between tasks only, so a window can legitimately read 104%.
+       `exhausted` carries the node's own verdict ("daily" / "weekly")
+       so the template can mark a budget-paused node."""
+    if not isinstance(tb, dict):
+        return None
+    parts = []
+    for label, tokens_key, limit_key in (("day", "day_tokens", "day_limit"),
+                                         ("week", "week_tokens",
+                                          "week_limit")):
+        try:
+            limit = int(tb.get(limit_key) or 0)
+            tokens = int(tb.get(tokens_key) or 0)
+        except (TypeError, ValueError):
+            continue
+        if limit > 0:
+            parts.append(f"{label} {round(tokens * 100 / limit)}%")
+    if not parts:
+        return None
+    return {"text": " · ".join(parts), "exhausted": tb.get("exhausted")}
+
+
 def _health_display(health):
     """Turn a stored node-health JSON snapshot into the small dict the
        template renders. Returns None when the node hasn't reported
@@ -1658,6 +1685,9 @@ def _health_display(health):
         # The node's `claude --version` string from its latest health
         # snapshot — None for sdk-backend nodes or pre-field snapshots.
         "claude_version": health.get("claude_version"),
+        # %-of-cap spent per enabled budget window — None when the node
+        # has no token budget configured (it's opt-in).
+        "token_budget":   _token_budget_display(health.get("token_budget")),
     }
 
 
