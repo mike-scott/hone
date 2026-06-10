@@ -692,11 +692,16 @@ CREATE TABLE users (
 );
 """
 
-# Migration v4 — add a CHECK on users.auth_provider so the column matches
-# the style of users.state. SQLite has no ALTER TABLE … ADD CHECK, so rebuild
-# the table: create users_new with the constraint, copy every row, swap names.
-# Nothing FK-references users(id), so DROP TABLE is safe; the data shape is
-# unchanged, only the column-level invariant is tightened.
+# Migration v4 — the multi-user release:
+#
+#   - users.auth_provider gains a CHECK matching users.state's style.
+#     SQLite has no ALTER TABLE … ADD CHECK, so rebuild the table —
+#     and since we're rebuilding anyway, the per-user permission grants
+#     (is_admin, is_maintainer) ride in the new shape directly.
+#   - Node ownership (owner_user_id / handles_system) + enrollment
+#     pairing + work-item origin — the per-user queue machinery.
+#   - Patchset origin (gathered corpus vs web-UI upload).
+#   - Work-item deferral bookkeeping (defer_count).
 _SCHEMA_V4 = """
 CREATE TABLE users_new (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -710,7 +715,20 @@ CREATE TABLE users_new (
         CHECK (state IN ('pending', 'approved', 'revoked')),
     created_at    INTEGER NOT NULL,
     approved_at   INTEGER,
-    last_login_at INTEGER
+    last_login_at INTEGER,
+    -- Per-user admin grant: an admin can promote a regular account from
+    -- the Users screen. The config-token admin (HONE_ADMIN_TOKEN, no
+    -- users row) remains the bootstrap / backstop admin. Re-derived from
+    -- this column on every request (auth.current_session_user), so
+    -- granting or demoting takes effect on the user's next request —
+    -- same freshness as revoke.
+    is_admin      INTEGER NOT NULL DEFAULT 0
+        CHECK (is_admin IN (0, 1)),
+    -- Per-user maintainer grant: maintainers (and admins) browse the
+    -- gathered corpus and select patchsets for review; a regular account
+    -- only sees its own uploads. Same per-request re-derivation.
+    is_maintainer INTEGER NOT NULL DEFAULT 0
+        CHECK (is_maintainer IN (0, 1))
 );
 INSERT INTO users_new
     (id, email, password_hash, display_name, auth_provider, google_sub,
@@ -747,20 +765,14 @@ ALTER TABLE work_items ADD COLUMN requested_by_user_id INTEGER
     REFERENCES users(id) ON DELETE SET NULL;
 CREATE INDEX idx_work_items_user_claimable
     ON work_items(requested_by_user_id, state, type, enqueued_at);
-"""
 
-_SCHEMA_V5 = """
--- Per-user admin grant: an admin can promote a regular account from the
--- Users screen. The config-token admin (HONE_ADMIN_TOKEN, no users row)
--- remains the bootstrap / backstop admin; this flag extends the same
--- permission to accounts. The grant is re-derived from this column on
--- every request (auth.current_session_user), so granting or demoting
--- takes effect on the user's next request — same freshness as revoke.
-ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0
-    CHECK (is_admin IN (0, 1));
-"""
+-- Deferral bookkeeping: how many times a work item has come back
+-- `deferred` (base tree unobtainable). Drives the exponential re-offer
+-- backoff and the park-after-cap rule in submit_work_result — without
+-- it a permanently-unobtainable base retries every lease window,
+-- forever. Reset to 0 by the admin's release-deferred re-arm.
+ALTER TABLE work_items ADD COLUMN defer_count INTEGER NOT NULL DEFAULT 0;
 
-_SCHEMA_V6 = """
 -- Patchset origin: gathered from a list archive (the corpus — training
 -- data, maintainer-selected reviews) vs uploaded through the web UI (a
 -- submission: "review my series"). Uploaded patchsets are never training
@@ -774,26 +786,7 @@ ALTER TABLE patchsets ADD COLUMN uploaded_by_user_id INTEGER
     REFERENCES users(id) ON DELETE SET NULL;
 """
 
-_SCHEMA_V7 = """
--- Per-user maintainer grant: maintainers (and admins) can browse the
--- gathered corpus and select patchsets for review; a regular account
--- only sees its own uploads. Granted from the Users screen, re-derived
--- per request like is_admin (auth.current_session_user).
-ALTER TABLE users ADD COLUMN is_maintainer INTEGER NOT NULL DEFAULT 0
-    CHECK (is_maintainer IN (0, 1));
-"""
-
-_SCHEMA_V8 = """
--- Deferral bookkeeping: how many times a work item has come back
--- `deferred` (base tree unobtainable). Drives the exponential re-offer
--- backoff and the park-after-cap rule in submit_work_result — without
--- it a permanently-unobtainable base retries every lease window,
--- forever. Reset to 0 by the admin's release-deferred re-arm.
-ALTER TABLE work_items ADD COLUMN defer_count INTEGER NOT NULL DEFAULT 0;
-"""
-
-_MIGRATIONS = [_SCHEMA_V1, _SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4, _SCHEMA_V5,
-               _SCHEMA_V6, _SCHEMA_V7, _SCHEMA_V8]
+_MIGRATIONS = [_SCHEMA_V1, _SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4]
 
 
 # How long a connection waits on another connection's write lock before

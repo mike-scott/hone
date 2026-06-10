@@ -191,8 +191,8 @@ def test_v4_migration_preserves_v3_user_rows_and_enables_the_check(tmp_path):
 
     # Re-open via the runner — applies v4.
     db = core_db.connect(path)
-    # Head, not literally 4 — later migrations (v5+) run in the same
-    # pass; this test cares that the v3 data survives the chain.
+    # Head, not a literal number — this test cares that the v3 data
+    # survives the chain, whatever the chain's length is today.
     assert (db.execute("PRAGMA user_version").fetchone()[0]
             == len(core_db._MIGRATIONS))
 
@@ -227,10 +227,22 @@ def test_v4_migration_preserves_v3_user_rows_and_enables_the_check(tmp_path):
     assert enr["requested_by_user_id"] is None
 
     # Pre-existing work-items default to system origin (NULL) so they
-    # keep flowing to any system-handling node.
+    # keep flowing to any system-handling node, with a fresh deferral
+    # budget.
     wi = db.execute(
-        "SELECT requested_by_user_id FROM work_items").fetchone()
+        "SELECT requested_by_user_id, defer_count FROM work_items").fetchone()
     assert wi["requested_by_user_id"] is None
+    assert wi["defer_count"] == 0
+
+    # The kept user comes through with no grants; the planted patchset
+    # is gathered-origin.
+    kept = db.execute("SELECT is_admin, is_maintainer FROM users "
+                      "WHERE email='kept@x'").fetchone()
+    assert kept["is_admin"] == 0 and kept["is_maintainer"] == 0
+    ps = db.execute("SELECT origin, uploaded_by_user_id "
+                    "FROM patchsets").fetchone()
+    assert ps["origin"] == core_db.PATCHSET_ORIGIN_GATHERED
+    assert ps["uploaded_by_user_id"] is None
 
     # And the two new claim-path indexes are present (the work-items one
     # is what makes the owner-scoped claim fast; the nodes one supports
@@ -330,9 +342,9 @@ def test_require_session_redirects_when_no_session_is_present(db):
     assert "settings" in loc
 
 
-# --- v5: the per-user admin grant ------------------------------------------
+# --- the per-user admin grant ------------------------------------------
 
-def test_v5_users_carry_an_is_admin_grant(tmp_path):
+def test_users_carry_an_is_admin_grant(tmp_path):
     """is_admin defaults to 0 (no grant), set_user_admin flips it both
        ways, and the CHECK constraint rejects out-of-range values."""
     import sqlite3
