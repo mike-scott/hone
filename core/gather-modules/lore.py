@@ -190,6 +190,23 @@ def _series_total(subject):
     return int(nm.group(2)) if nm else None
 
 
+# `vN` inside the same bracket as PATCH, either side of the word —
+# `[PATCH v3 1/2]`, `[RFC PATCH v2]`, `[v4 PATCH]`. Mirrors
+# core/upload.py's _VERSION_RE (an upload is the same artifact).
+_SERIES_VERSION_RE = re.compile(
+    r'\[[^\]]*\bv(\d+)\b[^\]]*\bPATCH\b[^\]]*\]'
+    r'|\[[^\]]*\bPATCH\b[^\]]*\bv(\d+)\b[^\]]*\]', re.I)
+
+
+def _series_version(subject):
+    """The series version from a `[PATCH vN ...]` Subject; 1 when untagged
+       (a first posting carries no v marker)."""
+    m = _SERIES_VERSION_RE.search(subject or "")
+    if not m:
+        return 1
+    return int(m.group(1) or m.group(2))
+
+
 def _extract_base(raw):
     """The `base-commit:` trailer in a patch body, or None."""
     try:
@@ -635,6 +652,7 @@ class Lore(GatherModule):
                 submitter_email=msg["author_email"],
                 sent=msg["sent"],
                 n_patches=_series_total(msg["subject"]) or 1,
+                series_version=_series_version(msg["subject"]),
                 base_commit=_extract_base(msg["raw"]),
                 list_tags=msg["list_tags"],
                 skip_reason=("unresolved-date"

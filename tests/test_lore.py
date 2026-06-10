@@ -736,3 +736,32 @@ def test_refresh_is_best_effort(monkeypatch, tmp_path):
         raise OSError("git not found")
     monkeypatch.setattr(lore.subprocess, "run", raise_oserror)
     lore.Lore._refresh(str(tmp_path))             # OSError — no raise
+
+
+# --- series version ----------------------------------------------------------
+
+@pytest.mark.parametrize("subject,expected", [
+    ("[PATCH] foo: bar",              1),     # first posting, no marker
+    ("[PATCH 0/3] foo: series",       1),
+    ("[PATCH v2 1/4] foo: a",         2),
+    ("[RFC PATCH v3 0/2] foo",        3),
+    ("[v4 PATCH] foo: bar",           4),     # v before the word PATCH
+    ("[PATCH net-next v12 07/15] x",  12),
+    ("v2: no brackets at all",        1),     # marker must share the bracket
+    ("",                              1),
+])
+def test_series_version(subject, expected):
+    assert lore._series_version(subject) == expected
+
+
+def test_patchset_ref_carries_series_version(monkeypatch, tmp_path):
+    """REGRESSION: lore never parsed `[PATCH vN]`, so every gathered
+       patchset landed at the dataclass default of 1 and the detail page
+       showed v1 for everything."""
+    sha_msg = dict(_patchset("verfix", n=2))
+    sha_msg["sha-v3"] = _mbytes("cover-v3@x", "[PATCH v3 0/1] y: redo")
+    refs = _drive(monkeypatch, tmp_path, sha_msg)
+    by_root = {r.root_message_id: r for r in refs
+               if isinstance(r, lore.PatchsetRef)}
+    assert by_root["cover-verfix@x"].series_version == 1
+    assert by_root["cover-v3@x"].series_version == 3

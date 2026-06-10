@@ -786,7 +786,28 @@ ALTER TABLE patchsets ADD COLUMN uploaded_by_user_id INTEGER
     REFERENCES users(id) ON DELETE SET NULL;
 """
 
-_MIGRATIONS = [_SCHEMA_V1, _SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4]
+def _migrate_v5_series_version(db):
+    """Backfill patchsets.series_version from the stored subject. The lore
+       gather module didn't parse `[PATCH vN ...]` until now, so every
+       gathered row sits at the column default of 1; the subject the
+       version lives in was stored all along. Re-uses the upload parser —
+       the two subject grammars are deliberately identical."""
+    from core.upload import _series_version
+    for row in db.execute(
+            "SELECT root_message_id, subject FROM patchsets "
+            "WHERE subject IS NOT NULL").fetchall():
+        v = _series_version(row["subject"])
+        if v != 1:
+            db.execute(
+                "UPDATE patchsets SET series_version=? "
+                "WHERE root_message_id=?", (v, row["root_message_id"]))
+
+
+# A migration is either a DDL script (executescript) or a Python callable
+# taking the connection — for data fixes SQL can't express (v5 needs a
+# regex). Both run under the same user_version bookkeeping.
+_MIGRATIONS = [_SCHEMA_V1, _SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4,
+               _migrate_v5_series_version]
 
 
 # How long a connection waits on another connection's write lock before
@@ -881,9 +902,12 @@ def migrate(db):
        order. Idempotent: a current database is left untouched. Returns the
        resulting schema version."""
     have = db.execute("PRAGMA user_version").fetchone()[0]
-    for version, ddl in enumerate(_MIGRATIONS, start=1):
+    for version, mig in enumerate(_MIGRATIONS, start=1):
         if version > have:
-            db.executescript(ddl)
+            if callable(mig):
+                mig(db)
+            else:
+                db.executescript(mig)
             db.execute(f"PRAGMA user_version={version}")
             db.commit()
     return db.execute("PRAGMA user_version").fetchone()[0]
