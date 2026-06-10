@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+{% block title %}Reports · hone-core{% endblock %}
+{% block content %}
+
+<div class="d-flex align-items-center justify-content-between mb-1">
+  <h1 class="h3 mb-0">Reports</h1>
+  <span class="text-muted small">days are UTC · history is frozen at
+    each day's close</span>
+</div>
+<p class="text-muted small">
+  Daily figures materialize once per closed UTC day; "today" is the one
+  live bar (rendered faded). Counts before the first materialization are
+  reconstructed best-effort — work items cancelled or deleted before
+  then are not recoverable.
+</p>
+
+{% if not has_data %}
+<p class="text-muted">No activity recorded yet — charts appear once the
+  pipeline has processed work or users have been active.</p>
+{% else %}
+
+{# --- summary cards: the closed window + today ------------------------- #}
+<div class="row g-3 mb-4">
+  {% for label, value in (
+      ("Operations", "{:,}".format(totals.ops_total)),
+      ("Input tokens", "{:,}".format(totals.input_tokens)),
+      ("Output tokens", "{:,}".format(totals.output_tokens)),
+      ("Avg task duration", avg_duration_display),
+      ("Patchsets gathered", "{:,}".format(totals.patchsets_gathered)),
+      ("Uploaded", "{:,}".format(totals.patchsets_uploaded)),
+      ("Peak active users", "{:,}".format(totals.active_users)),
+      ("Peak active nodes", "{:,}".format(totals.nodes_active)),
+    ) %}
+  <div class="col-6 col-md-3 col-xl-auto flex-xl-fill">
+    <div class="card h-100">
+      <div class="card-body py-2 text-center">
+        <div class="fs-5 fw-semibold">{{ value }}</div>
+        <div class="text-muted small">{{ label }} <span class="text-muted">/ {{ report_days }}d</span></div>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+
+{# Each chart: a canvas + its full Chart.js config embedded as JSON; the
+   init script below instantiates them. The same numbers sit in a
+   collapsed table under each chart — the no-JS fallback and the
+   copy-paste surface. #}
+{% macro chart(key, title) %}
+<div class="card mb-4">
+  <div class="card-header py-2"><strong>{{ title }}</strong></div>
+  <div class="card-body">
+    <div class="report-chart">
+      <canvas data-report-chart="{{ key }}"></canvas>
+    </div>
+    <script type="application/json" id="chart-cfg-{{ key }}">{{ charts[key] | tojson }}</script>
+  </div>
+</div>
+{% endmacro %}
+
+<h2 class="h5">Operations</h2>
+{{ chart("ops_daily", "Per day, by task type (last " ~ report_days ~ " days)") }}
+{{ chart("ops_weekly", "Per ISO week, by task type (last " ~ report_weeks ~ " weeks)") }}
+{{ chart("outcomes_daily", "Per day, by outcome") }}
+
+<h2 class="h5">User activity</h2>
+{{ chart("users_daily", "Per day") }}
+{{ chart("users_weekly", "Per ISO week") }}
+
+<details class="mb-4">
+  <summary class="small text-muted">Daily numbers (table)</summary>
+  <div class="table-responsive mt-2">
+    <table class="table table-sm small">
+      <thead><tr><th>Day</th><th>Prep</th><th>Review</th><th>Train</th>
+        <th>Done</th><th>Defer</th><th>Unappl</th><th>Enq</th>
+        <th>Gathered</th><th>Uploads</th><th>Users</th><th>Nodes</th>
+        <th>Tok in</th><th>Tok out</th></tr></thead>
+      <tbody>
+      {% for r in daily_rows %}
+        <tr{% if r.partial %} class="text-muted fst-italic"{% endif %}>
+          <td>{{ r.label }}</td>
+          <td>{{ r.ops_prepare }}</td><td>{{ r.ops_review }}</td>
+          <td>{{ r.ops_train }}</td><td>{{ r.ops_completed }}</td>
+          <td>{{ r.ops_deferred }}</td><td>{{ r.ops_unappliable }}</td>
+          <td>{{ r.ops_enqueued }}</td><td>{{ r.patchsets_gathered }}</td>
+          <td>{{ r.patchsets_uploaded }}</td><td>{{ r.active_users }}</td>
+          <td>{{ r.nodes_active }}</td>
+          <td>{{ "{:,}".format(r.input_tokens) }}</td>
+          <td>{{ "{:,}".format(r.output_tokens) }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</details>
+
+<details class="mb-4">
+  <summary class="small text-muted">Weekly numbers (table — active
+    users / nodes are the week's peak day)</summary>
+  <div class="table-responsive mt-2">
+    <table class="table table-sm small">
+      <thead><tr><th>Week</th><th>Prep</th><th>Review</th><th>Train</th>
+        <th>Done</th><th>Defer</th><th>Unappl</th><th>Enq</th>
+        <th>Gathered</th><th>Uploads</th><th>Users</th><th>Nodes</th>
+        <th>Tok in</th><th>Tok out</th></tr></thead>
+      <tbody>
+      {% for r in weekly_rows %}
+        <tr{% if r.partial %} class="text-muted fst-italic"{% endif %}>
+          <td>{{ r.label }}{% if r.partial %} (running){% endif %}</td>
+          <td>{{ r.ops_prepare }}</td><td>{{ r.ops_review }}</td>
+          <td>{{ r.ops_train }}</td><td>{{ r.ops_completed }}</td>
+          <td>{{ r.ops_deferred }}</td><td>{{ r.ops_unappliable }}</td>
+          <td>{{ r.ops_enqueued }}</td><td>{{ r.patchsets_gathered }}</td>
+          <td>{{ r.patchsets_uploaded }}</td><td>{{ r.active_users }}</td>
+          <td>{{ r.nodes_active }}</td>
+          <td>{{ "{:,}".format(r.input_tokens) }}</td>
+          <td>{{ "{:,}".format(r.output_tokens) }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</details>
+
+<script src="/static/chart.umd.min.js"></script>
+<script>
+  // One Chart.js instance per canvas, config read from the adjacent
+  // embedded JSON — all chart CONTENT is server-computed (and unit-
+  // tested); the browser only draws.
+  document.querySelectorAll("[data-report-chart]").forEach(function (el) {
+    var cfg = JSON.parse(document.getElementById(
+      "chart-cfg-" + el.dataset.reportChart).textContent);
+    new Chart(el, cfg);
+  });
+</script>
+{% endif %}
+
+{% endblock %}

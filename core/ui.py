@@ -30,7 +30,7 @@ from fastapi.templating import Jinja2Templates
 
 from common.version import __version__ as VERSION
 from core import (auth, core_db, gather, methodology_format, patchview,
-                  runtime_config, upload)
+                  reports, runtime_config, upload)
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 templates = Jinja2Templates(directory=os.path.join(_HERE, "templates"))
@@ -2927,6 +2927,77 @@ def _methodology_view(db):
 # an operator can save one section without affecting the others.
 _SETTINGS_TABS = ("gather", "work_queue", "enrollment", "merge_gate",
                    "methodology", "tags", "deployment")
+# --- operator reports -------------------------------------------------------
+
+# Chart series specs: (daily_stats column, display label, hex color).
+# Fixed hexes (Bootstrap's palette values) — CSS theme variables can't
+# reach a <canvas>.
+_OPS_SEGMENTS = (("ops_prepare", "Prepare", "#0d6efd"),
+                 ("ops_review",  "Review",  "#198754"),
+                 ("ops_train",   "Train",   "#ffc107"))
+_OUTCOME_SEGMENTS = (("ops_completed",   "Completed",   "#198754"),
+                     ("ops_deferred",    "Deferred",    "#ffc107"),
+                     ("ops_unappliable", "Unappliable", "#dc3545"))
+_USER_SEGMENTS = (("patchsets_uploaded", "Uploads",            "#0dcaf0"),
+                  ("ops_user_origin",    "User-requested ops", "#6610f2"),
+                  ("active_users",       "Active users",       "#6c757d"))
+# Weekly active-users is the PEAK day, not a sum — say so in the legend.
+_USER_WEEK_SEGMENTS = (
+    ("patchsets_uploaded", "Uploads",                 "#0dcaf0"),
+    ("ops_user_origin",    "User-requested ops",      "#6610f2"),
+    ("active_users",       "Active users (peak day)", "#6c757d"))
+
+_REPORT_DAYS = 30
+_REPORT_WEEKS = 12
+
+
+@router.get("/reports", response_class=HTMLResponse)
+async def reports_page(request: Request,
+                       current_user: auth.SessionUser = Depends(auth.require_config_admin)):
+    """The operator reports — daily/weekly activity rollups. Closed days
+       come from the daily_stats table; reports.ensure_daily_stats
+       materializes any days that closed since the last view (a no-op
+       MAX() probe when up to date), so nothing historical is recomputed
+       per page view. The single live computation is "today so far",
+       rendered as a visually distinct partial bar."""
+    db = request.app.state.db
+    reports.ensure_daily_stats(db)
+    today = reports.compute_day_stats(db, reports.today_utc())
+    daily = reports.load_daily_stats(db, days=_REPORT_DAYS)
+    weekly = reports.weekly_rollup(
+        reports.load_daily_stats(db, days=_REPORT_WEEKS * 7),
+        weeks=_REPORT_WEEKS, today=today)
+    drows = reports.chart_rows_daily(daily, today)
+    totals = reports.summary_totals(daily, today)
+    avg_ms = totals["avg_duration_ms"]
+    charts = {
+        "ops_daily":      reports.stacked_chart_config(drows, _OPS_SEGMENTS),
+        "ops_weekly":     reports.stacked_chart_config(weekly, _OPS_SEGMENTS),
+        "outcomes_daily": reports.stacked_chart_config(drows,
+                                                       _OUTCOME_SEGMENTS),
+        "users_daily":    reports.stacked_chart_config(drows, _USER_SEGMENTS,
+                                                       stacked=False),
+        "users_weekly":   reports.stacked_chart_config(weekly,
+                                                       _USER_WEEK_SEGMENTS,
+                                                       stacked=False),
+    }
+    return templates.TemplateResponse(request, "reports.html", {
+        "current_user": current_user,
+        "charts": charts,
+        "totals": totals,
+        "avg_duration_display": (f"{avg_ms / 1000:.1f} s"
+                                 if avg_ms is not None else "—"),
+        "daily_rows": drows,
+        "weekly_rows": weekly,
+        "report_days": _REPORT_DAYS,
+        "report_weeks": _REPORT_WEEKS,
+        "has_data": bool(totals["ops_total"] or totals["ops_enqueued"]
+                         or totals["patchsets_gathered"]
+                         or totals["patchsets_uploaded"]
+                         or totals["active_users"]),
+    })
+
+
 _DEFAULT_SETTINGS_TAB = "gather"
 
 # Tabs that render a runtime-config form. The form_group attribute on

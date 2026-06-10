@@ -55,3 +55,7 @@
 .concern-text code { padding: .05em .35em; border-radius: .25rem; color: inherit;
                      background: rgba(127, 127, 127, .18);
                      background: color-mix(in srgb, var(--bs-body-color) 12%, transparent); }
+
+/* /reports charts: Chart.js needs a sized positioned box when
+   maintainAspectRatio is off. */
+.report-chart { position: relative; height: 280px; }

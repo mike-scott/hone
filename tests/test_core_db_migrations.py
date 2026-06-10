@@ -41,3 +41,17 @@ def test_v5_backfills_series_version_from_the_subject(tmp_path):
     got = {r["root_message_id"]: r["series_version"] for r in db.execute(
         "SELECT root_message_id, series_version FROM patchsets")}
     assert got == {"<a@x>": 3, "<b@x>": 12, "<c@x>": 1, "<d@x>": 1}
+
+
+def test_v7_adds_daily_stats_to_an_existing_database(tmp_path):
+    """A pre-v7 database picks up the rollup table and the bare
+       timestamp indexes on upgrade."""
+    path = str(tmp_path / "v4.db")
+    _v4_db(path).close()
+    db = core_db.connect(path)
+    assert (db.execute("PRAGMA user_version").fetchone()[0]
+            == len(core_db._MIGRATIONS))
+    assert db.execute("SELECT COUNT(*) FROM daily_stats").fetchone()[0] == 0
+    names = {r[0] for r in db.execute(
+        "SELECT name FROM sqlite_master WHERE type='index'")}
+    assert {"idx_work_items_completed", "idx_work_items_enqueued"} <= names

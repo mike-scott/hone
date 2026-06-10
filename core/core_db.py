@@ -816,11 +816,47 @@ CREATE INDEX idx_patchsets_supersedes
     ON patchsets(supersedes_root_message_id);
 """
 
+_SCHEMA_V7 = """
+-- Daily operations rollup — one row per CLOSED UTC day, written once by
+-- the lazy materializer (core/reports.py) and never recomputed: several
+-- flows delete work_items rows (cancel, superseded-iteration retirement,
+-- delete_review, delete_patchset), so live-table recomputation would
+-- undercount history. These rows freeze each day's truth at day close.
+-- Sums only, never averages (duration_ms_sum + duration_n) so weekly
+-- rollups can weight correctly.
+CREATE TABLE daily_stats (
+    day                 TEXT PRIMARY KEY,      -- 'YYYY-MM-DD', UTC
+    ops_prepare         INTEGER NOT NULL DEFAULT 0,  -- terminal, by type
+    ops_review          INTEGER NOT NULL DEFAULT 0,
+    ops_train           INTEGER NOT NULL DEFAULT 0,
+    ops_completed       INTEGER NOT NULL DEFAULT 0,  -- terminal, by state
+    ops_unappliable     INTEGER NOT NULL DEFAULT 0,
+    ops_deferred        INTEGER NOT NULL DEFAULT 0,
+    ops_user_origin     INTEGER NOT NULL DEFAULT 0,  -- requested_by_user_id set
+    ops_system_origin   INTEGER NOT NULL DEFAULT 0,
+    ops_enqueued        INTEGER NOT NULL DEFAULT 0,  -- by enqueued_at
+    patchsets_gathered  INTEGER NOT NULL DEFAULT 0,  -- by gathered_at + origin
+    patchsets_uploaded  INTEGER NOT NULL DEFAULT 0,
+    active_users        INTEGER NOT NULL DEFAULT 0,  -- distinct upload/request/login
+    nodes_active        INTEGER NOT NULL DEFAULT 0,  -- distinct claimed_by, terminal
+    input_tokens        INTEGER NOT NULL DEFAULT 0,  -- work_items.record $.usage
+    output_tokens       INTEGER NOT NULL DEFAULT 0,
+    duration_ms_sum     INTEGER NOT NULL DEFAULT 0,
+    duration_n          INTEGER NOT NULL DEFAULT 0,  -- rows carrying duration_ms
+    computed_at         INTEGER NOT NULL
+) WITHOUT ROWID;
+
+-- The materializer scans bare timestamp ranges; the existing composite
+-- indexes (state/type-led) don't serve those.
+CREATE INDEX idx_work_items_completed ON work_items(completed_at);
+CREATE INDEX idx_work_items_enqueued  ON work_items(enqueued_at);
+"""
+
 # A migration is either a DDL script (executescript) or a Python callable
 # taking the connection — for data fixes SQL can't express (v5 needs a
 # regex). Both run under the same user_version bookkeeping.
 _MIGRATIONS = [_SCHEMA_V1, _SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4,
-               _migrate_v5_series_version, _SCHEMA_V6]
+               _migrate_v5_series_version, _SCHEMA_V6, _SCHEMA_V7]
 
 
 # How long a connection waits on another connection's write lock before

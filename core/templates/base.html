@@ -71,6 +71,16 @@
                   or active.startswith('/enroll') %} active{% endif %}">
             <i class="bi bi-hdd-network me-1"></i>Nodes</a>
         </li>
+        {# Operator reports — daily/weekly activity rollups. Admin-only,
+           like the route (auth.require_config_admin). #}
+        {% if current_user is defined and current_user
+              and current_user.is_config_admin %}
+        <li class="nav-item">
+          <a href="/reports" class="nav-link
+             {%- if active.startswith('/reports') %} active{% endif %}">
+            <i class="bi bi-bar-chart me-1"></i>Reports</a>
+        </li>
+        {% endif %}
       </ul>
       <ul class="navbar-nav ms-auto align-items-center">
         {# Fleet throughput sparkline — claims/min over the last
