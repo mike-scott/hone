@@ -2195,6 +2195,31 @@ def _require_work_item_action(db, work_item_id, current_user):
                             "admin access required")
 
 
+@router.post("/work-items/{work_item_id:int}/cancel", dependencies=[Depends(auth.require_csrf)])
+async def cancel_work_item(request: Request, work_item_id: int,
+                           back: str | None = None,
+                           current_user: auth.SessionUser = Depends(auth.require_session)):
+    """Admin-triggered cancellation of an unheld (claimable / deferred)
+       work item — the Cancel button on the detail page POSTs here. The
+       row is deleted, so the redirect goes back to the opener (the
+       queue, by default) rather than the now-gone detail page. A
+       claimable review's cancellation re-arms the patchset's Request-
+       review button. Admin-only, via _require_work_item_action."""
+    db = request.app.state.db
+    _require_work_item_action(db, work_item_id, current_user)
+    result = core_db.cancel_work_item(db, work_item_id)
+    if result == "unknown":
+        raise HTTPException(status.HTTP_404_NOT_FOUND,
+                            f"no work-item with id {work_item_id}")
+    if result == "not_cancellable":
+        # The row was claimed/completed between render and click — send
+        # the admin back to the detail page to see its current state.
+        return RedirectResponse(f"/work-items/{work_item_id}",
+                                status_code=303)
+    return RedirectResponse(_safe_back(back) if back else "/queue",
+                            status_code=303)
+
+
 @router.post("/work-items/{work_item_id:int}/release-deferred", dependencies=[Depends(auth.require_csrf)])
 async def release_deferred(request: Request, work_item_id: int,
                            back: str | None = None,

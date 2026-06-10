@@ -1981,6 +1981,35 @@ def retry_unappliable(db, item_id):
     return "ok"
 
 
+def cancel_work_item(db, item_id):
+    """Admin-triggered cancellation of an UNHELD work item — the row is
+       deleted, removing the request from the queue entirely. Only
+       CLAIMABLE and DEFERRED rows qualify: both are terminal-or-waiting
+       with no node holding a claim, so there is no in-flight work to
+       disrupt and no completion record to lose. A CLAIMED row must run
+       its lease out (or complete); COMPLETED / UNAPPLIABLE rows carry
+       records and are removed through their own flows (delete_review).
+
+       Cancelling a claimable review re-arms the patchset's Request-
+       review button (nothing review-related remains); cancelling a
+       prepare leaves the patchset unprepared — an informed admin call.
+
+       Returns 'ok' on cancel, 'not_cancellable' for any other state
+       (idempotent under double-click — the second POST sees 'unknown'),
+       or 'unknown' when the id doesn't exist."""
+    row = db.execute("SELECT state FROM work_items WHERE id=?",
+                     (item_id,)).fetchone()
+    if row is None:
+        return "unknown"
+    if row["state"] not in (WORK_ITEM_STATE_CLAIMABLE,
+                            WORK_ITEM_STATE_DEFERRED):
+        return "not_cancellable"
+    log.info("cancel_work_item: work item %s deleted", item_id)
+    db.execute("DELETE FROM work_items WHERE id=?", (item_id,))
+    db.commit()
+    return "ok"
+
+
 def reclaim_expired(db):
     """Crash recovery: return lease-expired claims to their queues. Returns
        (work_items_reclaimed, draft_tasks_reclaimed)."""

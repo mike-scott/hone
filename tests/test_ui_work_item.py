@@ -331,3 +331,76 @@ def test_post_retry_unappliable_unknown_id_404s(ctx):
     r = ctx.client.post("/work-items/999999/retry-unappliable",
                         follow_redirects=False)
     assert r.status_code == 404
+
+
+# --- admin cancel of unheld (claimable / deferred) items --------------------
+
+def test_cancel_deletes_a_claimable_review_and_rearms_the_button(ctx):
+    """Admin cancel removes the queued request entirely: the row is gone,
+       the queue no longer lists it, and the patchset's Request-review
+       button is offered again (nothing review-related remains)."""
+    _plant_patchset(ctx.db)
+    wid = core_db.enqueue_review(ctx.db, "<r1@x>")
+    r = ctx.client.post(f"/work-items/{wid}/cancel", follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["Location"] == "/queue"
+    assert ctx.db.execute("SELECT COUNT(*) AS n FROM work_items") \
+                 .fetchone()["n"] == 0
+    body = ctx.client.get(f"/patchsets/{quote('r1@x')}").text
+    assert "Request review" in body
+
+
+def test_cancel_honours_back_param(ctx):
+    _plant_patchset(ctx.db)
+    wid = core_db.enqueue_review(ctx.db, "<r1@x>")
+    r = ctx.client.post(f"/work-items/{wid}/cancel?back=%2Fqueue%3Fpage%3D2",
+                        follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["Location"] == "/queue?page=2"
+
+
+def test_cancel_refuses_a_claimed_item(ctx):
+    """A claimed row is held by a node — cancel is a no-op that bounces
+       back to the detail page so the admin sees the current state."""
+    _plant_patchset(ctx.db)
+    wid = core_db.enqueue_review(ctx.db, "<r1@x>")
+    core_db.claim_work_item(ctx.db, "w1", methodology_version=1)
+    r = ctx.client.post(f"/work-items/{wid}/cancel", follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["Location"] == f"/work-items/{wid}"
+    assert ctx.db.execute("SELECT COUNT(*) AS n FROM work_items") \
+                 .fetchone()["n"] == 1
+
+
+def test_cancel_works_on_a_deferred_item(ctx):
+    _plant_patchset(ctx.db)
+    wid = core_db.enqueue_review(ctx.db, "<r1@x>")
+    ctx.db.execute("UPDATE work_items SET state=? WHERE id=?",
+                   (core_db.WORK_ITEM_STATE_DEFERRED, wid))
+    ctx.db.commit()
+    r = ctx.client.post(f"/work-items/{wid}/cancel", follow_redirects=False)
+    assert r.status_code == 303
+    assert core_db.cancel_work_item(ctx.db, wid) == "unknown"   # already gone
+
+
+def test_cancel_is_admin_only(tmp_path):
+    """Maintainers and regular users get a 403 — cancel deletes queue
+       rows, an operator action like the re-arms."""
+    from types import SimpleNamespace
+    from core import auth
+    db = core_db.connect(str(tmp_path / "hone.db"))
+    core_db.add_methodology_version(db, {"name": "t", "version": 1})
+    _plant_patchset(db)
+    wid = core_db.enqueue_review(db, "<r1@x>")
+    maint = auth.SessionUser(id=1, email="m@x", display_name="m",
+                             is_config_admin=False, is_maintainer=True)
+    app = FastAPI()
+    app.include_router(ui.router)
+    app.dependency_overrides[auth.require_session] = lambda: maint
+    app.dependency_overrides[auth.require_csrf] = lambda: None
+    app.state.db = db
+    r = TestClient(app).post(f"/work-items/{wid}/cancel",
+                             follow_redirects=False)
+    assert r.status_code == 403
+    assert db.execute("SELECT COUNT(*) AS n FROM work_items") \
+             .fetchone()["n"] == 1

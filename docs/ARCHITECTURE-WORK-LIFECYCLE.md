@@ -145,9 +145,13 @@ are enqueued; they are never picked or re-offered.
   delete-review button are **maintainer-gated**, with one exception: the
   uploader of an uploaded patchset may act on their own (see
   `core/ui.py` → `_can_act_on_patchset`). The work-item **re-arm**
-  badges (release-deferred, retry-unappliable) are stricter — **admin
-  only**: a re-arm mutates fleet scheduling and the row keeps its
-  original origin, so it's an operator action, not a per-user one. Auto-enqueueing review at
+  badges (release-deferred, retry-unappliable) and the **Cancel** button
+  are stricter — **admin only**: they mutate fleet scheduling (the
+  re-armed row keeps its original origin), so they're operator actions,
+  not per-user ones. Cancel applies to UNHELD items only (claimable /
+  deferred — no node holds a claim) and deletes the row outright; a
+  cancelled claimable review re-arms the patchset's Request-review
+  button. Auto-enqueueing review at
   gather time would flood the queue, so it is a deliberate per-patchset
   action. The request is only offered once a `patchset_metadata` row exists,
   so preparation still precedes the review — reviewers cited against the

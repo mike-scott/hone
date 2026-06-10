@@ -40,6 +40,23 @@
   <span class="badge {{ state_badge }} me-2">{{ state }}</span>
   {% endif %}
   work-item <code>{{ id }}</code>
+  {# Admin-only cancel for UNHELD items (claimable / deferred): deletes
+     the row, removing the request from the queue. A cancelled claimable
+     review re-arms the patchset's Request-review button. The POST
+     handler enforces the same admin gate. #}
+  {% if current_user.is_config_admin
+        and state in ("claimable", "deferred") %}
+  <form method="post"
+        action="/work-items/{{ id }}/cancel{{ ('?back=' ~ (back_url | urlencode)) if back_url else '' }}"
+        class="d-inline ms-2"
+        data-confirm-title="Cancel work item?"
+        data-confirm-button="Cancel item"
+        data-confirm="Cancel this {{ type }} work item? The queued request is removed; a review can be re-requested from the patchset page.">
+    {{ csrf_field(request) }}
+    <button type="submit" class="btn btn-sm btn-outline-danger align-middle">
+      <i class="bi bi-x-circle me-1"></i>Cancel</button>
+  </form>
+  {% endif %}
 </h1>
 <div class="text-muted small mb-3">
   for patchset
