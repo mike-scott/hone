@@ -1468,6 +1468,45 @@ def reset_patchset_pipeline(db, root_message_id):
     db.commit()
 
 
+def delete_patchset(db, root_message_id):
+    """Remove a patchset outright: the row, its thread messages, every
+       work-item, the prepare metadata and the AI review (evaluations
+       included, via delete_review). The uploader-facing cleanup for
+       abandoned upload iterations — POLICY (uploaded-origin only,
+       _can_act_on_patchset) lives with the caller; this is mechanics.
+       An iteration chain through the row is spliced (whoever supersedes
+       it re-points at what it superseded), so chains stay linear and
+       the self-FK intact. Training-session references are NOT touched:
+       uploaded patchsets never enter sessions, and an FK failure here
+       means that invariant broke — better loud than a silent cascade.
+       Returns 'ok', or 'unknown' for an idempotent miss."""
+    root = norm_msgid(root_message_id)
+    ps = db.execute(
+        "SELECT supersedes_root_message_id FROM patchsets "
+        "WHERE root_message_id=?", (root,)).fetchone()
+    if ps is None:
+        return "unknown"
+    log.info("delete_patchset: %s — removing thread, work-items and "
+             "derived artifacts", root)
+    delete_review(db, root)
+    db.execute("DELETE FROM patchset_metadata WHERE root_message_id=?",
+               (root,))
+    # Remaining work-items reference messages — they go first; then the
+    # messages' self-FK (parent_message_id, no ON DELETE) is cleared so
+    # the bulk delete can't trip on row order.
+    db.execute("DELETE FROM work_items WHERE root_message_id=?", (root,))
+    db.execute("UPDATE messages SET parent_message_id=NULL "
+               "WHERE root_message_id=?", (root,))
+    db.execute("DELETE FROM messages WHERE root_message_id=?", (root,))
+    db.execute("DELETE FROM patchset_tags WHERE root_message_id=?", (root,))
+    db.execute("UPDATE patchsets SET supersedes_root_message_id=? "
+               "WHERE supersedes_root_message_id=?",
+               (ps["supersedes_root_message_id"], root))
+    db.execute("DELETE FROM patchsets WHERE root_message_id=?", (root,))
+    db.commit()
+    return "ok"
+
+
 # ===========================================================================
 # Patchset metadata  (the prepare task's structured output; corpus group)
 # ===========================================================================

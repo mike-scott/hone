@@ -331,6 +331,24 @@
       {% endif %}
         </dl>
       </div>
+      {# Uploaded-only cleanup: the uploader (or maintainer / admin)
+         can remove an abandoned upload iteration outright. Corpus
+         patchsets are data, never deletable — the POST handler
+         enforces both gates. #}
+      {% if can_act_on_patchset and patchset.is_uploaded %}
+      <div class="card-body border-top py-2">
+        <form method="post"
+              action="/patchsets/{{ patchset.root_message_id | urlencode }}/delete"
+              class="m-0"
+              onsubmit="return confirm('Delete this uploaded patchset? The thread, its work items and any review are removed. This cannot be undone.');">
+          {{ csrf_field(request) }}
+          <button type="submit"
+                  class="btn btn-sm btn-outline-danger w-100">
+            <i class="bi bi-trash me-1"></i>Delete patchset
+          </button>
+        </form>
+      </div>
+      {% endif %}
     </div>
 
     {% if metadata %}

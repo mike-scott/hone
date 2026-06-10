@@ -663,3 +663,103 @@ def test_third_iteration_chains_on_the_head(tmp_path):
     body = ctx.client.get("/my-patchsets").text
     assert body.count("net: fix things") == 1
     assert "×3" in body
+
+
+# --- uploaded-patchset deletion -------------------------------------------
+
+def test_uploader_can_delete_their_own_upload(tmp_path):
+    """The cleanup path: the row, thread, work-items and derived
+       artifacts all go; redirect lands on /my-patchsets, now empty."""
+    ctx = _ctx(tmp_path)
+    root = _confirm_upload(ctx)
+    _plant_pipeline_artifacts(ctx.db)
+    body = ctx.client.get(f"/patchsets/{root}").text
+    assert "Delete patchset" in body
+    r = ctx.client.post(f"/patchsets/{root}/delete", follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/my-patchsets"
+    for table in ("patchsets", "messages", "work_items",
+                  "patchset_metadata", "ai_reviews"):
+        assert ctx.db.execute(
+            f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0, table
+    assert "net: fix things" not in ctx.client.get("/my-patchsets").text
+
+
+def test_delete_mid_chain_splices_the_iteration_chain(tmp_path):
+    """Deleting iteration 2 of a 3-link chain re-points iteration 3 at
+       iteration 1 — the chain stays linear and reads ×2."""
+    ctx = _ctx(tmp_path)
+    _confirm_upload(ctx)
+    for files, _ in ((_series_files_iter2(), 2),):
+        r = _post_files(ctx.client, files)
+        token = r.text.split('name="token" value="')[1].split('"')[0]
+        ctx.client.post("/upload/confirm",
+                        data={"token": token, "link_iteration": "1"},
+                        follow_redirects=False)
+    files3 = [("c.patch", _mail("[PATCH v2 0/1] net: fix things",
+                                "<cover-iter3@x>", base=_BASE)),
+              ("p.patch", _mail("[PATCH v2 1/1] net: part one",
+                                "<p1-iter3@x>"))]
+    r = _post_files(ctx.client, files3)
+    token = r.text.split('name="token" value="')[1].split('"')[0]
+    ctx.client.post("/upload/confirm",
+                    data={"token": token, "link_iteration": "1"},
+                    follow_redirects=False)
+
+    r = ctx.client.post("/patchsets/cover-iter2@x/delete",
+                        follow_redirects=False)
+    assert r.status_code == 303
+    ps = ctx.db.execute("SELECT supersedes_root_message_id FROM patchsets "
+                        "WHERE root_message_id='cover-iter3@x'").fetchone()
+    assert ps["supersedes_root_message_id"] == "cover@x"
+    body = ctx.client.get("/my-patchsets").text
+    assert body.count("net: fix things") == 1
+    assert "×2" in body
+
+
+def test_delete_head_promotes_the_prior_iteration(tmp_path):
+    """Deleting the newest iteration makes the prior one the chain head
+       again — it reappears as the dashboard row."""
+    ctx = _ctx(tmp_path)
+    _confirm_upload(ctx)
+    r = _post_files(ctx.client, _series_files_iter2())
+    token = r.text.split('name="token" value="')[1].split('"')[0]
+    ctx.client.post("/upload/confirm",
+                    data={"token": token, "link_iteration": "1"},
+                    follow_redirects=False)
+    ctx.client.post("/patchsets/cover-iter2@x/delete",
+                    follow_redirects=False)
+    rows = ctx.db.execute("SELECT root_message_id FROM patchsets").fetchall()
+    assert [r["root_message_id"] for r in rows] == ["cover@x"]
+    body = ctx.client.get("/my-patchsets").text
+    assert body.count("net: fix things") == 1
+    assert "×2" not in body
+
+
+def test_corpus_patchsets_are_never_deletable(tmp_path):
+    """Gathered rows are data: no button, and the POST 403s even for the
+       maintainer-grade _ctx user (gather's dedup would make the loss
+       silently permanent)."""
+    ctx = _ctx(tmp_path)
+    core_db.upsert_patchset(ctx.db, "<lkml@x>", subject="corpus row",
+                            n_patches=1)
+    body = ctx.client.get("/patchsets/lkml@x").text
+    assert "Delete patchset" not in body
+    r = ctx.client.post("/patchsets/lkml@x/delete", follow_redirects=False)
+    assert r.status_code == 403
+    assert core_db.get_patchset(ctx.db, "<lkml@x>") is not None
+
+
+def test_delete_403_for_a_different_no_grant_user(tmp_path):
+    ctx = _ctx(tmp_path)
+    root = _confirm_upload(ctx)
+    rex = _regular_ctx(tmp_path, db=ctx.db)
+    r = rex.client.post(f"/patchsets/{root}/delete", follow_redirects=False)
+    assert r.status_code == 403
+    assert core_db.get_patchset(ctx.db, root) is not None
+
+
+def test_delete_unknown_patchset_404(tmp_path):
+    ctx = _ctx(tmp_path)
+    r = ctx.client.post("/patchsets/nope@x/delete", follow_redirects=False)
+    assert r.status_code == 404

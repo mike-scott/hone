@@ -1789,6 +1789,34 @@ async def delete_review(request: Request, root_message_id: str,
                              status_code=303)
 
 
+@router.post("/patchsets/{root_message_id:path}/delete", dependencies=[Depends(auth.require_csrf)])
+async def delete_patchset(request: Request, root_message_id: str,
+                          current_user: auth.SessionUser = Depends(auth.require_session)):
+    """Delete an UPLOADED patchset outright — the cleanup path for an
+       abandoned upload iteration. Uploaded-origin only: gathered corpus
+       rows are data, not submissions, and stay (re-gather couldn't
+       restore a deleted one — gather's dedup never revisits a handled
+       root, so a corpus delete would be silently permanent). Gated by
+       _can_act_on_patchset; core_db.delete_patchset removes the thread,
+       work-items and derived artifacts, and splices any iteration chain
+       through this row. Redirects to /my-patchsets — the page the
+       deleted row lived on."""
+    db = request.app.state.db
+    ps = core_db.get_patchset(db, root_message_id)
+    if ps is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND,
+                            f"no patchset with root_message_id "
+                            f"{root_message_id!r}")
+    if not _can_act_on_patchset(ps, current_user):
+        raise HTTPException(status.HTTP_403_FORBIDDEN,
+                            "maintainer access required")
+    if ps.get("origin") != core_db.PATCHSET_ORIGIN_UPLOADED:
+        raise HTTPException(status.HTTP_403_FORBIDDEN,
+                            "only uploaded patchsets can be deleted")
+    core_db.delete_patchset(db, root_message_id)
+    return RedirectResponse("/my-patchsets", status_code=303)
+
+
 @router.post("/review-requests/{root_message_id:path}", dependencies=[Depends(auth.require_csrf)])
 async def request_review(request: Request, root_message_id: str,
                           current_user: auth.SessionUser = Depends(auth.require_session)):
