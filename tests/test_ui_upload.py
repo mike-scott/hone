@@ -468,3 +468,198 @@ def test_upload_preview_warns_rerun_for_own_reupload(tmp_path):
     _confirm_upload(ctx)
     r = _post_files(ctx.client, _modified_series())
     assert "pipeline re-runs" in r.text
+
+
+# --- iteration linking --------------------------------------------------
+
+def test_parse_extracts_change_id_trailer():
+    files = [("p.patch", _mail("[PATCH] x", "<p@x>",
+                               body="fix\n---\ndiff --git a/f b/f\n"
+                                    "@@ -1 +1 @@\n-a\n+b\n\n"
+                                    "Change-Id: I0123abcd\n"))]
+    parsed = upload.parse_upload(files)
+    assert parsed["ok"], parsed["errors"]
+    assert parsed["change_id"] == "I0123abcd"
+
+
+def test_parse_change_id_absent_is_none():
+    parsed = upload.parse_upload(_series_files())
+    assert parsed["change_id"] is None
+
+
+@pytest.mark.parametrize("subject,title", [
+    ("[PATCH v2 0/3] net: fix things",      "net: fix things"),
+    ("[PATCH v9 0/3] net: fix things",      "net: fix things"),
+    ("[PATCH 0/3] NET: Fix Things",         "net: fix things"),
+    ("[RFC PATCH v2] [resend] net: fix it", "net: fix it"),
+    ("no brackets at all",                  "no brackets at all"),
+    ("",                                    ""),
+])
+def test_series_title(subject, title):
+    assert upload.series_title(subject) == title
+
+
+def test_find_prior_iteration_change_id_beats_title():
+    """A Change-Id match wins even when the title differs (the series
+       was renamed between iterations); newest candidate first."""
+    cands = [
+        {"root_message_id": "a", "subject": "net: other", "change_id": "I1"},
+        {"root_message_id": "b", "subject": "net: fix",   "change_id": None},
+    ]
+    got = upload.find_prior_iteration(
+        cands, subject="[PATCH v3] renamed entirely", change_id="I1")
+    assert got["root_message_id"] == "a"
+    # Without a Change-Id the title decides.
+    got = upload.find_prior_iteration(cands, subject="[PATCH v2] net: fix")
+    assert got["root_message_id"] == "b"
+    assert upload.find_prior_iteration(cands, subject="[PATCH] new work") \
+        is None
+
+
+def _series_files_iter2(subject_tag="v2"):
+    """A second format-patch run of the same series: fresh Message-IDs,
+       same subjects (the uploader didn't bump the marker)."""
+    return [
+        ("0002-b.patch", _mail(f"[PATCH {subject_tag} 2/2] net: part two",
+                               "<p2-iter2@x>")),
+        ("0000-cover.patch", _mail(f"[PATCH {subject_tag} 0/2] net: fix things",
+                                   "<cover-iter2@x>", base=_BASE)),
+        ("0001-a.patch", _mail(f"[PATCH {subject_tag} 1/2] net: part one",
+                               "<p1-iter2@x>",
+                               body="better\n---\ndiff --git a/f b/f\n"
+                                    "@@ -1 +1 @@\n-old\n+better\n")),
+    ]
+
+
+def test_second_upload_offers_and_links_the_iteration(tmp_path):
+    """The full loop: iteration 2 (fresh Message-IDs, same subject) is
+       offered as a link at preview; confirming stamps supersedes,
+       retires the old iteration's queued prepare, and the dashboard
+       collapses to one ×2 row."""
+    ctx = _ctx(tmp_path)
+    _confirm_upload(ctx)                          # iteration 1 + its prepare
+    r = _post_files(ctx.client, _series_files_iter2())
+    assert "new iteration of" in r.text
+    assert 'name="link_iteration"' in r.text
+    token = r.text.split('name="token" value="')[1].split('"')[0]
+    ctx.client.post("/upload/confirm",
+                    data={"token": token, "link_iteration": "1"},
+                    follow_redirects=False)
+    ps = ctx.db.execute("SELECT supersedes_root_message_id FROM patchsets "
+                        "WHERE root_message_id='cover-iter2@x'").fetchone()
+    assert ps["supersedes_root_message_id"] == "cover@x"
+    # The old iteration's claimable prepare is retired; the new one's is
+    # queued — exactly one prepare item remains, on the new root.
+    rows = ctx.db.execute(
+        "SELECT root_message_id, type, state FROM work_items").fetchall()
+    assert [(w["root_message_id"], w["type"], w["state"]) for w in rows] == [
+        ("cover-iter2@x", core_db.WORK_ITEM_TYPE_PREPARE,
+         core_db.WORK_ITEM_STATE_CLAIMABLE)]
+    # Dashboard: one row (the head), iteration badge.
+    body = ctx.client.get("/my-patchsets").text
+    assert body.count("net: fix things") == 1
+    assert "×2" in body
+
+
+def test_link_opt_out_keeps_two_rows(tmp_path):
+    """Unticking the checkbox uploads a genuinely separate patchset —
+       no link, both rows on the dashboard, old queue untouched."""
+    ctx = _ctx(tmp_path)
+    _confirm_upload(ctx)
+    r = _post_files(ctx.client, _series_files_iter2())
+    token = r.text.split('name="token" value="')[1].split('"')[0]
+    ctx.client.post("/upload/confirm", data={"token": token},
+                    follow_redirects=False)      # checkbox NOT posted
+    ps = ctx.db.execute("SELECT supersedes_root_message_id FROM patchsets "
+                        "WHERE root_message_id='cover-iter2@x'").fetchone()
+    assert ps["supersedes_root_message_id"] is None
+    n = ctx.db.execute("SELECT COUNT(*) FROM work_items").fetchone()[0]
+    assert n == 2                                 # both prepares queued
+    body = ctx.client.get("/my-patchsets").text
+    assert body.count("net: fix things") == 2
+    assert "×2" not in body
+
+
+def test_no_offer_for_a_different_title(tmp_path):
+    ctx = _ctx(tmp_path)
+    _confirm_upload(ctx)
+    files = [("p.patch", _mail("[PATCH] mm: unrelated work", "<other@x>"))]
+    r = _post_files(ctx.client, files)
+    assert "new iteration of" not in r.text
+
+
+def test_no_offer_across_users(tmp_path):
+    """Candidates are the uploader's OWN chain heads — another user's
+       identically-titled upload is not offered."""
+    ctx = _ctx(tmp_path)
+    _confirm_upload(ctx)
+    rex = _regular_ctx(tmp_path, db=ctx.db)
+    r = _post_files(rex.client, _series_files_iter2())
+    assert "new iteration of" not in r.text
+
+
+def test_claimed_work_of_superseded_iteration_survives(tmp_path):
+    """Auto-cancel retires only UNHELD items: an in-flight claimed
+       prepare keeps its lease and finishes as the old iteration's
+       history."""
+    ctx = _ctx(tmp_path)
+    _confirm_upload(ctx)
+    core_db.add_methodology_version(ctx.db, {"name": "t", "version": 1})
+    assert core_db.claim_work_item(
+        ctx.db, "node-1", methodology_version=1,
+        types=(core_db.WORK_ITEM_TYPE_PREPARE,)) is not None
+    r = _post_files(ctx.client, _series_files_iter2())
+    token = r.text.split('name="token" value="')[1].split('"')[0]
+    ctx.client.post("/upload/confirm",
+                    data={"token": token, "link_iteration": "1"},
+                    follow_redirects=False)
+    states = {w["root_message_id"]: w["state"] for w in ctx.db.execute(
+        "SELECT root_message_id, state FROM work_items "
+        "WHERE type=?", (core_db.WORK_ITEM_TYPE_PREPARE,))}
+    assert states["cover@x"] == core_db.WORK_ITEM_STATE_CLAIMED
+    assert states["cover-iter2@x"] == core_db.WORK_ITEM_STATE_CLAIMABLE
+
+
+def test_detail_page_walks_the_chain(tmp_path):
+    """The old iteration says 'Superseded by' (warning-styled), the new
+       one says 'Supersedes' and its iteration number."""
+    ctx = _ctx(tmp_path)
+    _confirm_upload(ctx)
+    r = _post_files(ctx.client, _series_files_iter2())
+    token = r.text.split('name="token" value="')[1].split('"')[0]
+    ctx.client.post("/upload/confirm",
+                    data={"token": token, "link_iteration": "1"},
+                    follow_redirects=False)
+    new = ctx.client.get("/patchsets/cover-iter2@x").text
+    assert "Supersedes" in new and "iteration 2" in new
+    old = ctx.client.get("/patchsets/cover@x").text
+    assert "Superseded by" in old
+
+
+def test_third_iteration_chains_on_the_head(tmp_path):
+    """Iteration 3 is offered against the chain HEAD (iteration 2), not
+       the original — chains stay linear and the count reads ×3."""
+    ctx = _ctx(tmp_path)
+    _confirm_upload(ctx)
+    for files in (_series_files_iter2(),):
+        r = _post_files(ctx.client, files)
+        token = r.text.split('name="token" value="')[1].split('"')[0]
+        ctx.client.post("/upload/confirm",
+                        data={"token": token, "link_iteration": "1"},
+                        follow_redirects=False)
+    files3 = [("c.patch", _mail("[PATCH v2 0/1] net: fix things",
+                                "<cover-iter3@x>", base=_BASE)),
+              ("p.patch", _mail("[PATCH v2 1/1] net: part one",
+                                "<p1-iter3@x>"))]
+    r = _post_files(ctx.client, files3)
+    assert "new iteration of" in r.text
+    token = r.text.split('name="token" value="')[1].split('"')[0]
+    ctx.client.post("/upload/confirm",
+                    data={"token": token, "link_iteration": "1"},
+                    follow_redirects=False)
+    ps = ctx.db.execute("SELECT supersedes_root_message_id FROM patchsets "
+                        "WHERE root_message_id='cover-iter3@x'").fetchone()
+    assert ps["supersedes_root_message_id"] == "cover-iter2@x"
+    body = ctx.client.get("/my-patchsets").text
+    assert body.count("net: fix things") == 1
+    assert "×3" in body

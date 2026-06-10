@@ -270,7 +270,28 @@
       <dt class="col-5">Patches</dt>
       <dd class="col-7">{{ patchset.n_patches or "—" }}</dd>
       <dt class="col-5">Series version</dt>
-      <dd class="col-7">v{{ patchset.series_version }}</dd>
+      <dd class="col-7">v{{ patchset.series_version }}
+        {# The upload-chain position — shown because iterating uploaders
+           rarely bump the v marker, so "v1" alone would lie. #}
+        {% if patchset.iteration %}
+        <span class="text-muted">· iteration {{ patchset.iteration }}</span>
+        {% endif %}
+      </dd>
+      {% if superseded_by %}
+      {# This page is STALE — a newer iteration exists; say so loudly. #}
+      <dt class="col-5">Superseded by</dt>
+      <dd class="col-7">
+        <a href="{{ superseded_by.url }}" class="link-warning">
+          <i class="bi bi-exclamation-triangle-fill me-1"></i>{{ superseded_by.subject }}</a>
+      </dd>
+      {% endif %}
+      {% if supersedes_link %}
+      <dt class="col-5">Supersedes</dt>
+      <dd class="col-7">
+        <a href="{{ supersedes_link.url }}" class="link-body-emphasis">
+          {{ supersedes_link.subject }}</a>
+      </dd>
+      {% endif %}
       <dt class="col-5">Base commit</dt>
       <dd class="col-7">
         {% if patchset.base_commit %}<code class="text-break">{{ patchset.base_commit }}</code>

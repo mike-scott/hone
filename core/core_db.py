@@ -803,11 +803,24 @@ def _migrate_v5_series_version(db):
                 "WHERE root_message_id=?", (v, row["root_message_id"]))
 
 
+_SCHEMA_V6 = """
+-- Iteration linking for uploaded patchsets: a re-uploaded series (fresh
+-- format-patch Message-IDs, same work — the pre-list iterate-on-review
+-- loop) points at the iteration it replaces. NULL for first iterations
+-- and for every gathered row. The chain gives "iteration N" and the
+-- /my-patchsets one-row-per-series grouping; linking is offered at
+-- upload preview (opt-out), never inferred silently.
+ALTER TABLE patchsets ADD COLUMN supersedes_root_message_id TEXT
+    REFERENCES patchsets(root_message_id);
+CREATE INDEX idx_patchsets_supersedes
+    ON patchsets(supersedes_root_message_id);
+"""
+
 # A migration is either a DDL script (executescript) or a Python callable
 # taking the connection — for data fixes SQL can't express (v5 needs a
 # regex). Both run under the same user_version bookkeeping.
 _MIGRATIONS = [_SCHEMA_V1, _SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4,
-               _migrate_v5_series_version]
+               _migrate_v5_series_version, _SCHEMA_V6]
 
 
 # How long a connection waits on another connection's write lock before
@@ -972,7 +985,8 @@ def _hash(secret):
 def upsert_patchset(db, root_message_id, *, subject=None, submitter_email=None,
                     sent=None, n_patches=None, base_commit=None,
                     change_id=None, series_version=1, gathered_at=None,
-                    origin=None, uploaded_by_user_id=None):
+                    origin=None, uploaded_by_user_id=None,
+                    supersedes_root_message_id=None):
     """Insert a gathered patchset (idempotent on the root id); refresh the
        mutable fields if it is already known. Does not touch state/skip_reason
        - a re-gather never un-skips a patchset. `origin` defaults to
@@ -980,26 +994,33 @@ def upsert_patchset(db, root_message_id, *, subject=None, submitter_email=None,
        the uploader's id. Both are insert-only: a conflict (the same
        series arriving via a second path) keeps the FIRST origin and
        uploader, so a later lore gather of an uploaded series can't strip
-       the uploader's attribution. Returns the normalized
+       the uploader's attribution. `supersedes_root_message_id` (the
+       iteration link) is sticky on conflict — a refresh passing None
+       never severs an existing chain. Returns the normalized
        root_message_id."""
     root = norm_msgid(root_message_id)
     db.execute(
         "INSERT INTO patchsets (root_message_id,subject,submitter_email,sent,"
         "n_patches,base_commit,change_id,series_version,state,gathered_at,"
-        "origin,uploaded_by_user_id) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?) "
+        "origin,uploaded_by_user_id,supersedes_root_message_id) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) "
         "ON CONFLICT(root_message_id) DO UPDATE SET "
         "subject=excluded.subject, submitter_email=excluded.submitter_email, "
         "sent=excluded.sent, n_patches=excluded.n_patches, "
         "base_commit=excluded.base_commit, change_id=excluded.change_id, "
-        "series_version=excluded.series_version",
+        "series_version=excluded.series_version, "
+        "supersedes_root_message_id=COALESCE("
+        "  excluded.supersedes_root_message_id, "
+        "  patchsets.supersedes_root_message_id)",
         (root, subject,
          norm_email(submitter_email) if submitter_email else None,
          sent, n_patches, base_commit, change_id, series_version,
          PATCHSET_STATE_GATHERED,
          gathered_at if gathered_at is not None else int(time.time()),
          origin if origin is not None else PATCHSET_ORIGIN_GATHERED,
-         uploaded_by_user_id))
+         uploaded_by_user_id,
+         norm_msgid(supersedes_root_message_id)
+         if supersedes_root_message_id else None))
     db.commit()
     return root
 
@@ -1132,10 +1153,15 @@ def list_uploaded_patchsets(db, *, uploaded_by_user_id=None):
        newest first, scoped to one uploader (None = the admin's
        everyone view). Each row carries the pipeline facts the status
        chip derives from: has_metadata / has_ai_review plus the latest
-       prepare and review work-item states (NULL when none exists)."""
+       prepare and review work-item states (NULL when none exists).
+
+       Iteration chains collapse to one row: only chain HEADS (rows no
+       other row supersedes) are returned, each carrying `iterations`
+       (the chain length — 1 for an unchained upload). Superseded
+       iterations stay reachable through the head's detail page."""
     sql = ("SELECT p.root_message_id, p.subject, p.n_patches, "
            "p.series_version, p.base_commit, p.gathered_at, "
-           "p.uploaded_by_user_id, "
+           "p.uploaded_by_user_id, p.supersedes_root_message_id, "
            f"{_PATCHSET_PREPARED} AS has_metadata, "
            f"{_PATCHSET_REVIEWED} AS has_ai_review, "
            "(SELECT w.state FROM work_items w "
@@ -1151,7 +1177,60 @@ def list_uploaded_patchsets(db, *, uploaded_by_user_id=None):
         sql += "AND p.uploaded_by_user_id=? "
         params.append(uploaded_by_user_id)
     sql += "ORDER BY p.gathered_at DESC, p.root_message_id"
-    return [dict(r) for r in db.execute(sql, params)]
+    rows = [dict(r) for r in db.execute(sql, params)]
+    # Chains never cross uploaders (linking is offered only against the
+    # uploader's own rows), so even the scoped view holds every member
+    # of its chains and the walk below stays complete.
+    by_root = {r["root_message_id"]: r for r in rows}
+    superseded = {r["supersedes_root_message_id"] for r in rows
+                  if r["supersedes_root_message_id"]}
+    heads = []
+    for r in rows:
+        if r["root_message_id"] in superseded:
+            continue
+        n, cur = 1, r
+        while ((nxt := cur["supersedes_root_message_id"])
+               and nxt in by_root and n <= len(rows)):  # cycle guard
+            cur = by_root[nxt]
+            n += 1
+        r["iterations"] = n
+        heads.append(r)
+    return heads
+
+
+def unsuperseded_uploads(db, uploaded_by_user_id):
+    """This uploader's chain heads — uploaded patchsets no other row
+       supersedes — newest first. The candidates an incoming upload may
+       be a new iteration of (upload.find_prior_iteration matches
+       against these by Change-Id, then series title)."""
+    return [dict(r) for r in db.execute(
+        "SELECT root_message_id, subject, change_id, gathered_at "
+        "FROM patchsets p WHERE p.origin=? AND p.uploaded_by_user_id=? "
+        "AND NOT EXISTS (SELECT 1 FROM patchsets q "
+        "  WHERE q.supersedes_root_message_id=p.root_message_id) "
+        "ORDER BY p.gathered_at DESC, p.root_message_id",
+        (PATCHSET_ORIGIN_UPLOADED, uploaded_by_user_id))]
+
+
+def cancel_unheld_pipeline_items(db, root_message_id):
+    """Delete a superseded iteration's claimable / deferred prepare and
+       review work-items, so nodes don't spend tokens on work the
+       uploader has already replaced. Claimed in-flight items keep their
+       lease and finish (their result lands on the old iteration as
+       history); completed items are untouched. Returns the number
+       removed."""
+    root = norm_msgid(root_message_id)
+    cur = db.execute(
+        "DELETE FROM work_items WHERE root_message_id=? "
+        "AND type IN (?,?) AND state IN (?,?)",
+        (root, WORK_ITEM_TYPE_PREPARE, WORK_ITEM_TYPE_REVIEW,
+         WORK_ITEM_STATE_CLAIMABLE, WORK_ITEM_STATE_DEFERRED))
+    db.commit()
+    if cur.rowcount:
+        log.info("cancel_unheld_pipeline_items: patchset %s — removed %d "
+                 "queued item(s) for the superseded iteration",
+                 root, cur.rowcount)
+    return cur.rowcount
 
 
 def distinct_patchset_tags(db):

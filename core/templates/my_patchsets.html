@@ -31,7 +31,14 @@
         </a>
       </td>
       <td>{{ p.n_patches }}</td>
-      <td class="text-muted">v{{ p.series_version }}</td>
+      <td class="text-muted">v{{ p.series_version }}
+        {# Linked re-uploads collapse to this row (the newest iteration);
+           the ×N badge says how deep the chain is. Older iterations are
+           reachable via Supersedes links on the detail page. #}
+        {% if p.iterations > 1 %}
+        <span class="badge text-bg-light border"
+              title="{{ p.iterations }} linked iterations — this is the newest">×{{ p.iterations }}</span>
+        {% endif %}</td>
       {% if show_owner %}
       <td class="small">
         {% if p.owner_email %}<code>{{ p.owner_email }}</code>

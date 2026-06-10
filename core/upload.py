@@ -24,6 +24,11 @@ _NUM_RE     = re.compile(r'\b(\d+)\s*/\s*(\d+)\b')
 _VERSION_RE = re.compile(r'\[[^\]]*\bv(\d+)\b[^\]]*\bPATCH\b[^\]]*\]'
                          r'|\[[^\]]*\bPATCH\b[^\]]*\bv(\d+)\b[^\]]*\]', re.I)
 _BASE_RE    = re.compile(r'^base-commit:\s*([0-9a-f]{12,40})', re.I | re.M)
+# b4 / gerrit revision-tracking trailer — when present it's the precise
+# signal that two uploads are iterations of the same work.
+_CHANGEID_RE = re.compile(r'^Change-Id:\s*(\S+)', re.I | re.M)
+# Leading [bracket] tags on a Subject — [PATCH v3 1/2], [RFC PATCH], …
+_TAGS_RE    = re.compile(r'^\s*(\[[^\]]*\]\s*)+')
 # A bare diff (no mail headers): what `git diff` prints, or a unified
 # diff's ---/+++ headers near the top.
 _DIFF_RE    = re.compile(r'^(diff --git |--- |Index: )', re.M)
@@ -91,6 +96,35 @@ def _series_version(subject):
     return int(m.group(1) or m.group(2))
 
 
+def series_title(subject):
+    """The iteration-matching key: the Subject with every leading
+       [bracket] tag stripped, case-folded — so `[PATCH v2 0/3] net: x`,
+       `[PATCH v3 0/3] net: x` and `[PATCH 0/3] net: x` all read as the
+       same series. Iterating uploaders rarely bump the v marker (that's
+       the point of pre-list review), so the title is the stable part."""
+    return _TAGS_RE.sub("", subject or "").strip().lower()
+
+
+def find_prior_iteration(candidates, *, subject, change_id=None):
+    """The candidate this upload looks like a new iteration of, or None.
+       `candidates` is the uploader's un-superseded uploads, newest
+       first (core_db.unsuperseded_uploads). A matching b4 Change-Id
+       wins outright (the precise signal); otherwise the first candidate
+       with the same series title. Heuristic — the preview offers the
+       link as an opt-out, never silently."""
+    if change_id:
+        for c in candidates:
+            if c.get("change_id") == change_id:
+                return c
+    title = series_title(subject)
+    if not title:
+        return None
+    for c in candidates:
+        if series_title(c.get("subject")) == title:
+            return c
+    return None
+
+
 def _body_text(msg):
     """The plain-text body of a parsed email message. format-patch mail
        is single-part text/plain; fall back to the first text part."""
@@ -144,7 +178,7 @@ def parse_upload(blobs, *, pasted=None):
          warnings    — ingestable but flagged (no base-commit trailer,
                        ignored replies, synthetic Message-IDs)
          root_message_id · subject · submitter_* · sent · n_patches ·
-         base_commit · series_version · cover · patches
+         base_commit · change_id · series_version · cover · patches
 
        `cover` is None or a message dict; `patches` are message dicts in
        series order, each carrying `part_index` (None for a standalone
@@ -254,11 +288,14 @@ def parse_upload(blobs, *, pasted=None):
     # The root: the cover letter when there is one, else the (single or
     # first) patch — the same identity rule the lore threading resolves to.
     head = cover or patches[0]
-    base = None
+    base, change_id = None, None
     for m in ([cover] if cover else []) + patches:
-        found = _BASE_RE.search(m["body"] or "")
-        if found:
+        body = m["body"] or ""
+        if base is None and (found := _BASE_RE.search(body)):
             base = found.group(1)
+        if change_id is None and (found := _CHANGEID_RE.search(body)):
+            change_id = found.group(1)
+        if base and change_id:
             break
     if base is None:
         warnings.append("no base-commit trailer — prepare and review will "
@@ -278,6 +315,7 @@ def parse_upload(blobs, *, pasted=None):
         "sent":             head["sent"],
         "n_patches":        len(patches),
         "base_commit":      base,
+        "change_id":        change_id,
         "series_version":   _series_version(head["subject"]),
         "cover":            cover,
         "patches":          patches,

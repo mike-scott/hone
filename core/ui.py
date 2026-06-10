@@ -555,6 +555,7 @@ async def my_patchsets(request: Request,
             "detail_url":       f"/patchsets/{quote(r['root_message_id'])}",
             "n_patches":        r["n_patches"],
             "series_version":   r["series_version"],
+            "iterations":       r["iterations"],
             "status":           label,
             "status_badge":     badge,
             "uploaded_display": _when(r["gathered_at"]),
@@ -592,7 +593,7 @@ async def upload_preview(request: Request,
     pasted = (form.get("pasted") or "")
     parsed = upload.parse_upload(blobs, pasted=pasted)
 
-    token = None
+    token, prior = None, None
     if parsed["ok"]:
         db = request.app.state.db
         existing = db.execute(
@@ -617,15 +618,31 @@ async def upload_preview(request: Request,
                     "a patchset with this root Message-ID is already in "
                     "the corpus — confirming refreshes its messages but "
                     "keeps its existing origin and work history")
+        # Iteration detection — only for a genuinely NEW root (a known
+        # root is a re-upload of the same iteration, handled above).
+        # Heuristic, so the preview offers it as a pre-checked opt-out;
+        # the confirm handler stamps the link only if the box stays
+        # ticked. Candidates are the uploader's own chain heads.
+        if existing is None and current_user.id is not None:
+            prior = upload.find_prior_iteration(
+                core_db.unsuperseded_uploads(db, current_user.id),
+                subject=parsed["subject"],
+                change_id=parsed.get("change_id"))
         store = _pending_uploads(request)
         if len(store) >= _UPLOAD_PENDING_CAP:
             oldest = min(store, key=lambda t: store[t]["at"])
             del store[oldest]
         token = secrets.token_urlsafe(16)
         store[token] = {"parsed": parsed, "user_id": current_user.id,
-                        "at": time.time()}
+                        "at": time.time(),
+                        "prior_root": prior["root_message_id"]
+                                      if prior else None}
     return templates.TemplateResponse(request, "upload.html", {
-        "current_user": current_user, "preview": parsed, "token": token})
+        "current_user": current_user, "preview": parsed, "token": token,
+        "prior": {"root": prior["root_message_id"],
+                  "subject": prior["subject"],
+                  "uploaded_display": _when(prior["gathered_at"])}
+                 if parsed["ok"] and prior else None})
 
 
 @router.post("/upload/confirm", dependencies=[Depends(auth.require_csrf)])
@@ -674,6 +691,21 @@ async def upload_confirm(request: Request,
                 core_db.reset_patchset_pipeline(db, root_norm)
                 break
 
+    # Iteration linking — the preview offered the prior (entry carries
+    # it) and the uploader left the box ticked. Re-check the prior is
+    # still un-superseded: a raced parallel confirm may have chained
+    # onto it first, and a chain must stay linear.
+    supersedes = None
+    prior_root = entry.get("prior_root")
+    if prior_root and form.get("link_iteration"):
+        still_head = db.execute(
+            "SELECT 1 FROM patchsets WHERE root_message_id=? "
+            "AND NOT EXISTS (SELECT 1 FROM patchsets q "
+            "  WHERE q.supersedes_root_message_id=?)",
+            (prior_root, prior_root)).fetchone()
+        if still_head:
+            supersedes = prior_root
+
     root = core_db.upsert_patchset(
         db, parsed["root_message_id"],
         subject=parsed["subject"],
@@ -681,9 +713,11 @@ async def upload_confirm(request: Request,
         sent=parsed["sent"],
         n_patches=parsed["n_patches"],
         base_commit=parsed["base_commit"],
+        change_id=parsed.get("change_id"),
         series_version=parsed["series_version"],
         origin=core_db.PATCHSET_ORIGIN_UPLOADED,
-        uploaded_by_user_id=current_user.id)
+        uploaded_by_user_id=current_user.id,
+        supersedes_root_message_id=supersedes)
     cover = parsed["cover"]
     if cover is not None:
         core_db.upsert_message(
@@ -703,6 +737,12 @@ async def upload_confirm(request: Request,
             subject=p["subject"], sent=p["sent"])
     core_db.maybe_enqueue_prepare(db, root,
                                   requested_by_user_id=current_user.id)
+    # The new iteration replaces the old one's pending work: retire the
+    # superseded patchset's queued (unheld) prepare/review items so
+    # nodes don't spend tokens on it. In-flight claimed work finishes
+    # and lands as that iteration's history.
+    if supersedes:
+        core_db.cancel_unheld_pipeline_items(db, supersedes)
     return RedirectResponse(f"/patchsets/{quote(root)}", status_code=303)
 
 
@@ -1436,6 +1476,36 @@ def _patchset_view(db, root):
         u = core_db.get_user_by_id(db, patchset["uploaded_by_user_id"])
         patchset["uploaded_by_email"] = u["email"] if u else None
 
+    # Iteration chain (uploaded patchsets): the row this one replaced
+    # and — important on a STALE page — the row that replaced this one.
+    # `iteration` is the 1-based position in the chain, walked through
+    # the supersedes pointers (cycle-guarded; a cycle can't be created
+    # through the UI but the page must not hang on a hand-edited DB).
+    supersedes_link = superseded_by = None
+    patchset["iteration"] = None
+    norm_root = patchset["root_message_id"]
+    sup = patchset.get("supersedes_root_message_id")
+    if sup:
+        row = db.execute("SELECT subject FROM patchsets "
+                         "WHERE root_message_id=?", (sup,)).fetchone()
+        supersedes_link = {"url": f"/patchsets/{quote(sup)}",
+                           "subject": row["subject"] if row else sup}
+        n, cur, seen = 1, sup, set()
+        while cur and cur not in seen:
+            seen.add(cur)
+            row = db.execute(
+                "SELECT supersedes_root_message_id FROM patchsets "
+                "WHERE root_message_id=?", (cur,)).fetchone()
+            n += 1
+            cur = row["supersedes_root_message_id"] if row else None
+        patchset["iteration"] = n
+    row = db.execute(
+        "SELECT root_message_id, subject FROM patchsets "
+        "WHERE supersedes_root_message_id=?", (norm_root,)).fetchone()
+    if row:
+        superseded_by = {"url": f"/patchsets/{quote(row['root_message_id'])}",
+                         "subject": row["subject"] or row["root_message_id"]}
+
     tags = core_db.tags_for_patchset(db, root)
     metadata = core_db.get_patchset_metadata(db, root)
     # Read the thread once — both the thread render below and the inline-review
@@ -1644,6 +1714,8 @@ def _patchset_view(db, root):
         "work_items": work_items,
         "pipeline":   pipeline,
         "pipeline_actions": pipeline_actions,
+        "supersedes_link": supersedes_link,
+        "superseded_by":   superseded_by,
     }
 
 
