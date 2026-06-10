@@ -596,13 +596,27 @@ async def upload_preview(request: Request,
     if parsed["ok"]:
         db = request.app.state.db
         existing = db.execute(
-            "SELECT origin FROM patchsets WHERE root_message_id=?",
+            "SELECT origin, uploaded_by_user_id FROM patchsets "
+            "WHERE root_message_id=?",
             (core_db.norm_msgid(parsed["root_message_id"]),)).fetchone()
         if existing is not None:
-            parsed["warnings"].append(
-                "a patchset with this root Message-ID is already in the "
-                "corpus — confirming refreshes its messages but keeps its "
-                "existing origin and work history")
+            # Same gate as the confirm-time invalidation below: a
+            # re-upload of YOUR OWN upload re-runs the pipeline when the
+            # content changed; any other collision only refreshes bodies.
+            if (existing["origin"] == core_db.PATCHSET_ORIGIN_UPLOADED
+                    and (current_user.is_config_admin
+                         or existing["uploaded_by_user_id"]
+                            == current_user.id)):
+                parsed["warnings"].append(
+                    "a patchset with this root Message-ID is already in "
+                    "the corpus — confirming refreshes its messages, and "
+                    "if the content changed the prepared metadata and AI "
+                    "review are dropped so the pipeline re-runs")
+            else:
+                parsed["warnings"].append(
+                    "a patchset with this root Message-ID is already in "
+                    "the corpus — confirming refreshes its messages but "
+                    "keeps its existing origin and work history")
         store = _pending_uploads(request)
         if len(store) >= _UPLOAD_PENDING_CAP:
             oldest = min(store, key=lambda t: store[t]["at"])
@@ -632,6 +646,33 @@ async def upload_confirm(request: Request,
                             "upload preview expired — please re-upload")
     parsed = entry["parsed"]
     db = request.app.state.db
+
+    # Re-upload invalidation: when this root is already in the corpus as
+    # this user's own upload (or the caller is an admin) and the new
+    # upload actually changes content — any new or edited cover/patch
+    # body — drop the pipeline's derived artifacts before ingesting.
+    # Prepared metadata and an AI review must never outlive the bodies
+    # they were computed from; the maybe_enqueue_prepare below then
+    # starts a fresh prepare (review re-chains when it lands). Compared
+    # BEFORE the upserts overwrite the stored bodies. A collision with
+    # someone else's row keeps today's refresh-only behaviour.
+    root_norm = core_db.norm_msgid(parsed["root_message_id"])
+    existing = db.execute(
+        "SELECT origin, uploaded_by_user_id FROM patchsets "
+        "WHERE root_message_id=?", (root_norm,)).fetchone()
+    if (existing is not None
+            and existing["origin"] == core_db.PATCHSET_ORIGIN_UPLOADED
+            and (current_user.is_config_admin
+                 or existing["uploaded_by_user_id"] == current_user.id)):
+        incoming = (([parsed["cover"]] if parsed["cover"] else [])
+                    + parsed["patches"])
+        for m in incoming:
+            row = db.execute(
+                "SELECT body FROM messages WHERE message_id=?",
+                (core_db.norm_msgid(m["message_id"]),)).fetchone()
+            if row is None or row["body"] != m["body"]:
+                core_db.reset_patchset_pipeline(db, root_norm)
+                break
 
     root = core_db.upsert_patchset(
         db, parsed["root_message_id"],

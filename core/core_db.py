@@ -1371,6 +1371,24 @@ def delete_review(db, root_message_id):
     return "ok"
 
 
+def reset_patchset_pipeline(db, root_message_id):
+    """Drop everything the pipeline derived from a patchset's bodies — the
+       AI review (evaluations + review work-items, via delete_review) and
+       prepare's product (the patchset_metadata row + its prepare
+       work-items). For re-uploads that change patch content: derived
+       artifacts must never outlive the bodies they were computed from.
+       The caller restarts the pipeline (maybe_enqueue_prepare)."""
+    root = norm_msgid(root_message_id)
+    log.info("reset_patchset_pipeline: patchset %s — dropping prepared "
+             "metadata, AI review and pipeline work-items", root)
+    delete_review(db, root)
+    db.execute("DELETE FROM patchset_metadata WHERE root_message_id=?",
+               (root,))
+    db.execute("DELETE FROM work_items WHERE root_message_id=? AND type=?",
+               (root, WORK_ITEM_TYPE_PREPARE))
+    db.commit()
+
+
 # ===========================================================================
 # Patchset metadata  (the prepare task's structured output; corpus group)
 # ===========================================================================

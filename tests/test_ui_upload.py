@@ -375,3 +375,96 @@ def test_work_item_re_arms_are_admin_only(tmp_path):
     r = TestClient(app).post(f"/work-items/{wid}/retry-unappliable",
                              follow_redirects=False)
     assert r.status_code == 303          # no-op on a claimable row, but allowed
+
+
+# --- re-upload invalidation ---------------------------------------------
+
+def _modified_series():
+    """_series_files with patch 1's body edited — the iterate-on-review
+       loop: same Message-IDs, new content."""
+    return [
+        ("0002-b.patch", _mail("[PATCH v2 2/2] net: part two", "<p2@x>")),
+        ("0000-cover.patch", _mail("[PATCH v2 0/2] net: fix things",
+                                   "<cover@x>", base=_BASE)),
+        ("0001-a.patch", _mail("[PATCH v2 1/2] net: part one", "<p1@x>",
+                               body="fix it better\n---\n"
+                                    "diff --git a/f b/f\n"
+                                    "@@ -1 +1 @@\n-old\n+newer\n")),
+    ]
+
+
+def _plant_pipeline_artifacts(db, root="<cover@x>"):
+    """Pretend prepare and review ran: their products exist."""
+    core_db.upsert_patchset_metadata(
+        db, root, mode="heuristic",
+        tree_state={}, subsystem={}, patch_size={}, maintainer={},
+        patch_type={}, review_intensity={}, preparation_notes={})
+    core_db.upsert_ai_review(db, root, concerns=[])
+
+
+def test_reupload_with_changed_content_resets_the_pipeline(tmp_path):
+    """Re-confirming the same root with an edited body drops the stale
+       prepare metadata + AI review and queues a fresh prepare — derived
+       artifacts never outlive the bodies they were computed from."""
+    ctx = _ctx(tmp_path)
+    _confirm_upload(ctx)
+    _plant_pipeline_artifacts(ctx.db)
+    _confirm_upload(ctx, files=_modified_series())
+    assert core_db.get_patchset_metadata(ctx.db, "<cover@x>") is None
+    assert core_db.get_ai_review(ctx.db, "<cover@x>") is None
+    rows = ctx.db.execute("SELECT type, state FROM work_items").fetchall()
+    assert [(r["type"], r["state"]) for r in rows] == [
+        (core_db.WORK_ITEM_TYPE_PREPARE, core_db.WORK_ITEM_STATE_CLAIMABLE)]
+    body = ctx.db.execute("SELECT body FROM messages "
+                          "WHERE message_id='p1@x'").fetchone()["body"]
+    assert "+newer" in body
+
+
+def test_reupload_with_identical_content_keeps_artifacts(tmp_path):
+    """Re-confirming byte-identical files is a refresh-only no-op — the
+       prepared metadata and review survive."""
+    ctx = _ctx(tmp_path)
+    _confirm_upload(ctx)
+    _plant_pipeline_artifacts(ctx.db)
+    _confirm_upload(ctx)
+    assert core_db.get_patchset_metadata(ctx.db, "<cover@x>") is not None
+    assert core_db.get_ai_review(ctx.db, "<cover@x>") is not None
+
+
+def test_reupload_collision_with_a_corpus_patchset_does_not_reset(tmp_path):
+    """The invalidation is scoped to the uploader's own uploaded row — a
+       collision with a GATHERED patchset must not let an upload wipe the
+       corpus's review or metadata."""
+    ctx = _ctx(tmp_path)
+    core_db.upsert_patchset(ctx.db, "<cover@x>", subject="corpus row",
+                            n_patches=2)
+    _plant_pipeline_artifacts(ctx.db)
+    _confirm_upload(ctx)
+    assert core_db.get_patchset_metadata(ctx.db, "<cover@x>") is not None
+    assert core_db.get_ai_review(ctx.db, "<cover@x>") is not None
+
+
+def test_reupload_by_another_user_does_not_reset(tmp_path):
+    """A different no-grant user re-uploading someone else's upload with
+       changed content refreshes bodies (today's behaviour) but cannot
+       drop the owner's pipeline artifacts."""
+    ctx = _ctx(tmp_path)
+    _confirm_upload(ctx)
+    _plant_pipeline_artifacts(ctx.db)
+    rex = _regular_ctx(tmp_path, db=ctx.db)
+    r = _post_files(rex.client, _modified_series())
+    token = r.text.split('name="token" value="')[1].split('"')[0]
+    rex.client.post("/upload/confirm", data={"token": token},
+                    follow_redirects=False)
+    assert core_db.get_patchset_metadata(ctx.db, "<cover@x>") is not None
+    assert core_db.get_ai_review(ctx.db, "<cover@x>") is not None
+
+
+def test_upload_preview_warns_rerun_for_own_reupload(tmp_path):
+    """The duplicate-root warning tells the owner the pipeline re-runs on
+       content change (the corpus-collision wording keeps the old text —
+       see test_upload_preview_warns_when_root_already_in_corpus)."""
+    ctx = _ctx(tmp_path)
+    _confirm_upload(ctx)
+    r = _post_files(ctx.client, _modified_series())
+    assert "pipeline re-runs" in r.text
