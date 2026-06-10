@@ -1444,8 +1444,41 @@ def _patchset_view(db, root):
                 "unanchored":   unanchored,
             })
 
-    messages = []
+    # Thread the display: cover and patches keep their flat series order,
+    # while comments nest under the message they answer — gather stores
+    # each mail's nearest In-Reply-To ancestor in parent_message_id, so a
+    # reply to a review comment renders one level deeper than the comment
+    # itself, immediately below it. A comment whose parent never made it
+    # into the corpus (lost mail, off-thread reply) stays at top level in
+    # plain sent order. `depth` drives the template's indent and is capped
+    # so a pathological chain can't push the column off the page.
+    replies = {}                 # parent message_id → [comment dicts]
+    top_level = []
+    in_thread = {m["message_id"] for m in raw_messages}
     for m in raw_messages:
+        parent = m.get("parent_message_id")
+        if (core_db.MSG_TYPE_NAMES.get(m["type"]) == "comment"
+                and parent in in_thread and parent != m["message_id"]):
+            replies.setdefault(parent, []).append(m)
+        else:
+            top_level.append(m)
+
+    ordered, emitted = [], set()
+    stack = [(m, 0) for m in reversed(top_level)]
+    while stack:
+        m, depth = stack.pop()
+        ordered.append((m, depth))
+        emitted.add(m["message_id"])
+        stack += [(c, depth + 1) for c in reversed(replies.get(
+            m["message_id"], [])) if c["message_id"] not in emitted]
+    # A reply cycle (forged / mangled headers) leaves its members
+    # unreachable from any top-level message — sweep them in flat rather
+    # than dropping mail from the page.
+    ordered += [(m, 0) for m in raw_messages
+                if m["message_id"] not in emitted]
+
+    messages = []
+    for m, depth in ordered:
         type_name = core_db.MSG_TYPE_NAMES.get(m["type"], "?")
         rendered = patchview.render(m["body"] or "", is_patch=type_name == "patch")
         messages.append({
@@ -1456,6 +1489,7 @@ def _patchset_view(db, root):
             "subject":      m["subject"],
             "author":       m["author_name"] or m["author_email"] or "—",
             "sent_display": _when(m["sent"]),
+            "depth":        min(depth, 8),
             "headers":      rendered.headers,
             "body_html":    rendered.body_html,
         })

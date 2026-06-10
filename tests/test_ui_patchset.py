@@ -650,3 +650,49 @@ def test_request_prepare_404_for_unknown_root(ctx):
     r = ctx.client.post(f"/prepare-requests/{quote('nope@x')}",
                         follow_redirects=False)
     assert r.status_code == 404
+
+
+# --- thread reply nesting ---------------------------------------------------
+
+def test_thread_nests_replies_under_the_comment_they_answer(ctx):
+    """Comments thread by parent_message_id: a reply to a review comment
+       renders immediately below it, indented one level deeper — not in
+       plain sent order. Patches stay flush left."""
+    _plant_patchset(ctx.db)                       # p1 + bob's c1 on it
+    # A second direct comment on the patch, sent BEFORE the reply below —
+    # plain sent order would interleave it between c1 and the reply.
+    core_db.upsert_message(ctx.db, "<c2@x>", root_message_id="<r1@x>",
+                            type=core_db.MSG_TYPE_COMMENT,
+                            body="one nit", parent_message_id="<p1@x>",
+                            subject="Re: [PATCH 1/1] frob", sent=300,
+                            author_email="carol@kernel.org")
+    # Alice answers bob's comment, later than carol's mail.
+    core_db.upsert_message(ctx.db, "<c1r@x>", root_message_id="<r1@x>",
+                            type=core_db.MSG_TYPE_COMMENT,
+                            body="thanks!", parent_message_id="<c1@x>",
+                            subject="Re: Re: [PATCH 1/1] frob", sent=400,
+                            author_email="alice@example.com")
+    body = ctx.client.get(f"/patchsets/{quote('r1@x')}").text
+    # Thread order: the reply follows the comment it answers, ahead of
+    # the later-positioned direct comment.
+    assert (body.index("c1@x") < body.index("c1r@x")
+            < body.index("c2@x"))
+    # Depth-1 indent on both direct comments, depth-2 on the reply,
+    # nothing deeper — and the patch itself is unindented.
+    assert body.count("margin-left: 1.5rem") == 2
+    assert body.count("margin-left: 3.0rem") == 1
+
+
+def test_thread_comment_with_no_parent_stays_top_level(ctx):
+    """A comment without a resolvable parent (gather stores NULL when the
+       In-Reply-To chain leads nowhere) still renders — flush left, in
+       sent order."""
+    _plant_patchset(ctx.db)
+    core_db.upsert_message(ctx.db, "<lost@x>", root_message_id="<r1@x>",
+                            type=core_db.MSG_TYPE_COMMENT,
+                            body="re: a mail we never gathered",
+                            subject="Re: [PATCH 0/7] elsewhere", sent=500)
+    body = ctx.client.get(f"/patchsets/{quote('r1@x')}").text
+    assert "lost@x" in body
+    # Only bob's reply-to-the-patch comment is indented.
+    assert body.count("margin-left:") == 1

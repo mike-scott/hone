@@ -236,7 +236,12 @@
 {% if messages %}
 <div class="list-group mb-4">
 {% for m in messages %}
-  <details class="list-group-item">
+  {# Reply nesting: comments sit directly under the message they answer,
+     indented one step per reply level (m.depth, capped server-side).
+     Cover and patches stay flush left — the series itself isn't a
+     conversation. #}
+  <details class="list-group-item"{% if m.depth %}
+           style="margin-left: {{ m.depth * 1.5 }}rem"{% endif %}>
     <summary class="d-flex flex-wrap gap-2 align-items-center">
       <span class="badge {{ m.type_badge }}">{{ m.type }}</span>
       {% if m.part_index is not none %}
