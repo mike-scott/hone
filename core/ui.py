@@ -2238,6 +2238,11 @@ def _work_item_view(db, work_item_id):
         "patchset_subject":  patchset_subject,
         "patchset_url":      patchset_url,
         "node_url":          node_url,
+        # Origin: the requesting user's email for a USER item, None for
+        # a SYSTEM one — the same attribution the queue's Origin column
+        # shows.
+        "origin_email":      _owner_email_map(db).get(
+                                 w.get("requested_by_user_id")),
         "claiming_node":     claiming_node,
         "claimed_at_display":   _when(w["claimed_at"]),
         "completed_at_display": _when(w["completed_at"]),

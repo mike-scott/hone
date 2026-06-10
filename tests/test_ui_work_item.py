@@ -437,3 +437,26 @@ def test_work_item_page_shows_claude_cli_provenance(ctx):
     body = ctx.client.get(f"/work-items/{wid}").text
     assert "Claude CLI" in body
     assert "2.1.161 (Claude Code)" in body
+
+
+# --- work-item origin -------------------------------------------------------
+
+def test_detail_page_shows_system_origin(ctx):
+    """A pipeline-enqueued item (requested_by_user_id NULL) reads
+       Origin: system — same attribution as the queue's Origin column."""
+    _plant_patchset(ctx.db)
+    wid = core_db.enqueue_review(ctx.db, "<r1@x>")
+    body = ctx.client.get(f"/work-items/{wid}").text
+    assert "Origin" in body
+    assert "system" in body
+
+
+def test_detail_page_shows_the_requesting_users_email(ctx):
+    """A USER-origin item names who asked for it."""
+    uid = core_db.create_user(ctx.db, "alice@x", "alice", "local")
+    _plant_patchset(ctx.db)
+    wid = core_db.enqueue_review(ctx.db, "<r1@x>",
+                                 requested_by_user_id=uid)
+    body = ctx.client.get(f"/work-items/{wid}").text
+    assert "Origin" in body
+    assert "alice@x" in body

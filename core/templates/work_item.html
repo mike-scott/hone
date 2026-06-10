@@ -73,6 +73,14 @@
       <div class="card-header py-2"><strong>Lifecycle</strong></div>
       <div class="card-body py-2">
         <dl class="row mb-0 small">
+          {# Who asked for this item — the requesting user's email for a
+             USER-origin item, "system" for pipeline-enqueued work. Same
+             attribution as the queue's Origin column. #}
+          <dt class="col-sm-5">Origin</dt>
+          <dd class="col-sm-7">
+            {% if origin_email %}<code>{{ origin_email }}</code>
+            {% else %}<span class="text-muted">system</span>{% endif %}
+          </dd>
           <dt class="col-sm-5">Enqueued</dt>
           <dd class="col-sm-7">{{ enqueued_at_display }}</dd>
           <dt class="col-sm-5">Claim id</dt>
