@@ -2174,26 +2174,25 @@ async def work_item_detail(request: Request, work_item_id: int,
     ctx = _work_item_view(request.app.state.db, work_item_id)
     ctx["back_url"] = _safe_back(back) if back else "/"
     ctx["current_user"] = current_user
-    ctx["can_act_on_patchset"] = _can_act_on_patchset(
-        core_db.get_patchset(request.app.state.db, ctx["root_message_id"]),
-        current_user)
     return templates.TemplateResponse(request, "work_item.html", ctx)
 
 
 def _require_work_item_action(db, work_item_id, current_user):
-    """Shared gate for the work-item action badges (release-deferred,
-       retry-unappliable): resolve the item's patchset and apply
-       _can_act_on_patchset. 404 on an unknown item, 403 when the
-       caller may not act."""
-    wi = db.execute("SELECT root_message_id FROM work_items WHERE id=?",
+    """Shared gate for the work-item re-arm badges (release-deferred,
+       retry-unappliable): ADMIN only. A re-arm mutates fleet-level
+       scheduling on a row that keeps its ORIGINAL origin — it acts on
+       whoever's behalf the item was first enqueued — so it's an
+       operator decision, not a per-user one (unlike the review
+       request/delete buttons, which gate via _can_act_on_patchset).
+       404 on an unknown item, 403 when the caller isn't an admin."""
+    wi = db.execute("SELECT id FROM work_items WHERE id=?",
                     (work_item_id,)).fetchone()
     if wi is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND,
                             f"no work-item with id {work_item_id}")
-    ps = core_db.get_patchset(db, wi["root_message_id"])
-    if not _can_act_on_patchset(ps, current_user):
+    if current_user is None or not current_user.is_config_admin:
         raise HTTPException(status.HTTP_403_FORBIDDEN,
-                            "maintainer access required")
+                            "admin access required")
 
 
 @router.post("/work-items/{work_item_id:int}/release-deferred", dependencies=[Depends(auth.require_csrf)])
@@ -2205,7 +2204,7 @@ async def release_deferred(request: Request, work_item_id: int,
        Reuses core_db.release_deferred: a no-op ('not_deferred') if the row
        has since been re-claimed or completed, so a double-click is safe.
        Redirect-after-POST back to the detail page (preserving ?back=).
-       Gated by _can_act_on_patchset via _require_work_item_action."""
+       Admin-only, via _require_work_item_action."""
     db = request.app.state.db
     _require_work_item_action(db, work_item_id, current_user)
     result = core_db.release_deferred(db, work_item_id)
@@ -2226,7 +2225,7 @@ async def retry_unappliable(request: Request, work_item_id: int,
        Reuses core_db.retry_unappliable: a no-op ('not_unappliable') if the
        row has since been re-claimed or completed, so a double-click is safe.
        Redirect-after-POST back to the detail page (preserving ?back=).
-       Gated by _can_act_on_patchset via _require_work_item_action."""
+       Admin-only, via _require_work_item_action."""
     db = request.app.state.db
     _require_work_item_action(db, work_item_id, current_user)
     result = core_db.retry_unappliable(db, work_item_id)

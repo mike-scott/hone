@@ -341,26 +341,31 @@ def test_uploader_can_request_review_of_their_own_upload(tmp_path):
     assert r.status_code == 403
 
 
-def test_work_item_actions_are_gated_too(tmp_path):
-    """release-deferred / retry-unappliable on a corpus item: 403 for a
-       no-grant user, allowed for the uploader of their own upload."""
+def test_work_item_re_arms_are_admin_only(tmp_path):
+    """release-deferred / retry-unappliable are ADMIN-only: a re-arm
+       mutates fleet scheduling on a row that keeps its original origin,
+       so even the uploader of their own upload (and maintainers) get a
+       403 — only an admin may re-arm."""
     ctx = _regular_ctx(tmp_path)
     core_db.add_methodology_version(ctx.db, {"name": "t", "version": 1})
-    core_db.upsert_patchset(ctx.db, "<lkml@x>", subject="corpus row",
-                            n_patches=1)
+    # Make it rex's OWN upload — ownership must not open the re-arm gate.
+    core_db.upsert_patchset(ctx.db, "<lkml@x>", subject="rex upload",
+                            n_patches=1,
+                            origin=core_db.PATCHSET_ORIGIN_UPLOADED,
+                            uploaded_by_user_id=ctx.uid)
     wid = core_db.enqueue_prepare(ctx.db, "<lkml@x>")
-    r = ctx.client.post(f"/work-items/{wid}/retry-unappliable",
-                        follow_redirects=False)
-    assert r.status_code == 403
-    r = ctx.client.post(f"/work-items/{wid}/release-deferred",
-                        follow_redirects=False)
-    assert r.status_code == 403
-    # Flip the patchset to rex's upload: the same actions now pass the
-    # gate (and no-op harmlessly on a claimable item).
-    ctx.db.execute("UPDATE patchsets SET origin=?, uploaded_by_user_id=? "
-                   "WHERE root_message_id=?",
-                   (core_db.PATCHSET_ORIGIN_UPLOADED, ctx.uid, "lkml@x"))
-    ctx.db.commit()
-    r = ctx.client.post(f"/work-items/{wid}/retry-unappliable",
-                        follow_redirects=False)
-    assert r.status_code == 303
+    for action in ("retry-unappliable", "release-deferred"):
+        r = ctx.client.post(f"/work-items/{wid}/{action}",
+                            follow_redirects=False)
+        assert r.status_code == 403
+
+    admin = auth.SessionUser(id=None, email="admin", display_name="Admin",
+                             is_config_admin=True)
+    app = FastAPI()
+    app.include_router(ui.router)
+    app.dependency_overrides[auth.require_session] = lambda: admin
+    app.dependency_overrides[auth.require_csrf] = lambda: None
+    app.state.db = ctx.db
+    r = TestClient(app).post(f"/work-items/{wid}/retry-unappliable",
+                             follow_redirects=False)
+    assert r.status_code == 303          # no-op on a claimable row, but allowed

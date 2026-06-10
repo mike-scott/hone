@@ -11,11 +11,12 @@
 
 <h1 class="h4 mb-1">
   <span class="badge {{ type_badge }} me-1">{{ type }}</span>
-  {# The deferred / unappliable badges double as action buttons — but
-     only for callers _can_act_on_patchset allows (maintainers / admins,
-     or the uploader of this uploaded patchset); everyone else gets the
-     plain badge. The POST handlers enforce the same rule. #}
-  {% if state == "deferred" and can_act_on_patchset %}
+  {# The deferred / unappliable badges double as re-arm buttons — for
+     ADMINS only: a re-arm mutates fleet-level scheduling and the row
+     keeps its original origin, so it's an operator action, not a
+     per-user one. Everyone else gets the plain badge; the POST
+     handlers enforce the same rule (_require_work_item_action). #}
+  {% if state == "deferred" and current_user.is_config_admin %}
   {# A deferred item is terminal and unheld — clicking the badge releases
      it back to claimable (the manual analog of the lease-elapsed re-arm). #}
   <form method="post"
@@ -25,7 +26,7 @@
     <button type="submit" class="badge border-0 {{ state_badge }} me-2"
             title="Release back to claimable">{{ state }} <i class="bi bi-arrow-repeat"></i></button>
   </form>
-  {% elif state == "unappliable" and can_act_on_patchset %}
+  {% elif state == "unappliable" and current_user.is_config_admin %}
   {# An unappliable item is terminal and unheld — clicking the badge re-arms
      it to claimable so a node re-attempts the apply against the current base. #}
   <form method="post"
