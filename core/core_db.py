@@ -955,14 +955,20 @@ class ThreadLocalDB:
        the shared object; WAL gives the concurrent readers + serialized
        writer across them.
 
-       The pool is bounded by the threadpool size (anyio's default 40)
-       plus the event loop thread. close() closes every connection ever
-       opened — call it only at shutdown, after the server has drained."""
+       Threadpool workers are NOT long-lived — anyio retires a worker
+       after 10s idle — so the pool is bounded by sweeping, not by the
+       threadpool size: each new open first closes the connections of
+       threads that have since died. Without the sweep, every retired
+       worker leaked an open connection (3 fds each under WAL: db +
+       -wal + -shm) until the process hit EMFILE and sqlite3.connect
+       failed with "unable to open database file". close() closes
+       every remaining connection — call it only at shutdown, after
+       the server has drained."""
 
     def __init__(self, path):
         self._path = path
         self._tlocal = threading.local()
-        self._all = []
+        self._all = []                   # [(owner thread, conn), ...]
         self._lock = threading.Lock()
 
     def _conn(self):
@@ -971,7 +977,17 @@ class ThreadLocalDB:
             conn = _open(self._path)
             self._tlocal.conn = conn
             with self._lock:
-                self._all.append(conn)
+                live, dead = [], []
+                for t, c in self._all:
+                    (live if t.is_alive() else dead).append((t, c))
+                live.append((threading.current_thread(), conn))
+                self._all = live
+            # Outside the lock — close() takes sqlite-internal locks
+            # and never needs to serialize against other opens. Safe
+            # for the same reason as shutdown close(): the owner
+            # thread is dead, so the connection is idle for good.
+            for _, c in dead:
+                c.close()
         return conn
 
     def __getattr__(self, name):
@@ -983,8 +999,8 @@ class ThreadLocalDB:
            forbids *use* across threads, which check_same_thread guards
            per-connection; by shutdown the worker threads are idle."""
         with self._lock:
-            conns, self._all = self._all, []
-        for conn in conns:
+            entries, self._all = self._all, []
+        for _, conn in entries:
             conn.close()
 
 

@@ -10,6 +10,7 @@
    silently-wrong row (spurious logout) on the other. ThreadLocalDB gives
    each thread its own connection so there is no shared object to race on.
 """
+import sqlite3
 import threading
 
 from core import core_db
@@ -102,12 +103,41 @@ def test_close_closes_every_threads_connection(tmp_path):
     t = threading.Thread(target=lambda: db._conn().execute("SELECT 1"))
     t.start()
     t.join()
-    conns = list(db._all)
+    conns = [c for _, c in db._all]
     assert len(conns) == 2
     db.close()
     for c in conns:
         try:
             c.execute("SELECT 1")
             raise AssertionError("connection still usable after close()")
-        except Exception:
+        except sqlite3.ProgrammingError:
+            pass
+
+
+def test_dead_threads_connections_are_swept_on_open(tmp_path):
+    """The fd-leak regression: anyio retires idle threadpool workers
+       after 10s, so under the top-nav polls every poll could land on a
+       fresh thread whose connection was then pooled forever — fds
+       accumulated until sqlite3.connect failed with 'unable to open
+       database file'. A new open must close and drop the connections
+       owned by threads that have since died."""
+    db = _tldb(tmp_path)
+    dead_conns = []
+
+    def worker():
+        dead_conns.append(db._conn())
+        db.execute("SELECT 1")
+
+    for _ in range(5):                  # 5 worker generations die off
+        t = threading.Thread(target=worker)
+        t.start()
+        t.join()
+    db.execute("SELECT 1")              # a live thread opens → sweep
+    owners = [t for t, _ in db._all]
+    assert len(owners) == 1 and owners[0] is threading.current_thread()
+    for c in dead_conns:
+        try:
+            c.execute("SELECT 1")
+            raise AssertionError("dead thread's connection not closed")
+        except sqlite3.ProgrammingError:
             pass
