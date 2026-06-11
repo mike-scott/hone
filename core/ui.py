@@ -564,15 +564,17 @@ async def my_patchsets(request: Request,
             "status":           label,
             "status_badge":     badge,
             "uploaded_display": _when(r["gathered_at"]),
-            "owner_email":      owner_emails.get(r["uploaded_by_user_id"]
-                                                 or r["claimed_by_user_id"]),
+            "owner_email":      owner_emails.get(
+                                    r["uploaded_by_user_id"]
+                                    or r["first_claimant_user_id"]),
         })
     # The seam-remover: gathered series whose submitter address matches
     # this account, one click from being theirs. Suggested only on the
     # personal view — the admin everyone-view has no "yours".
     claimable = []
     if scope_user_id is not None:
-        for c in core_db.claimable_patchsets(db, current_user.email):
+        for c in core_db.claimable_patchsets(db, scope_user_id,
+                                             current_user.email):
             prior = _claim_prior(db, c, current_user)
             claimable.append({
                 "subject":          c["subject"] or c["root_message_id"],
@@ -616,16 +618,16 @@ def _may_refresh_collision(existing, current_user):
             and existing["uploaded_by_user_id"] == current_user.id)
 
 
-def _collision_context(existing, root_norm, current_user):
+def _collision_context(existing, root_norm, *, claimable):
     """Template context for the blocked-collision callout — who holds the
        existing row drives the explanation the uploader reads, and a
-       claim-eligible gathered series turns the dead end into the claim
+       claimable gathered series turns the dead end into the claim
        doorway (`claimable` renders the Claim button)."""
     gathered = existing["origin"] == core_db.PATCHSET_ORIGIN_GATHERED
     return {
         "root": root_norm,
         "gathered": gathered,
-        "claimable": _may_claim_patchset(dict(existing), current_user),
+        "claimable": claimable,
         "holder": ("hone already gathered this series from the mailing "
                    "list" if gathered
                    else "another user already uploaded this series"),
@@ -652,8 +654,8 @@ async def upload_preview(request: Request,
         db = request.app.state.db
         root_norm = core_db.norm_msgid(parsed["root_message_id"])
         existing = db.execute(
-            "SELECT origin, uploaded_by_user_id, claimed_by_user_id, "
-            "submitter_email FROM patchsets "
+            "SELECT root_message_id, origin, uploaded_by_user_id "
+            "FROM patchsets "
             "WHERE root_message_id=?", (root_norm,)).fetchone()
         if existing is not None:
             # Same gate as the confirm-time invalidation below: a
@@ -680,8 +682,10 @@ async def upload_preview(request: Request,
                     "messages only; it keeps its existing origin and "
                     "work history and starts no new prepare or review")
             else:
-                collision = _collision_context(existing, root_norm,
-                                               current_user)
+                collision = _collision_context(
+                    existing, root_norm,
+                    claimable=_may_claim_patchset(db, dict(existing),
+                                                  current_user))
         # Iteration detection — only for a genuinely NEW root (a known
         # root is a re-upload of the same iteration, handled above).
         # Heuristic, so the preview offers it as a pre-checked opt-out;
@@ -767,16 +771,23 @@ async def upload_confirm(request: Request,
 
     # Iteration linking — the preview offered the prior (entry carries
     # it) and the uploader left the box ticked. Re-check the prior is
-    # still un-superseded: a raced parallel confirm may have chained
-    # onto it first, and a chain must stay linear.
+    # still THIS USER'S head: a raced parallel confirm may have chained
+    # onto it first, and a chain must stay linear PER USER — another
+    # developer hanging their own v2 off the same shared lore series
+    # doesn't consume it for this uploader.
     supersedes = None
     prior_root = entry.get("prior_root")
     if prior_root and form.get("link_iteration"):
         still_head = db.execute(
             "SELECT 1 FROM patchsets WHERE root_message_id=? "
             "AND NOT EXISTS (SELECT 1 FROM patchsets q "
-            "  WHERE q.supersedes_root_message_id=?)",
-            (prior_root, prior_root)).fetchone()
+            "  WHERE q.supersedes_root_message_id=? "
+            "  AND ((q.origin=? AND q.uploaded_by_user_id=?) "
+            "    OR EXISTS (SELECT 1 FROM patchset_claims c "
+            "      WHERE c.root_message_id=q.root_message_id "
+            "      AND c.user_id=?)))",
+            (prior_root, prior_root, core_db.PATCHSET_ORIGIN_UPLOADED,
+             current_user.id, current_user.id)).fetchone()
         if still_head:
             supersedes = prior_root
 
@@ -1523,11 +1534,12 @@ def _annotate_patch(body, concerns):
     return rows, unanchored
 
 
-def _patchset_view(db, root):
+def _patchset_view(db, root, viewer_user_id=None):
     """Build the per-patchset detail render context — patchset header,
        list tags, prepare-derived metadata, ai_review concerns, work-item
        history, and the message thread. Raises 404 when the root is
-       unknown."""
+       unknown. `viewer_user_id` scopes the viewer-relative pieces (the
+       superseded-by banner)."""
     patchset = core_db.get_patchset(db, root)
     if patchset is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND,
@@ -1549,12 +1561,6 @@ def _patchset_view(db, root):
     if patchset["is_uploaded"] and patchset.get("uploaded_by_user_id"):
         u = core_db.get_user_by_id(db, patchset["uploaded_by_user_id"])
         patchset["uploaded_by_email"] = u["email"] if u else None
-    # A claimed gathered series shows who owns the work — the rail row
-    # readers (and the claimant) see next to the submitter address.
-    patchset["claimed_by_email"] = None
-    if patchset.get("claimed_by_user_id"):
-        u = core_db.get_user_by_id(db, patchset["claimed_by_user_id"])
-        patchset["claimed_by_email"] = u["email"] if u else None
 
     # Iteration chain (uploaded patchsets): the row this one replaced
     # and — important on a STALE page — the row that replaced this one.
@@ -1579,9 +1585,23 @@ def _patchset_view(db, root):
             n += 1
             cur = row["supersedes_root_message_id"] if row else None
         patchset["iteration"] = n
+    # The STALE banner is viewer-relative under cooperative claiming:
+    # several developers may each hang their own next iteration off this
+    # shared series, and someone else's private upload is not THIS
+    # viewer's successor. A gathered successor is a series fact and
+    # shows for everyone.
     row = db.execute(
-        "SELECT root_message_id, subject FROM patchsets "
-        "WHERE supersedes_root_message_id=?", (norm_root,)).fetchone()
+        "SELECT root_message_id, subject FROM patchsets q "
+        "WHERE q.supersedes_root_message_id=? "
+        "AND (q.origin=? "
+        "  OR (q.origin=? AND q.uploaded_by_user_id=?) "
+        "  OR EXISTS (SELECT 1 FROM patchset_claims c "
+        "    WHERE c.root_message_id=q.root_message_id "
+        "    AND c.user_id=?)) "
+        "ORDER BY q.gathered_at DESC, q.root_message_id LIMIT 1",
+        (norm_root, core_db.PATCHSET_ORIGIN_GATHERED,
+         core_db.PATCHSET_ORIGIN_UPLOADED, viewer_user_id,
+         viewer_user_id)).fetchone()
     if row:
         superseded_by = {"url": f"/patchsets/{quote(row['root_message_id'])}",
                          "subject": row["subject"] or row["root_message_id"]}
@@ -1747,9 +1767,10 @@ def _patchset_view(db, root):
     # are no dimmed placeholder buttons. At most one action renders.
     # `permission` is the visibility gate the template applies: "act"
     # for anyone _can_act_on_patchset allows (admin / maintainer / the
-    # uploader of their own upload), "admin" for operator-only work-item
-    # cancellation — mirroring what the POST endpoints enforce
-    # (_can_act_on_patchset, _require_work_item_action). Cancels are
+    # uploader of their own upload / a claimant), "curate" for the
+    # destructive curation set (_can_curate_patchset — no claimants),
+    # "admin" for operator-only work-item cancellation — mirroring what
+    # the POST endpoints enforce. Cancels are
     # offered only while the item is UNHELD (claimable / deferred); an
     # in-flight claimed item keeps its lease, the same rule as the
     # work-item detail page.
@@ -1779,8 +1800,11 @@ def _patchset_view(db, root):
                 "kind": "cancel-review", "permission": "admin",
                 "url": f"/work-items/{rev_id}/cancel{work_item_back_qs}"})
     else:
+        # Deleting the shared review is curation, not a request — with
+        # open cooperative claiming, claimants must not be able to wipe
+        # a review others rely on (_can_curate_patchset).
         pipeline_actions.append({
-            "kind": "delete-review", "permission": "act",
+            "kind": "delete-review", "permission": "curate",
             "url": f"/review-requests/{quote(root)}/delete"})
 
     return {
@@ -1804,17 +1828,16 @@ _MSG_TYPE_BADGE = {"cover":   "text-bg-secondary",
                    "comment": "text-bg-info"}
 
 
-def _can_act_on_patchset(patchset, current_user):
-    """The corpus-action rule, shared by the POST handlers and the
-       templates that show / hide their buttons — so enforcement and
-       visibility can't drift. Maintainers and admins may act on any
-       patchset; a regular user on their own uploaded one (review is
-       the upload's whole purpose, so re-requesting, deleting, or
-       retrying it must not need a grant) or on a gathered series they
-       claimed (same purpose — the work is theirs, the pipeline runs on
-       their nodes; deletion stays uploaded-only via its own origin
-       gate). Future per-patchset action buttons should gate through
-       this too."""
+def _can_act_on_patchset(db, patchset, current_user):
+    """The request-action rule (request prepare / review), shared by
+       the POST handlers and the templates that show / hide their
+       buttons — so enforcement and visibility can't drift. Maintainers
+       and admins act on any patchset; a regular user on their own
+       uploaded one (review is the upload's whole purpose) or on a
+       gathered series they claimed — claiming is cooperative ("I'm
+       working with this"), so any claimant may queue work, which runs
+       on their own nodes and budget. Destructive curation is gated
+       separately (_can_curate_patchset)."""
     if current_user is None:
         return False
     if current_user.is_config_admin or current_user.is_maintainer:
@@ -1822,9 +1845,27 @@ def _can_act_on_patchset(patchset, current_user):
     ps = patchset or {}
     if current_user.id is None:
         return False
-    return ((ps.get("origin") == core_db.PATCHSET_ORIGIN_UPLOADED
-             and ps.get("uploaded_by_user_id") == current_user.id)
-            or ps.get("claimed_by_user_id") == current_user.id)
+    if (ps.get("origin") == core_db.PATCHSET_ORIGIN_UPLOADED
+            and ps.get("uploaded_by_user_id") == current_user.id):
+        return True
+    return core_db.user_has_claim(db, ps.get("root_message_id", ""),
+                                  current_user.id)
+
+
+def _can_curate_patchset(patchset, current_user):
+    """The destructive-curation rule (delete review / delete patchset):
+       maintainers, admins, or the uploader of their own upload. Mere
+       claimants are excluded on purpose — with open cooperative
+       claiming, any account could otherwise claim a corpus series and
+       delete the shared review other people (and training) rely on."""
+    if current_user is None:
+        return False
+    if current_user.is_config_admin or current_user.is_maintainer:
+        return True
+    ps = patchset or {}
+    return (current_user.id is not None
+            and ps.get("origin") == core_db.PATCHSET_ORIGIN_UPLOADED
+            and ps.get("uploaded_by_user_id") == current_user.id)
 
 
 @router.get("/patchsets/{root_message_id:path}", response_class=HTMLResponse)
@@ -1835,24 +1876,42 @@ async def patchset_detail(request: Request, root_message_id: str,
        (or any other index that links here). `?back=` carries the URL the
        opener wants the `← Back` button to return to; same-origin paths
        only, fallback to `/`."""
-    ctx = _patchset_view(request.app.state.db, root_message_id)
+    db = request.app.state.db
+    ctx = _patchset_view(db, root_message_id,
+                         viewer_user_id=current_user.id)
+    ps = ctx["patchset"]
     ctx["back_url"] = _safe_back(back)
     ctx["current_user"] = current_user
-    ctx["can_act_on_patchset"] = _can_act_on_patchset(ctx["patchset"],
+    ctx["can_act_on_patchset"] = _can_act_on_patchset(db, ps,
                                                       current_user)
-    ctx["can_claim"] = _may_claim_patchset(ctx["patchset"], current_user)
+    ctx["can_curate_patchset"] = _can_curate_patchset(ps, current_user)
+    ctx["can_claim"] = _may_claim_patchset(db, ps, current_user)
+    # The viewer sees their OWN association ("claimed by you"); the full
+    # claimant list is maintainer / admin visibility — other developers'
+    # dashboards are not each other's business.
+    claimants = core_db.patchset_claimants(db, ps["root_message_id"])
+    ctx["my_claim"] = (current_user.id is not None
+                       and any(c["user_id"] == current_user.id
+                               for c in claimants))
+    ctx["claimants"] = (claimants if (current_user.is_config_admin
+                                      or current_user.is_maintainer)
+                        else [])
+    ctx["can_revoke_claims"] = (bool(claimants)
+                                and not ctx["my_claim"]
+                                and (current_user.is_config_admin
+                                     or current_user.is_maintainer))
+    # The submitter-match flavor: pure presentation — the claim offer
+    # itself is open to every account.
+    ctx["submitter_matches"] = (
+        (ps.get("submitter_email") or "").lower()
+        == current_user.email.lower())
     ctx["claim_prior"] = None
     if ctx["can_claim"]:
-        prior = _claim_prior(request.app.state.db, ctx["patchset"],
-                             current_user)
+        prior = _claim_prior(db, ps, current_user)
         if prior:
             ctx["claim_prior"] = {
                 "url": f"/patchsets/{quote(prior['root_message_id'])}",
                 "subject": prior["subject"] or prior["root_message_id"]}
-    ctx["can_unclaim"] = (
-        ctx["patchset"].get("claimed_by_user_id") is not None
-        and (current_user.is_config_admin or current_user.is_maintainer
-             or ctx["patchset"]["claimed_by_user_id"] == current_user.id))
     return templates.TemplateResponse(request, "patchset.html", ctx)
 
 
@@ -1872,15 +1931,17 @@ async def delete_review(request: Request, root_message_id: str,
        more specific `/delete` suffix wins — the `:path` converter there
        would otherwise greedily swallow `<root>/delete`.
 
-       Gated by _can_act_on_patchset: maintainers / admins, or the
-       uploader for their own uploaded patchset."""
+       Gated by _can_curate_patchset — maintainers / admins, or the
+       uploader for their own uploaded patchset. Claimants are excluded:
+       with open cooperative claiming, the shared review of a corpus
+       series must not be deletable by anyone who merely claimed it."""
     db = request.app.state.db
     ps = core_db.get_patchset(db, root_message_id)
     if ps is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND,
                             f"no patchset with root_message_id "
                             f"{root_message_id!r}")
-    if not _can_act_on_patchset(ps, current_user):
+    if not _can_curate_patchset(ps, current_user):
         raise HTTPException(status.HTTP_403_FORBIDDEN,
                             "maintainer access required")
     core_db.delete_review(db, root_message_id)
@@ -1896,7 +1957,7 @@ async def delete_patchset(request: Request, root_message_id: str,
        rows are data, not submissions, and stay (re-gather couldn't
        restore a deleted one — gather's dedup never revisits a handled
        root, so a corpus delete would be silently permanent). Gated by
-       _can_act_on_patchset; core_db.delete_patchset removes the thread,
+       _can_curate_patchset; core_db.delete_patchset removes the thread,
        work-items and derived artifacts, and splices any iteration chain
        through this row. Redirects to /my-patchsets — the page the
        deleted row lived on."""
@@ -1906,7 +1967,7 @@ async def delete_patchset(request: Request, root_message_id: str,
         raise HTTPException(status.HTTP_404_NOT_FOUND,
                             f"no patchset with root_message_id "
                             f"{root_message_id!r}")
-    if not _can_act_on_patchset(ps, current_user):
+    if not _can_curate_patchset(ps, current_user):
         raise HTTPException(status.HTTP_403_FORBIDDEN,
                             "maintainer access required")
     if ps.get("origin") != core_db.PATCHSET_ORIGIN_UPLOADED:
@@ -1916,22 +1977,19 @@ async def delete_patchset(request: Request, root_message_id: str,
     return RedirectResponse("/my-patchsets", status_code=303)
 
 
-def _may_claim_patchset(patchset, current_user):
-    """Self-service claim eligibility, shared by the POST handler and
-       the templates that offer the button. A gathered, unclaimed series
-       whose submitter_email matches the signed-in account's email
-       (case-insensitive) — the account side is the trustworthy one
-       (registration is admin-approved, Google SSO verifies ownership);
-       lore From: headers are not authenticated, which is why a bare
-       header match on someone ELSE's account must not qualify.
-       Maintainers and admins don't claim — they already hold every
-       action a claim grants."""
+def _may_claim_patchset(db, patchset, current_user):
+    """Claim eligibility, shared by the POST handler and the templates
+       that offer the button. Claiming is cooperative — "I'm working
+       with this series", not an authorship assertion — so ANY signed-in
+       account may claim ANY gathered series it hasn't already claimed;
+       many developers can hold claims on the same one, each seeing it
+       blended into their own dashboard. (A submitter-address match is
+       used elsewhere purely as a SUGGESTION signal, never a gate.)"""
     ps = patchset or {}
     return (current_user is not None and current_user.id is not None
             and ps.get("origin") == core_db.PATCHSET_ORIGIN_GATHERED
-            and ps.get("claimed_by_user_id") is None
-            and (ps.get("submitter_email") or "").lower()
-                == current_user.email.lower())
+            and not core_db.user_has_claim(
+                db, ps.get("root_message_id", ""), current_user.id))
 
 
 def _claim_prior(db, patchset, current_user):
@@ -1950,24 +2008,24 @@ def _claim_prior(db, patchset, current_user):
 @router.post("/patchsets/{root_message_id:path}/claim", dependencies=[Depends(auth.require_csrf)])
 async def claim_patchset(request: Request, root_message_id: str,
                          current_user: auth.SessionUser = Depends(auth.require_session)):
-    """Claim a gathered series as the signed-in developer's own work —
-       the bridge from "my series is already on lore" to the pipeline
-       actions. Stamps claimed_by_user_id only: origin stays GATHERED
-       and the stored bodies are untouched (an association, not an
-       ingest). Gated by _may_claim_patchset; core_db.claim_patchset is
-       first-wins, so losing a race lands harmlessly on the detail page
-       showing who holds the claim. Registered before the wildcard-less
-       routes for the same reason as /delete above."""
+    """Claim a gathered series onto the signed-in developer's dashboard
+       — the bridge from "my series is already on lore" to the pipeline
+       actions. Adds a (series, user) association only: origin stays
+       GATHERED, the stored bodies are untouched, and other developers'
+       claims are unaffected (claiming is cooperative — any number of
+       accounts may work with the same series). Re-claiming what you
+       already hold is an idempotent no-op redirect. Registered before
+       the wildcard-less routes for the same reason as /delete above."""
     db = request.app.state.db
     ps = core_db.get_patchset(db, root_message_id)
     if ps is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND,
                             f"no patchset with root_message_id "
                             f"{root_message_id!r}")
-    if not _may_claim_patchset(ps, current_user):
+    if ps.get("origin") != core_db.PATCHSET_ORIGIN_GATHERED \
+            or current_user.id is None:
         raise HTTPException(status.HTTP_403_FORBIDDEN,
-                            "this series can only be claimed by the "
-                            "account matching its submitter address")
+                            "only gathered series can be claimed")
     # Claim-time iteration linking — the claim doorways offer it as a
     # pre-checked opt-out when one of the claimant's chain heads matches
     # (same heuristic, same consent rule as upload confirm). The prior
@@ -1993,22 +2051,25 @@ async def claim_patchset(request: Request, root_message_id: str,
 @router.post("/patchsets/{root_message_id:path}/unclaim", dependencies=[Depends(auth.require_csrf)])
 async def unclaim_patchset(request: Request, root_message_id: str,
                            current_user: auth.SessionUser = Depends(auth.require_session)):
-    """Release a claim — the claimant's own undo, or a maintainer /
-       admin revoke (the dispute escape hatch). A no-op redirect when
-       nothing is claimed."""
+    """Release a claim — the claimant's own undo (their claim only), or
+       a maintainer / admin revoke, which clears EVERY claim on the
+       series (the cleanup escape hatch)."""
     db = request.app.state.db
     ps = core_db.get_patchset(db, root_message_id)
     if ps is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND,
                             f"no patchset with root_message_id "
                             f"{root_message_id!r}")
-    if not (current_user.is_config_admin or current_user.is_maintainer
-            or (current_user.id is not None
-                and ps.get("claimed_by_user_id") == current_user.id)):
+    if (current_user.id is not None
+            and core_db.user_has_claim(db, root_message_id,
+                                       current_user.id)):
+        core_db.unclaim_patchset(db, root_message_id, current_user.id)
+    elif current_user.is_config_admin or current_user.is_maintainer:
+        core_db.unclaim_patchset(db, root_message_id)
+    else:
         raise HTTPException(status.HTTP_403_FORBIDDEN,
-                            "only the claimant or a maintainer can "
-                            "release a claim")
-    core_db.unclaim_patchset(db, root_message_id)
+                            "only a claimant or a maintainer can "
+                            "release claims")
     return RedirectResponse(f"/patchsets/{quote(root_message_id)}",
                             status_code=303)
 
@@ -2035,7 +2096,7 @@ async def request_review(request: Request, root_message_id: str,
         raise HTTPException(status.HTTP_404_NOT_FOUND,
                             f"no patchset with root_message_id "
                             f"{root_message_id!r}")
-    if not _can_act_on_patchset(ps, current_user):
+    if not _can_act_on_patchset(db, ps, current_user):
         raise HTTPException(status.HTTP_403_FORBIDDEN,
                             "maintainer access required")
     # The user who clicked the button owns the resulting work item; this
@@ -2065,7 +2126,7 @@ async def request_prepare(request: Request, root_message_id: str,
         raise HTTPException(status.HTTP_404_NOT_FOUND,
                             f"no patchset with root_message_id "
                             f"{root_message_id!r}")
-    if not _can_act_on_patchset(ps, current_user):
+    if not _can_act_on_patchset(db, ps, current_user):
         raise HTTPException(status.HTTP_403_FORBIDDEN,
                             "maintainer access required")
     core_db.maybe_enqueue_prepare(db, root_message_id,

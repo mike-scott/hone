@@ -868,12 +868,37 @@ ALTER TABLE patchsets ADD COLUMN claimed_by_user_id INTEGER
 CREATE INDEX idx_patchsets_claimed ON patchsets(claimed_by_user_id);
 """
 
+_SCHEMA_V9 = """
+-- Claims become cooperative: MANY developers may claim one gathered
+-- series ("I'm working with this") — claiming asserts interest, not
+-- authorship, so it carries no submitter-address gate. Each user's
+-- dashboard blends only THEIR claims and uploads; the junction is the
+-- per-(series, user) association the v8 single-claimant column can't
+-- express. Existing claims are carried over, then the column goes.
+CREATE TABLE patchset_claims (
+    root_message_id TEXT NOT NULL
+        REFERENCES patchsets(root_message_id) ON DELETE CASCADE,
+    user_id         INTEGER NOT NULL
+        REFERENCES users(id) ON DELETE CASCADE,
+    claimed_at      INTEGER NOT NULL,
+    PRIMARY KEY (root_message_id, user_id)
+) WITHOUT ROWID;
+CREATE INDEX idx_patchset_claims_user ON patchset_claims(user_id);
+
+INSERT INTO patchset_claims (root_message_id, user_id, claimed_at)
+    SELECT root_message_id, claimed_by_user_id, strftime('%s', 'now')
+    FROM patchsets WHERE claimed_by_user_id IS NOT NULL;
+
+DROP INDEX idx_patchsets_claimed;
+ALTER TABLE patchsets DROP COLUMN claimed_by_user_id;
+"""
+
 # A migration is either a DDL script (executescript) or a Python callable
 # taking the connection — for data fixes SQL can't express (v5 needs a
 # regex). Both run under the same user_version bookkeeping.
 _MIGRATIONS = [_SCHEMA_V1, _SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4,
                _migrate_v5_series_version, _SCHEMA_V6, _SCHEMA_V7,
-               _SCHEMA_V8]
+               _SCHEMA_V8, _SCHEMA_V9]
 
 
 # How long a connection waits on another connection's write lock before
@@ -1216,8 +1241,11 @@ def list_user_patchsets(db, *, user_id=None):
        iterations stay reachable through the head's detail page."""
     sql = ("SELECT p.root_message_id, p.subject, p.n_patches, "
            "p.series_version, p.base_commit, p.gathered_at, p.origin, "
-           "p.uploaded_by_user_id, p.claimed_by_user_id, "
-           "p.supersedes_root_message_id, "
+           "p.uploaded_by_user_id, p.supersedes_root_message_id, "
+           "(SELECT c.user_id FROM patchset_claims c "
+           " WHERE c.root_message_id=p.root_message_id "
+           " ORDER BY c.claimed_at, c.user_id LIMIT 1) "
+           " AS first_claimant_user_id, "
            f"{_PATCHSET_PREPARED} AS has_metadata, "
            f"{_PATCHSET_REVIEWED} AS has_ai_review, "
            "(SELECT w.state FROM work_items w "
@@ -1230,11 +1258,14 @@ def list_user_patchsets(db, *, user_id=None):
     params = [WORK_ITEM_TYPE_PREPARE, WORK_ITEM_TYPE_REVIEW]
     if user_id is not None:
         sql += ("WHERE (p.origin=? AND p.uploaded_by_user_id=?) "
-                "OR (p.origin=? AND p.claimed_by_user_id=?) ")
-        params += [PATCHSET_ORIGIN_UPLOADED, user_id,
-                   PATCHSET_ORIGIN_GATHERED, user_id]
+                "OR EXISTS (SELECT 1 FROM patchset_claims c "
+                "  WHERE c.root_message_id=p.root_message_id "
+                "  AND c.user_id=?) ")
+        params += [PATCHSET_ORIGIN_UPLOADED, user_id, user_id]
     else:
-        sql += ("WHERE p.origin=? OR p.claimed_by_user_id IS NOT NULL ")
+        sql += ("WHERE p.origin=? OR EXISTS "
+                "(SELECT 1 FROM patchset_claims c "
+                "  WHERE c.root_message_id=p.root_message_id) ")
         params.append(PATCHSET_ORIGIN_UPLOADED)
     sql += "ORDER BY p.gathered_at DESC, p.root_message_id"
     rows = [dict(r) for r in db.execute(sql, params)]
@@ -1260,75 +1291,122 @@ def list_user_patchsets(db, *, user_id=None):
 
 
 def claim_patchset(db, root_message_id, user_id, *, supersedes=None):
-    """Stamp a GATHERED, unclaimed patchset as user_id's work. First
-       wins: the WHERE carries the race (two claimants, one UPDATE
-       lands). Returns True when this call took the claim. Uploaded
-       rows are never claimable — they already have an owner.
+    """Associate a GATHERED patchset with user_id — cooperative: any
+       number of developers may hold a claim on the same series, so
+       this is an idempotent insert, not a race. Returns True when THIS
+       call added the claim (False: already held by this user, or the
+       row is uploaded/unknown — uploads have an owner already).
 
-       `supersedes` additionally links the claimed series as the next
-       iteration of one of the claimant's chain heads (the claim-time
-       counterpart of upload-confirm linking) — stamped in the same
-       UPDATE so a lost claim race never half-links."""
-    sets, params = ["claimed_by_user_id=?"], [user_id]
-    if supersedes:
-        sets.append("supersedes_root_message_id=?")
-        params.append(norm_msgid(supersedes))
+       `supersedes` links the claimed series as the next iteration —
+       stamped only while the shared pointer is still unset (the link
+       is a fact about the series, first linker wins; per-user chains
+       over a shared prior live on the CHILD rows instead)."""
+    root = norm_msgid(root_message_id)
     cur = db.execute(
-        f"UPDATE patchsets SET {', '.join(sets)} "
-        "WHERE root_message_id=? AND origin=? "
-        "AND claimed_by_user_id IS NULL",
-        (*params, norm_msgid(root_message_id), PATCHSET_ORIGIN_GATHERED))
+        "INSERT OR IGNORE INTO patchset_claims "
+        "(root_message_id, user_id, claimed_at) "
+        "SELECT root_message_id, ?, ? FROM patchsets "
+        "WHERE root_message_id=? AND origin=?",
+        (user_id, int(time.time()), root, PATCHSET_ORIGIN_GATHERED))
+    took = cur.rowcount == 1
+    if took and supersedes:
+        db.execute(
+            "UPDATE patchsets SET supersedes_root_message_id=? "
+            "WHERE root_message_id=? AND supersedes_root_message_id "
+            "IS NULL",
+            (norm_msgid(supersedes), root))
     db.commit()
-    return cur.rowcount == 1
+    return took
 
 
-def unclaim_patchset(db, root_message_id):
-    """Release a claim (the claimant's own undo, or an admin revoke).
-       Returns True when a claim was actually released."""
-    cur = db.execute(
-        "UPDATE patchsets SET claimed_by_user_id=NULL "
-        "WHERE root_message_id=? AND claimed_by_user_id IS NOT NULL",
-        (norm_msgid(root_message_id),))
+def unclaim_patchset(db, root_message_id, user_id=None):
+    """Release claims: one user's own (the undo), or every claim on the
+       series when user_id is None (the maintainer / admin revoke).
+       Returns True when something was actually released."""
+    sql = "DELETE FROM patchset_claims WHERE root_message_id=?"
+    params = [norm_msgid(root_message_id)]
+    if user_id is not None:
+        sql += " AND user_id=?"
+        params.append(user_id)
+    cur = db.execute(sql, params)
     db.commit()
-    return cur.rowcount == 1
+    return cur.rowcount > 0
 
 
-def claimable_patchsets(db, submitter_email, *, limit=10):
-    """Gathered, unclaimed chain-head patchsets whose submitter_email
-       matches this account's email (case-insensitive) — the
-       /my-patchsets "series on lore that look like yours" suggestions,
-       newest first."""
+def patchset_claimants(db, root_message_id):
+    """Who holds claims on this series — (user_id, email, claimed_at),
+       earliest first. Each viewer's UI shows only their own claim; the
+       full list is for maintainers / admins."""
+    return [dict(r) for r in db.execute(
+        "SELECT c.user_id, u.email, c.claimed_at "
+        "FROM patchset_claims c JOIN users u ON u.id=c.user_id "
+        "WHERE c.root_message_id=? "
+        "ORDER BY c.claimed_at, c.user_id",
+        (norm_msgid(root_message_id),))]
+
+
+def user_has_claim(db, root_message_id, user_id):
+    """Whether user_id holds a claim on this series."""
+    return db.execute(
+        "SELECT 1 FROM patchset_claims "
+        "WHERE root_message_id=? AND user_id=?",
+        (norm_msgid(root_message_id), user_id)).fetchone() is not None
+
+
+def claimable_patchsets(db, user_id, submitter_email, *, limit=10):
+    """Gathered chain-head patchsets this user hasn't claimed whose
+       submitter_email matches their account email (case-insensitive) —
+       the /my-patchsets "series on lore that look like yours"
+       suggestions, newest first. The address match is a SUGGESTION
+       heuristic only, never a claim gate. A head here means no GATHERED
+       successor — another developer's private upload chain must not
+       hide a lore series from this user's suggestions."""
     if not submitter_email:
         return []
     return [dict(r) for r in db.execute(
         "SELECT root_message_id, subject, n_patches, series_version, "
         "change_id, gathered_at FROM patchsets p "
-        "WHERE p.origin=? AND p.claimed_by_user_id IS NULL "
+        "WHERE p.origin=? "
         "AND p.submitter_email=? COLLATE NOCASE "
+        "AND NOT EXISTS (SELECT 1 FROM patchset_claims c "
+        "  WHERE c.root_message_id=p.root_message_id AND c.user_id=?) "
         "AND NOT EXISTS (SELECT 1 FROM patchsets q "
-        "  WHERE q.supersedes_root_message_id=p.root_message_id) "
+        "  WHERE q.supersedes_root_message_id=p.root_message_id "
+        "  AND q.origin=?) "
         "ORDER BY p.gathered_at DESC, p.root_message_id LIMIT ?",
-        (PATCHSET_ORIGIN_GATHERED, submitter_email, limit))]
+        (PATCHSET_ORIGIN_GATHERED, submitter_email, user_id,
+         PATCHSET_ORIGIN_GATHERED, limit))]
 
 
 def unsuperseded_user_series(db, user_id):
     """This developer's chain heads — uploads AND claimed gathered
-       series no other row supersedes — newest first. The candidates an
-       incoming series (a fresh upload, or a claim being linked) may be
-       a new iteration of (upload.find_prior_iteration matches against
-       these by Change-Id, then series title). Chains may cross the
-       origin seam: an upload superseding the claimed lore copy it
-       iterates on is exactly the post-review loop."""
+       series — newest first. The candidates an incoming series (a
+       fresh upload, or a claim being linked) may be a new iteration of
+       (upload.find_prior_iteration matches against these by Change-Id,
+       then series title). Chains may cross the origin seam: an upload
+       superseding the claimed lore copy it iterates on is exactly the
+       post-review loop.
+
+       "Head" is judged per user: a row stops being a candidate only
+       when superseded by one of THIS user's own rows (their upload or
+       a series they claimed) — another developer privately hanging
+       their v2 off the same shared lore series must not consume it."""
     return [dict(r) for r in db.execute(
         "SELECT root_message_id, subject, change_id, gathered_at "
         "FROM patchsets p "
         "WHERE ((p.origin=? AND p.uploaded_by_user_id=?) "
-        "  OR (p.origin=? AND p.claimed_by_user_id=?)) "
+        "  OR EXISTS (SELECT 1 FROM patchset_claims c "
+        "    WHERE c.root_message_id=p.root_message_id "
+        "    AND c.user_id=?)) "
         "AND NOT EXISTS (SELECT 1 FROM patchsets q "
-        "  WHERE q.supersedes_root_message_id=p.root_message_id) "
+        "  WHERE q.supersedes_root_message_id=p.root_message_id "
+        "  AND ((q.origin=? AND q.uploaded_by_user_id=?) "
+        "    OR EXISTS (SELECT 1 FROM patchset_claims c2 "
+        "      WHERE c2.root_message_id=q.root_message_id "
+        "      AND c2.user_id=?))) "
         "ORDER BY p.gathered_at DESC, p.root_message_id",
-        (PATCHSET_ORIGIN_UPLOADED, user_id,
-         PATCHSET_ORIGIN_GATHERED, user_id))]
+        (PATCHSET_ORIGIN_UPLOADED, user_id, user_id,
+         PATCHSET_ORIGIN_UPLOADED, user_id, user_id))]
 
 
 def cancel_unheld_pipeline_items(db, root_message_id):

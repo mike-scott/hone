@@ -1,6 +1,6 @@
-"""Claiming gathered series (core_db.claim_patchset & friends): the v8
-   column, the first-wins stamp, release, and the submitter-email
-   suggestion query."""
+"""Cooperative claims on gathered series (core_db.claim_patchset &
+   friends): the v9 junction table, multi-claimant semantics, release,
+   the suggestion query, and the per-user chain-head scoping."""
 from core import core_db
 
 
@@ -20,75 +20,108 @@ def _gathered(db, root, *, submitter="dev@x", supersedes=None):
                             supersedes_root_message_id=supersedes)
 
 
-def test_v8_adds_claimed_by_to_an_existing_database(tmp_path):
-    """A fresh connect lands on the v8 head with the claim column and
-       its index present."""
+def _upload(db, root, user_id, *, subject=None):
+    core_db.upsert_patchset(db, root, subject=subject or f"[PATCH] {root}",
+                            n_patches=1,
+                            origin=core_db.PATCHSET_ORIGIN_UPLOADED,
+                            uploaded_by_user_id=user_id)
+
+
+def test_v9_replaces_the_claim_column_with_the_junction(tmp_path):
+    """A fresh connect lands on the v9 head: patchset_claims exists,
+       the v8 single-claimant column is gone."""
     db = _db(tmp_path)
     assert (db.execute("PRAGMA user_version").fetchone()[0]
             == len(core_db._MIGRATIONS))
     cols = {r["name"] for r in db.execute(
         "PRAGMA table_info(patchsets)").fetchall()}
-    assert "claimed_by_user_id" in cols
+    assert "claimed_by_user_id" not in cols
     names = {r[0] for r in db.execute(
-        "SELECT name FROM sqlite_master WHERE type='index'")}
-    assert "idx_patchsets_claimed" in names
+        "SELECT name FROM sqlite_master WHERE type IN ('table','index')")}
+    assert {"patchset_claims", "idx_patchset_claims_user"} <= names
 
 
-def test_claim_is_first_wins(tmp_path):
+def test_many_developers_claim_one_series(tmp_path):
+    """Claiming is cooperative: a second claimant adds an association
+       instead of losing a race; re-claiming your own is a no-op."""
     db = _db(tmp_path)
     alice, bob = _user(db, "alice@x"), _user(db, "bob@x")
     _gathered(db, "<s@x>")
     assert core_db.claim_patchset(db, "<s@x>", alice) is True
-    assert core_db.claim_patchset(db, "<s@x>", bob) is False
-    row = db.execute("SELECT claimed_by_user_id FROM patchsets").fetchone()
-    assert row["claimed_by_user_id"] == alice
+    assert core_db.claim_patchset(db, "<s@x>", bob) is True
+    assert core_db.claim_patchset(db, "<s@x>", alice) is False  # held
+    assert [c["user_id"] for c in
+            core_db.patchset_claimants(db, "<s@x>")] == [alice, bob]
+    assert core_db.user_has_claim(db, "<s@x>", alice)
+    assert core_db.user_has_claim(db, "<s@x>", bob)
 
 
 def test_uploaded_rows_are_not_claimable(tmp_path):
     """Uploads already have an owner — a claim on one must not land."""
     db = _db(tmp_path)
     alice = _user(db, "alice@x")
-    core_db.upsert_patchset(db, "<u@x>", subject="[PATCH] mine",
-                            n_patches=1,
-                            origin=core_db.PATCHSET_ORIGIN_UPLOADED,
-                            uploaded_by_user_id=alice)
+    _upload(db, "<u@x>", alice)
     assert core_db.claim_patchset(db, "<u@x>", alice) is False
+    assert core_db.patchset_claimants(db, "<u@x>") == []
 
 
-def test_unclaim_releases_and_reports(tmp_path):
+def test_unclaim_releases_one_or_all(tmp_path):
     db = _db(tmp_path)
-    alice = _user(db, "alice@x")
+    alice, bob = _user(db, "alice@x"), _user(db, "bob@x")
     _gathered(db, "<s@x>")
-    assert core_db.unclaim_patchset(db, "<s@x>") is False   # nothing held
+    assert core_db.unclaim_patchset(db, "<s@x>", alice) is False  # none
     core_db.claim_patchset(db, "<s@x>", alice)
+    core_db.claim_patchset(db, "<s@x>", bob)
+    assert core_db.unclaim_patchset(db, "<s@x>", alice) is True
+    assert [c["user_id"] for c in
+            core_db.patchset_claimants(db, "<s@x>")] == [bob]
+    # user_id=None: the maintainer revoke clears everything.
     assert core_db.unclaim_patchset(db, "<s@x>") is True
-    row = db.execute("SELECT claimed_by_user_id FROM patchsets").fetchone()
-    assert row["claimed_by_user_id"] is None
+    assert core_db.patchset_claimants(db, "<s@x>") == []
     # Released means claimable again.
     assert core_db.claim_patchset(db, "<s@x>", alice) is True
 
 
-def test_claimable_patchsets_matches_email_case_insensitively(tmp_path):
+def test_claimable_patchsets_suggests_per_user(tmp_path):
+    """The suggestion query stays email-matched (a heuristic, not a
+       gate) and is scoped per user: my claim hides a row from MY
+       suggestions only."""
     db = _db(tmp_path)
     alice = _user(db, "alice@x")
+    bob = _user(db, "bob@x")
     _gathered(db, "<mine@x>", submitter="Alice@X")
     _gathered(db, "<theirs@x>", submitter="bob@x")
-    got = core_db.claimable_patchsets(db, "alice@x")
+    got = core_db.claimable_patchsets(db, alice, "alice@x")
     assert [p["root_message_id"] for p in got] == ["mine@x"]
-    assert core_db.claimable_patchsets(db, "") == []
-    # A claimed row stops being suggested.
+    assert core_db.claimable_patchsets(db, alice, "") == []
+    # Bob claiming alice's lookalike does NOT hide it from alice…
+    core_db.claim_patchset(db, "<mine@x>", bob)
+    assert [p["root_message_id"] for p in
+            core_db.claimable_patchsets(db, alice, "alice@x")] \
+        == ["mine@x"]
+    # …but alice claiming it does.
     core_db.claim_patchset(db, "<mine@x>", alice)
-    assert core_db.claimable_patchsets(db, "alice@x") == []
+    assert core_db.claimable_patchsets(db, alice, "alice@x") == []
 
 
-def test_claimable_patchsets_returns_chain_heads_only(tmp_path):
-    """A superseded gathered iteration is history — only the head of the
-       chain is offered for claiming."""
+def test_claimable_patchsets_ignores_private_upload_successors(tmp_path):
+    """A gathered successor ends the suggestion (a series fact); some
+       OTHER developer's private upload superseding the row must not
+       hide the lore series from this user."""
     db = _db(tmp_path)
-    _gathered(db, "<v1@x>")
-    _gathered(db, "<v2@x>", supersedes="<v1@x>")
-    got = core_db.claimable_patchsets(db, "dev@x")
-    assert [p["root_message_id"] for p in got] == ["v2@x"]
+    alice, bob = _user(db, "alice@x"), _user(db, "bob@x")
+    _gathered(db, "<v1@x>", submitter="alice@x")
+    _upload(db, "<bobv2@x>", bob)
+    db.execute("UPDATE patchsets SET supersedes_root_message_id='v1@x' "
+               "WHERE root_message_id='bobv2@x'")
+    db.commit()
+    assert [p["root_message_id"] for p in
+            core_db.claimable_patchsets(db, alice, "alice@x")] \
+        == ["v1@x"]
+    _gathered(db, "<v2@x>", submitter="alice@x", supersedes="<v1@x>")
+    assert [p["root_message_id"] for p in
+            core_db.claimable_patchsets(db, alice, "alice@x")] \
+        == ["v2@x"]
 
 
 def test_list_user_patchsets_blends_uploads_and_claims(tmp_path):
@@ -98,77 +131,77 @@ def test_list_user_patchsets_blends_uploads_and_claims(tmp_path):
        unclaimed gathered row."""
     db = _db(tmp_path)
     alice, bob = _user(db, "alice@x"), _user(db, "bob@x")
-    core_db.upsert_patchset(db, "<u@x>", subject="alice upload",
-                            n_patches=1,
-                            origin=core_db.PATCHSET_ORIGIN_UPLOADED,
-                            uploaded_by_user_id=alice)
-    core_db.upsert_patchset(db, "<ub@x>", subject="bob upload",
-                            n_patches=1,
-                            origin=core_db.PATCHSET_ORIGIN_UPLOADED,
-                            uploaded_by_user_id=bob)
+    _upload(db, "<u@x>", alice, subject="alice upload")
+    _upload(db, "<ub@x>", bob, subject="bob upload")
     _gathered(db, "<g@x>", submitter="alice@x")
     _gathered(db, "<loose@x>", submitter="nobody@x")
     core_db.claim_patchset(db, "<g@x>", alice)
+    core_db.claim_patchset(db, "<g@x>", bob)        # shared claim
 
     mine = core_db.list_user_patchsets(db, user_id=alice)
     assert {r["root_message_id"] for r in mine} == {"u@x", "g@x"}
     by_root = {r["root_message_id"]: r for r in mine}
     assert by_root["g@x"]["origin"] == core_db.PATCHSET_ORIGIN_GATHERED
-    assert by_root["g@x"]["iterations"] == 1
+    assert by_root["g@x"]["first_claimant_user_id"] == alice
+
+    bobs = core_db.list_user_patchsets(db, user_id=bob)
+    assert {r["root_message_id"] for r in bobs} == {"ub@x", "g@x"}
 
     everyone = core_db.list_user_patchsets(db)
     assert {r["root_message_id"] for r in everyone} \
         == {"u@x", "ub@x", "g@x"}
 
 
-def test_unsuperseded_user_series_crosses_the_origin_seam(tmp_path):
-    """Iteration candidates are the developer's chain heads from BOTH
-       origins — uploads and claimed gathered series — excluding
-       superseded rows, unclaimed corpus rows, and other users'."""
+def test_unsuperseded_user_series_is_scoped_per_user(tmp_path):
+    """Iteration candidates cross the origin seam and are judged per
+       user: another developer's upload superseding the shared lore
+       series must not consume it for this one."""
     db = _db(tmp_path)
     alice, bob = _user(db, "alice@x"), _user(db, "bob@x")
-    core_db.upsert_patchset(db, "<u@x>", subject="alice upload",
-                            n_patches=1,
-                            origin=core_db.PATCHSET_ORIGIN_UPLOADED,
-                            uploaded_by_user_id=alice)
-    _gathered(db, "<g1@x>")
-    _gathered(db, "<g2@x>", supersedes="<g1@x>")
-    core_db.claim_patchset(db, "<g2@x>", alice)
-    _gathered(db, "<loose@x>")                       # unclaimed: not hers
-    core_db.upsert_patchset(db, "<ub@x>", subject="bob upload",
-                            n_patches=1,
-                            origin=core_db.PATCHSET_ORIGIN_UPLOADED,
-                            uploaded_by_user_id=bob)
-    got = core_db.unsuperseded_user_series(db, alice)
-    assert {r["root_message_id"] for r in got} == {"u@x", "g2@x"}
-
-
-def test_claim_with_supersedes_stamps_both_atomically(tmp_path):
-    db = _db(tmp_path)
-    alice = _user(db, "alice@x")
     _gathered(db, "<v1@x>")
+    core_db.claim_patchset(db, "<v1@x>", alice)
+    core_db.claim_patchset(db, "<v1@x>", bob)
+    _upload(db, "<bobv2@x>", bob)
+    db.execute("UPDATE patchsets SET supersedes_root_message_id='v1@x' "
+               "WHERE root_message_id='bobv2@x'")
+    db.commit()
+    # Bob's head moved to his upload; alice still sees v1 as her head.
+    assert [r["root_message_id"] for r in
+            core_db.unsuperseded_user_series(db, bob)] == ["bobv2@x"]
+    assert [r["root_message_id"] for r in
+            core_db.unsuperseded_user_series(db, alice)] == ["v1@x"]
+
+
+def test_claim_with_supersedes_links_once(tmp_path):
+    """The claim-time link lands with the first claimant who asks; the
+       shared pointer is a series fact and is never overwritten."""
+    db = _db(tmp_path)
+    alice, bob = _user(db, "alice@x"), _user(db, "bob@x")
+    _gathered(db, "<v1@x>")
+    _gathered(db, "<v0@x>")
     _gathered(db, "<v2@x>")
     core_db.claim_patchset(db, "<v1@x>", alice)
     assert core_db.claim_patchset(db, "<v2@x>", alice,
                                   supersedes="<v1@x>") is True
-    row = db.execute(
-        "SELECT claimed_by_user_id, supersedes_root_message_id "
-        "FROM patchsets WHERE root_message_id='v2@x'").fetchone()
-    assert row["claimed_by_user_id"] == alice
-    assert row["supersedes_root_message_id"] == "v1@x"
-    # A lost race stamps neither.
-    bob = _user(db, "bob@x")
+    # Bob claims v2 too, trying to point it elsewhere — claim lands,
+    # the existing link stays.
     assert core_db.claim_patchset(db, "<v2@x>", bob,
-                                  supersedes="<u@x>") is False
+                                  supersedes="<v0@x>") is True
+    row = db.execute(
+        "SELECT supersedes_root_message_id FROM patchsets "
+        "WHERE root_message_id='v2@x'").fetchone()
+    assert row["supersedes_root_message_id"] == "v1@x"
 
 
-def test_deleting_the_claimant_clears_the_claim(tmp_path):
-    """ON DELETE SET NULL — a removed account releases its claims."""
+def test_deleting_a_claimant_cascades_their_claims(tmp_path):
+    """ON DELETE CASCADE — a removed account releases its claims and
+       only its claims."""
     db = _db(tmp_path)
-    alice = _user(db, "alice@x")
+    alice, bob = _user(db, "alice@x"), _user(db, "bob@x")
     _gathered(db, "<s@x>")
     core_db.claim_patchset(db, "<s@x>", alice)
+    core_db.claim_patchset(db, "<s@x>", bob)
     db.execute("DELETE FROM users WHERE id=?", (alice,))
     db.commit()
-    row = db.execute("SELECT claimed_by_user_id FROM patchsets").fetchone()
-    assert row["claimed_by_user_id"] is None
+    assert [c["user_id"] for c in
+            core_db.patchset_claimants(db, "<s@x>")] == [bob]

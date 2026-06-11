@@ -49,18 +49,23 @@
 <div class="row g-4">
   <div class="col-lg-8">
 
-{# The claim bridge: a gathered series whose submitter address matches
-   the signed-in account. One click makes it theirs — pipeline actions
-   appear and the series joins /my-patchsets — without touching the
-   corpus row (origin and bodies stay as gathered). #}
+{# The claim bridge: claiming is cooperative — any signed-in developer
+   can claim any gathered series to work with it. One click adds it to
+   their /my-patchsets and opens the pipeline actions — without
+   touching the corpus row (origin and bodies stay as gathered, other
+   developers' claims are unaffected). The submitter match is flavor
+   only, never a gate. #}
 {% if can_claim %}
 <div class="alert alert-info mb-3">
   <div class="fw-semibold">
-    <i class="bi bi-person-check me-1"></i>This looks like your series
+    <i class="bi bi-person-check me-1"></i>
+    {% if submitter_matches %}This looks like your series
+    {% else %}Working with this series?{% endif %}
   </div>
   <div class="small mb-2">
-    Its submitter address matches your account. Claim it to request an
-    AI review (run on your own nodes) and track it on My&nbsp;patchsets.
+    {% if submitter_matches %}Its submitter address matches your
+    account. {% endif %}Claim it to request an AI review (run on your
+    own nodes) and track it on My&nbsp;patchsets.
   </div>
   <form method="post"
         action="/patchsets/{{ patchset.root_message_id | urlencode }}/claim"
@@ -116,7 +121,9 @@
                             "Delete this AI review and its review work-item? This cannot be undone."),
     } %}
     {% for a in pipeline_actions
-         if a.permission == "act" or current_user.is_config_admin %}
+         if (a.permission == "act" and can_act_on_patchset)
+            or (a.permission == "curate" and can_curate_patchset)
+            or (a.permission == "admin" and current_user.is_config_admin) %}
     {% set icon, style, label, confirm_msg = _action_ui[a.kind] %}
     <form method="post" action="{{ a.url }}" class="m-0"
           {% if confirm_msg %}onsubmit="return confirm('{{ confirm_msg }}');"{% endif %}>
@@ -301,10 +308,19 @@
         <dl class="row mb-0">
       <dt class="col-5">Submitter</dt>
       <dd class="col-7 text-break">{{ patchset.submitter_email or "—" }}</dd>
-      {% if patchset.claimed_by_email %}
-      {# A claimed gathered series — the account that owns the work. #}
-      <dt class="col-5">Claimed by</dt>
-      <dd class="col-7 text-break">{{ patchset.claimed_by_email }}</dd>
+      {% if my_claim %}
+      {# Each viewer sees their OWN association only; the full list
+         below is maintainer / admin visibility. #}
+      <dt class="col-5">Claimed</dt>
+      <dd class="col-7">by you — on
+        <a href="/my-patchsets">My patchsets</a></dd>
+      {% endif %}
+      {% if claimants %}
+      <dt class="col-5">Claimants</dt>
+      <dd class="col-7 text-break">
+        {% for c in claimants %}<code>{{ c.email }}</code>
+        {%- if not loop.last %}, {% endif %}{% endfor %}
+      </dd>
       {% endif %}
       <dt class="col-5">Sent</dt>
       <dd class="col-7">{{ patchset.sent_display }}</dd>
@@ -378,18 +394,24 @@
          can remove an abandoned upload iteration outright. Corpus
          patchsets are data, never deletable — the POST handler
          enforces both gates. #}
-      {# Claim release: the claimant's undo, or a maintainer / admin
-         revoke. The POST handler enforces the same gate. #}
-      {% if can_unclaim %}
+      {# Claim release: the claimant's own undo — or, for a maintainer /
+         admin who holds no claim themselves, a revoke of every claim.
+         The POST handler enforces the same gate. #}
+      {% if my_claim or can_revoke_claims %}
       <div class="card-body border-top py-2">
         <form method="post"
               action="/patchsets/{{ patchset.root_message_id | urlencode }}/unclaim"
               class="m-0"
-              onsubmit="return confirm('Release the claim on this series? It leaves My patchsets and its pipeline actions are withdrawn.');">
+              {% if my_claim %}
+              onsubmit="return confirm('Release your claim on this series? It leaves your My patchsets and your pipeline actions are withdrawn.');"
+              {% else %}
+              onsubmit="return confirm('Revoke ALL claims on this series? It leaves the My patchsets of every claimant.');"
+              {% endif %}>
           {{ csrf_field(request) }}
           <button type="submit"
                   class="btn btn-sm btn-outline-secondary w-100">
-            <i class="bi bi-person-dash me-1"></i>Release claim
+            <i class="bi bi-person-dash me-1"></i>
+            {{ "Release claim" if my_claim else "Revoke all claims" }}
           </button>
         </form>
       </div>

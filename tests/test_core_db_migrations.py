@@ -55,3 +55,36 @@ def test_v7_adds_daily_stats_to_an_existing_database(tmp_path):
     names = {r[0] for r in db.execute(
         "SELECT name FROM sqlite_master WHERE type='index'")}
     assert {"idx_work_items_completed", "idx_work_items_enqueued"} <= names
+
+
+def test_v9_carries_v8_claims_into_the_junction(tmp_path):
+    """A database stopped at v8 (the single-claimant column) upgrades
+       with its claims preserved in patchset_claims and the column
+       dropped."""
+    path = str(tmp_path / "v8.db")
+    raw = _v4_db(path)
+    for ddl in (core_db._SCHEMA_V6, core_db._SCHEMA_V7,
+                core_db._SCHEMA_V8):
+        raw.executescript(ddl)
+    raw.execute("PRAGMA user_version=8")
+    raw.execute("INSERT INTO users (email, created_at) "
+                "VALUES ('dev@x', 100)")
+    uid = raw.execute("SELECT id FROM users").fetchone()[0]
+    raw.execute("INSERT INTO patchsets (root_message_id, n_patches, "
+                "gathered_at, claimed_by_user_id) "
+                "VALUES ('<s@x>', 1, 100, ?)", (uid,))
+    raw.execute("INSERT INTO patchsets (root_message_id, n_patches, "
+                "gathered_at) VALUES ('<free@x>', 1, 100)")
+    raw.commit()
+    raw.close()
+
+    db = core_db.connect(path)                # applies v9
+    assert (db.execute("PRAGMA user_version").fetchone()[0]
+            == len(core_db._MIGRATIONS))
+    claims = db.execute("SELECT root_message_id, user_id "
+                        "FROM patchset_claims").fetchall()
+    assert [(c["root_message_id"], c["user_id"]) for c in claims] \
+        == [("<s@x>", uid)]
+    cols = {r["name"] for r in db.execute(
+        "PRAGMA table_info(patchsets)").fetchall()}
+    assert "claimed_by_user_id" not in cols
