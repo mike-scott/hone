@@ -52,6 +52,25 @@
   </ul>
 </div>
 {% endif %}
+{% if collision %}
+<div class="alert alert-info" style="max-width: 46rem">
+  <div class="fw-semibold mb-1">
+    <i class="bi bi-info-circle me-1"></i>This series is already in hone
+  </div>
+  <p class="small mb-2">
+    {{ collision.holder | capitalize }} — uploading it again wouldn’t
+    start a new prepare or review, and it wouldn’t appear under
+    My&nbsp;patchsets.
+    {% if collision.gathered %}
+    Any review of the gathered copy is on its patchset page; reviews of
+    corpus patchsets are managed by the maintainers.
+    {% endif %}
+  </p>
+  <a class="btn btn-sm btn-primary"
+     href="/patchsets/{{ collision.root | urlencode }}">
+    View the existing patchset</a>
+</div>
+{% endif %}
 
 {% if preview.ok %}
 <div class="card mb-4" style="max-width: 46rem">
@@ -93,6 +112,7 @@
       {% endfor %}
     </tbody>
   </table>
+  {% if token %}
   <div class="card-body border-top">
     <form method="post" action="/upload/confirm">
       {{ csrf_field(request) }}
@@ -120,6 +140,7 @@
       </span>
     </form>
   </div>
+  {% endif %}
 </div>
 {% endif %}
 {% endif %}

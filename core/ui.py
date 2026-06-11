@@ -578,6 +578,31 @@ async def upload_page(request: Request,
         "current_user": current_user, "preview": None, "token": None})
 
 
+def _may_refresh_collision(existing, current_user):
+    """Whether this user may confirm-ingest over an existing corpus row:
+       maintainers/admins (corpus maintenance), or the row's own uploader
+       (the re-upload flow). Everyone else is offered the existing
+       patchset instead — for them the ingest starts nothing and must
+       not rewrite stored bodies they don't own."""
+    if current_user.is_config_admin or current_user.is_maintainer:
+        return True
+    return (existing["origin"] == core_db.PATCHSET_ORIGIN_UPLOADED
+            and existing["uploaded_by_user_id"] == current_user.id)
+
+
+def _collision_context(existing, root_norm):
+    """Template context for the blocked-collision callout — who holds the
+       existing row drives the explanation the uploader reads."""
+    gathered = existing["origin"] == core_db.PATCHSET_ORIGIN_GATHERED
+    return {
+        "root": root_norm,
+        "gathered": gathered,
+        "holder": ("hone already gathered this series from the mailing "
+                   "list" if gathered
+                   else "another user already uploaded this series"),
+    }
+
+
 @router.post("/upload", response_class=HTMLResponse, dependencies=[Depends(auth.require_csrf)])
 async def upload_preview(request: Request,
                          current_user: auth.SessionUser = Depends(auth.require_session)):
@@ -593,17 +618,22 @@ async def upload_preview(request: Request,
     pasted = (form.get("pasted") or "")
     parsed = upload.parse_upload(blobs, pasted=pasted)
 
-    token, prior = None, None
+    token, prior, collision = None, None, None
     if parsed["ok"]:
         db = request.app.state.db
+        root_norm = core_db.norm_msgid(parsed["root_message_id"])
         existing = db.execute(
             "SELECT origin, uploaded_by_user_id FROM patchsets "
-            "WHERE root_message_id=?",
-            (core_db.norm_msgid(parsed["root_message_id"]),)).fetchone()
+            "WHERE root_message_id=?", (root_norm,)).fetchone()
         if existing is not None:
             # Same gate as the confirm-time invalidation below: a
             # re-upload of YOUR OWN upload re-runs the pipeline when the
-            # content changed; any other collision only refreshes bodies.
+            # content changed; a maintainer/admin collision only
+            # refreshes bodies; anyone else gets no confirm at all —
+            # the ingest would do nothing FOR THEM (no new pipeline, no
+            # My-patchsets row) and must not rewrite stored bodies they
+            # don't own. They get a pointer to the existing patchset
+            # instead (_collision_context).
             if (existing["origin"] == core_db.PATCHSET_ORIGIN_UPLOADED
                     and (current_user.is_config_admin
                          or existing["uploaded_by_user_id"]
@@ -613,11 +643,14 @@ async def upload_preview(request: Request,
                     "the corpus — confirming refreshes its messages, and "
                     "if the content changed the prepared metadata and AI "
                     "review are dropped so the pipeline re-runs")
-            else:
+            elif _may_refresh_collision(existing, current_user):
                 parsed["warnings"].append(
                     "a patchset with this root Message-ID is already in "
-                    "the corpus — confirming refreshes its messages but "
-                    "keeps its existing origin and work history")
+                    "the corpus — confirming refreshes its stored "
+                    "messages only; it keeps its existing origin and "
+                    "work history and starts no new prepare or review")
+            else:
+                collision = _collision_context(existing, root_norm)
         # Iteration detection — only for a genuinely NEW root (a known
         # root is a re-upload of the same iteration, handled above).
         # Heuristic, so the preview offers it as a pre-checked opt-out;
@@ -628,17 +661,19 @@ async def upload_preview(request: Request,
                 core_db.unsuperseded_uploads(db, current_user.id),
                 subject=parsed["subject"],
                 change_id=parsed.get("change_id"))
-        store = _pending_uploads(request)
-        if len(store) >= _UPLOAD_PENDING_CAP:
-            oldest = min(store, key=lambda t: store[t]["at"])
-            del store[oldest]
-        token = secrets.token_urlsafe(16)
-        store[token] = {"parsed": parsed, "user_id": current_user.id,
-                        "at": time.time(),
-                        "prior_root": prior["root_message_id"]
-                                      if prior else None}
+        if collision is None:
+            store = _pending_uploads(request)
+            if len(store) >= _UPLOAD_PENDING_CAP:
+                oldest = min(store, key=lambda t: store[t]["at"])
+                del store[oldest]
+            token = secrets.token_urlsafe(16)
+            store[token] = {"parsed": parsed, "user_id": current_user.id,
+                            "at": time.time(),
+                            "prior_root": prior["root_message_id"]
+                                          if prior else None}
     return templates.TemplateResponse(request, "upload.html", {
         "current_user": current_user, "preview": parsed, "token": token,
+        "collision": collision,
         "prior": {"root": prior["root_message_id"],
                   "subject": prior["subject"],
                   "uploaded_display": _when(prior["gathered_at"])}
@@ -677,6 +712,14 @@ async def upload_confirm(request: Request,
     existing = db.execute(
         "SELECT origin, uploaded_by_user_id FROM patchsets "
         "WHERE root_message_id=?", (root_norm,)).fetchone()
+    # The preview offers no confirm on a collision the user can't
+    # refresh, so reaching here with one means the row appeared between
+    # preview and confirm (a gather or another upload raced us). Land
+    # the user on the existing patchset instead of ingesting.
+    if existing is not None and not _may_refresh_collision(existing,
+                                                           current_user):
+        return RedirectResponse(f"/patchsets/{quote(root_norm)}",
+                                status_code=303)
     if (existing is not None
             and existing["origin"] == core_db.PATCHSET_ORIGIN_UPLOADED
             and (current_user.is_config_admin

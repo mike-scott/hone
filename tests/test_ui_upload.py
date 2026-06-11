@@ -185,11 +185,41 @@ def test_upload_confirm_rejects_unknown_or_foreign_tokens(tmp_path):
 
 
 def test_upload_preview_warns_when_root_already_in_corpus(tmp_path):
+    """A maintainer colliding with a gathered row keeps the confirm —
+       corpus refresh is maintenance — with refresh-only wording."""
     ctx = _ctx(tmp_path)
     core_db.upsert_patchset(ctx.db, "<cover@x>", subject="already here",
                             n_patches=2)
     r = _post_files(ctx.client, _series_files())
     assert "already in the" in r.text
+    assert "starts no new prepare or review" in r.text
+    assert 'name="token"' in r.text
+
+
+def test_upload_preview_blocks_regular_user_on_corpus_collision(tmp_path):
+    """A regular user whose series was already gathered gets no confirm
+       at all — the ingest would start nothing for them — but a plain
+       explanation and a link to the existing patchset."""
+    ctx = _regular_ctx(tmp_path)
+    core_db.upsert_patchset(ctx.db, "<cover@x>", subject="already here",
+                            n_patches=2)
+    r = _post_files(ctx.client, _series_files())
+    assert "already in hone" in r.text
+    assert "gathered this series from the mailing list" in r.text
+    assert 'href="/patchsets/cover%40x"' in r.text
+    assert 'name="token"' not in r.text
+    assert "Series preview" in r.text          # the parse still shows
+
+
+def test_upload_preview_blocks_regular_user_on_foreign_upload(tmp_path):
+    """Same block when the collision is with another user's upload —
+       with wording that says who holds it."""
+    ctx = _ctx(tmp_path)
+    _confirm_upload(ctx)
+    rex = _regular_ctx(tmp_path, db=ctx.db)
+    r = _post_files(rex.client, _series_files())
+    assert "Another user already uploaded this series" in r.text
+    assert 'name="token"' not in r.text
 
 
 # --- commit 2: dashboard, corpus exclusion, badges, training guard ---------
@@ -444,26 +474,50 @@ def test_reupload_collision_with_a_corpus_patchset_does_not_reset(tmp_path):
     assert core_db.get_ai_review(ctx.db, "<cover@x>") is not None
 
 
-def test_reupload_by_another_user_does_not_reset(tmp_path):
-    """A different no-grant user re-uploading someone else's upload with
-       changed content refreshes bodies (today's behaviour) but cannot
-       drop the owner's pipeline artifacts."""
+def test_reupload_by_another_user_is_blocked(tmp_path):
+    """A different no-grant user re-uploading someone else's upload gets
+       no confirm — their preview can't refresh the owner's stored
+       bodies, let alone the pipeline artifacts."""
     ctx = _ctx(tmp_path)
     _confirm_upload(ctx)
     _plant_pipeline_artifacts(ctx.db)
     rex = _regular_ctx(tmp_path, db=ctx.db)
     r = _post_files(rex.client, _modified_series())
-    token = r.text.split('name="token" value="')[1].split('"')[0]
-    rex.client.post("/upload/confirm", data={"token": token},
-                    follow_redirects=False)
+    assert 'name="token"' not in r.text
+    body = ctx.db.execute("SELECT body FROM messages "
+                          "WHERE message_id='p1@x'").fetchone()["body"]
+    assert "+newer" not in body
     assert core_db.get_patchset_metadata(ctx.db, "<cover@x>") is not None
     assert core_db.get_ai_review(ctx.db, "<cover@x>") is not None
 
 
+def test_confirm_races_a_collision_to_the_existing_patchset(tmp_path):
+    """The row appearing between preview and confirm (a gather raced the
+       upload): confirm must not ingest — it lands the user on the
+       existing patchset instead."""
+    ctx = _regular_ctx(tmp_path)
+    r = _post_files(ctx.client, _series_files())
+    token = r.text.split('name="token" value="')[1].split('"')[0]
+    core_db.upsert_patchset(ctx.db, "<cover@x>", subject="gathered first",
+                            n_patches=2)
+    r = ctx.client.post("/upload/confirm", data={"token": token},
+                        follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/patchsets/cover%40x"
+    ps = ctx.db.execute("SELECT origin, subject FROM patchsets").fetchone()
+    assert ps["origin"] == core_db.PATCHSET_ORIGIN_GATHERED
+    assert ps["subject"] == "gathered first"
+    assert ctx.db.execute("SELECT COUNT(*) AS n FROM messages") \
+                 .fetchone()["n"] == 0
+    assert ctx.db.execute("SELECT COUNT(*) AS n FROM work_items") \
+                 .fetchone()["n"] == 0
+
+
 def test_upload_preview_warns_rerun_for_own_reupload(tmp_path):
     """The duplicate-root warning tells the owner the pipeline re-runs on
-       content change (the corpus-collision wording keeps the old text —
-       see test_upload_preview_warns_when_root_already_in_corpus)."""
+       content change (the maintainer corpus-collision wording is
+       refresh-only — see
+       test_upload_preview_warns_when_root_already_in_corpus)."""
     ctx = _ctx(tmp_path)
     _confirm_upload(ctx)
     r = _post_files(ctx.client, _modified_series())
