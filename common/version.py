@@ -8,4 +8,4 @@ this file is what the running code reports; the tag marks the release commit.
 Bump it together with a CHANGELOG.md entry on every release; see CHANGELOG.md
 for the versioning policy.
 """
-__version__ = "0.2.0"
+__version__ = "0.3.0"

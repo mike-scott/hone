@@ -17,6 +17,99 @@ mirrors it. Bump them together with the entry below on every release.
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-06-10
+
+hone becomes multi-user. Session accounts with per-user roles replace
+the shared Basic-auth gate, kernel developers upload their own patch
+series for AI review and follow them on a personal dashboard, nodes
+gain owners so user-requested work runs on the requester's own worker
+and token budget, and the operator surfaces grow matching depth
+(queue scoping and origin, pipeline state, fleet view, deferral
+parking).
+
+Pre-stable: this release carries schema migrations v4–v6 (applied
+automatically on first start) and removes the operator UI's HTTP
+Basic auth in favour of browser sessions; it is not backward
+compatible with 0.2.0 operator workflows.
+
+### Added
+
+- **User accounts and session login**
+  ([`core/auth.py`](core/auth.py), [`core/ui.py`](core/ui.py)):
+  email + password (Argon2) and Google SSO sign-in, self-service
+  registration with admin approval, profile / password settings, and
+  a grantable per-user **admin** permission managed from the Users
+  screen. The config-token admin remains the bootstrap path.
+- **Maintainer user type**: maintainers (and admins) browse the
+  gathered corpus — renamed **Corpus** — and act on any patchset; the
+  per-patchset action buttons are maintainer-gated for everyone else.
+- **Patchset uploads — "review my series"**
+  ([`core/upload.py`](core/upload.py)): upload `git format-patch`
+  files, a series mbox, or a pasted diff; a parse-preview / confirm
+  flow with series-completeness validation; uploaded series are kept
+  apart from the corpus and are never training data. Uploaders can
+  delete their own uploads, a re-upload with changed content re-runs
+  the pipeline (stale prepare metadata and AI review are dropped),
+  and re-uploaded iterations of the same work link into one chain
+  (migration v6) shown as a single dashboard row.
+- **My patchsets dashboard**: the signed-in developer's series as a
+  pipeline view — uploaded → preparing → prepared → reviewing →
+  reviewed, failure states surfaced — one click from the review.
+- **Per-user nodes** ([`core/core_db.py`](core/core_db.py),
+  [`node/`](node/)): enrolled nodes carry an owner; user-requested
+  work claims to the requester's own nodes first, with an opt-in
+  fallback to the system pool (`handles_system`).
+- **Claude token budgets** ([`node/ai.py`](node/ai.py)): opt-in
+  daily / weekly budgets on the node, usage and exhaustion surfaced
+  in the node health views.
+- Claude CLI lifecycle: an update check before each prompt, the CLI
+  version reported in node health, and the CLI build stamped into
+  every completion record.
+- Operator UI depth: a Request-prepare button and a derived Pipeline
+  field on the patchset detail page; admin cancel for queued and
+  deferred work items (including from the patchset page); work-item
+  origin (system vs user) on the queue and detail pages; queue
+  origin / started / completed columns with per-user scoping; a
+  threaded patchset message view; the node fleet as one table with
+  idle nodes included; timestamps in the viewer's local timezone.
+
+### Changed
+
+- **Settings split**: Site settings (admin-only) and User settings,
+  with the theme toggle in the user menu; the work-item re-arm
+  buttons are admin-only; the navbar brand now lands on My patchsets.
+- **Schema**: the unreleased migrations collapsed into v4 (users,
+  node ownership, work-item origin, patchset origin, deferral
+  bookkeeping); the gather now parses `[PATCH vN]` series versions
+  (migration v5 backfills); `users.auth_provider` constrained by a
+  CHECK.
+- The patchset pipeline cluster shows only the actions pertinent to
+  the current state, and the work queue sorts by start date.
+- The lore archive fast-forwards before each gather cycle.
+- Endlessly-deferring work items back off exponentially and park
+  after a cap instead of retrying every lease window.
+- hone-core uses one SQLite connection per thread.
+- hone-node pauses claiming when free disk falls below a floor,
+  bounds the reference repo with idle gc + worktree sweeps, and the
+  Claude CLI turn-timeout default is now 3600s.
+- Docker: backups are no longer baked into the hone-core image.
+
+### Fixed
+
+- Lease-expired claims no longer show as in flight.
+- A graceful-shutdown hang, and the auth-page layout broken by an
+  AdminLTE `.card-title` float.
+
+### Security
+
+- Explicit CSRF tokens on all UI POSTs.
+- Failed logins throttled per IP; login and register no longer leak
+  account existence; registration email validation tightened.
+- Secure-by-default session cookie; hone-core refuses to start
+  without a session secret; revocation and grants take effect on the
+  user's next request.
+- Google OAuth `redirect_uri` pinned to the configured public URL.
+
 ## [0.2.0] — 2026-06-03
 
 hone-node grows from a skeleton into a working two-task AI worker — a
