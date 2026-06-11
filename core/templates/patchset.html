@@ -54,18 +54,28 @@
    their /my-patchsets and opens the pipeline actions — without
    touching the corpus row (origin and bodies stay as gathered, other
    developers' claims are unaffected). The submitter match is flavor
-   only, never a gate. #}
+   only, never a gate. `claimants` is non-empty only for maintainers /
+   admins (other developers' dashboards are not each other's business);
+   for them it outranks the submitter flavor — "someone already claimed
+   this" is the fact that stops the everyone-view list and this banner
+   from looking contradictory. #}
 {% if can_claim %}
 <div class="alert alert-info mb-3">
   <div class="fw-semibold">
     <i class="bi bi-person-check me-1"></i>
-    {% if submitter_matches %}This looks like your series
+    {% if claimants %}Claimed by
+      {% for c in claimants %}<code>{{ c.email }}</code>
+      {{- ", " if not loop.last }}{% endfor %}
+    {% elif submitter_matches %}This looks like your series
     {% else %}Working with this series?{% endif %}
   </div>
   <div class="small mb-2">
-    {% if submitter_matches %}Its submitter address matches your
-    account. {% endif %}Claim it to request an AI review (run on your
-    own nodes) and track it on My&nbsp;patchsets.
+    {% if claimants %}Other developers are already working with this
+    series. Claiming is cooperative — claim it yourself to add it to
+    your own My&nbsp;patchsets; their claims are unaffected.
+    {% else %}{% if submitter_matches %}Its submitter address matches
+    your account. {% endif %}Claim it to request an AI review (run on
+    your own nodes) and track it on My&nbsp;patchsets.{% endif %}
   </div>
   <form method="post"
         action="/patchsets/{{ patchset.root_message_id | urlencode }}/claim"

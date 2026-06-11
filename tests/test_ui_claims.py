@@ -185,6 +185,27 @@ def test_detail_page_shows_claims_per_viewer(tmp_path):
     assert "Revoke all claims" in body
 
 
+def test_detail_page_banner_names_claimants_for_maintainers(tmp_path):
+    """A maintainer / admin viewing a series someone else claimed sees
+       WHO holds it in the claim banner itself — their everyone-view
+       dashboard lists the row, so the plain claim offer would read as
+       a contradiction. Outranks the submitter flavor; regular viewers
+       (no claimant visibility) keep the generic wording."""
+    ctx = _ctx(tmp_path)
+    _gathered(ctx.db)
+    ctx.client.post("/patchsets/s@x/claim", follow_redirects=False)
+    mnt = _ctx(tmp_path, email="dev@x2", maintainer=True, db=ctx.db)
+    body = mnt.client.get("/patchsets/s@x").text
+    assert "Claimed by" in body and "dev@x" in body
+    assert "claim it yourself" in body
+    assert "/patchsets/s%40x/claim" in body           # offer still open
+    assert "Working with this series?" not in body
+    rex = _ctx(tmp_path, email="rex@x", db=ctx.db)
+    body = rex.client.get("/patchsets/s@x").text
+    assert "Claimed by" not in body
+    assert "Working with this series?" in body
+
+
 # --- the dashboard blend under multi-claim ----------------------------------
 
 def test_my_patchsets_blends_each_users_own_view(tmp_path):
