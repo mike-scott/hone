@@ -17,6 +17,72 @@ mirrors it. Bump them together with the entry below on every release.
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-06-10
+
+The "my series is already on lore" dead end becomes the heart of the
+developer flow. A kernel developer whose series hone gathered before
+they ever visited the upload page can now claim it, get an AI review
+on their own node and budget, follow it on My patchsets, and chain
+future iterations onto it — wherever each version entered hone. The
+operator side gains an activity Reports section.
+
+Pre-stable: this release carries schema migrations v7–v9 (applied
+automatically on first start).
+
+### Added
+
+- **Cooperative claims on gathered series**
+  ([`core/ui.py`](core/ui.py), [`core/core_db.py`](core/core_db.py)):
+  any signed-in account may claim any gathered series — "I'm working
+  with this", not an authorship assertion — and many developers can
+  hold claims on the same one (the `patchset_claims` junction,
+  migrations v8/v9). A claim opens the request actions (prepare /
+  review, enqueued as the claimant's own work and routed to their
+  nodes) without touching the corpus row: origin, stored bodies, and
+  other developers' claims are unaffected. Claim doorways: the
+  patchset page, the My-patchsets suggestion strip ("series on lore
+  that look like yours" — submitter-address match is a suggestion
+  heuristic, never a gate), and the upload-collision callout.
+- **My patchsets blends both origins**: claimed lore series appear
+  alongside uploads, badged "from lore", with the same pipeline
+  status chip (starting at "gathered"); the time column is now
+  "Added" (upload time or gather time).
+- **Iteration chains cross the upload/gather seam, per user**: an
+  upload (or a newly gathered version) links as the next iteration of
+  a claimed series — offered as the usual pre-checked opt-out at
+  upload preview and at claim time. Chain heads, the linearity check,
+  and the stale-page banner are judged per viewer, so two developers
+  can each hang their own v2 off the same shared lore v1.
+- **Operator Reports section** (migration v7): daily / weekly
+  activity metrics for admins, frozen per closed UTC day into a
+  `daily_stats` rollup so later deletions can't rewrite history.
+- The upload page accepts gzipped mboxes (lore's `t.mbox.gz` works
+  as-is).
+- Development-process tooling under [`reports/`](reports/): per-feature
+  AI development-cost metrics from Claude Code transcripts, rendered
+  to a one-page PDF (not part of hone-core / hone-node).
+
+### Changed
+
+- **The upload-collision dead end is gone**: colliding with a series
+  you can't act on no longer offers a do-nothing Confirm — the
+  preview explains who holds the series and links (or claims) into
+  it; maintainers keep the confirm for corpus refresh with the
+  refresh-only consequence stated. The confirm endpoint re-checks
+  server-side, covering the preview/confirm race with a gather.
+- **Request vs curate permissions split**: claimants may queue work,
+  but deleting a shared review (or a patchset) stays with
+  maintainers, admins, and the uploader of their own upload.
+
+### Security
+
+- A signed-in user could overwrite the stored message bodies of
+  another user's upload (or refresh corpus rows) by uploading a
+  series with the same root Message-ID — leaving prepared metadata
+  and AI reviews attached to bodies they weren't computed from. The
+  collision preview no longer offers ingestion to non-owners and the
+  confirm endpoint enforces the same gate.
+
 ## [0.3.0] — 2026-06-10
 
 hone becomes multi-user. Session accounts with per-user roles replace
