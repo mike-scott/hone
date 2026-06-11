@@ -54,20 +54,33 @@
    appear and the series joins /my-patchsets — without touching the
    corpus row (origin and bodies stay as gathered). #}
 {% if can_claim %}
-<div class="alert alert-info d-flex align-items-center justify-content-between mb-3">
-  <div>
-    <div class="fw-semibold">
-      <i class="bi bi-person-check me-1"></i>This looks like your series
-    </div>
-    <div class="small">
-      Its submitter address matches your account. Claim it to request an
-      AI review (run on your own nodes) and track it on My&nbsp;patchsets.
-    </div>
+<div class="alert alert-info mb-3">
+  <div class="fw-semibold">
+    <i class="bi bi-person-check me-1"></i>This looks like your series
+  </div>
+  <div class="small mb-2">
+    Its submitter address matches your account. Claim it to request an
+    AI review (run on your own nodes) and track it on My&nbsp;patchsets.
   </div>
   <form method="post"
         action="/patchsets/{{ patchset.root_message_id | urlencode }}/claim"
-        class="m-0 ms-3">
+        class="m-0">
     {{ csrf_field(request) }}
+    {% if claim_prior %}
+    {# Claim-time iteration linking — same heuristic + opt-out consent
+       as the upload preview; the POST recomputes the prior, the box
+       only carries intent. #}
+    <div class="form-check small mb-2">
+      <input class="form-check-input" type="checkbox"
+             name="link_iteration" id="claim-link-iteration" value="1"
+             checked>
+      <label class="form-check-label" for="claim-link-iteration">
+        This looks like a new iteration of
+        <a href="{{ claim_prior.url }}">{{ claim_prior.subject }}</a>
+        — link it and retire that iteration’s queued work.
+      </label>
+    </div>
+    {% endif %}
     <button type="submit" class="btn btn-sm btn-primary text-nowrap">
       Claim this series</button>
   </form>

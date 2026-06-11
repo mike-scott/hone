@@ -30,8 +30,9 @@ def _ctx(tmp_path, *, email="dev@x", maintainer=False, db=None):
     return SimpleNamespace(client=_app(db, user), db=db, uid=uid)
 
 
-def _gathered(db, root=_SERIES_ROOT, *, submitter="dev@x"):
-    core_db.upsert_patchset(db, root, subject="[PATCH v2 0/2] net: fix",
+def _gathered(db, root=_SERIES_ROOT, *, submitter="dev@x",
+              subject="[PATCH v2 0/2] net: fix"):
+    core_db.upsert_patchset(db, root, subject=subject,
                             submitter_email=submitter, n_patches=2)
 
 
@@ -186,6 +187,87 @@ def test_my_patchsets_strip_is_empty_on_no_match(tmp_path):
     _gathered(ctx.db, submitter="dev@x")
     body = ctx.client.get("/my-patchsets").text
     assert "look like yours" not in body
+
+
+def test_upload_links_to_a_claimed_lore_series(tmp_path):
+    """The post-review loop across the origin seam: v1 was gathered and
+       claimed; the developer uploads v2 of the same series title. The
+       preview offers the claimed series as the prior, confirm stamps
+       the link, and the dashboard collapses the chain to the upload
+       (×2, no longer badged as lore — the head is an upload)."""
+    ctx = _ctx(tmp_path, email="alice@x")
+    _gathered(ctx.db, "<v1@x>", submitter="alice@x",
+              subject="[PATCH 0/2] net: fix things")
+    ctx.client.post("/patchsets/v1@x/claim", follow_redirects=False)
+
+    from test_ui_upload import _post_files, _series_files
+    r = _post_files(ctx.client, _series_files())   # v2, same title
+    assert "new iteration of" in r.text
+    assert "net: fix things" in r.text
+    token = r.text.split('name="token" value="')[1].split('"')[0]
+    ctx.client.post("/upload/confirm",
+                    data={"token": token, "link_iteration": "1"},
+                    follow_redirects=False)
+    sup = ctx.db.execute(
+        "SELECT supersedes_root_message_id FROM patchsets "
+        "WHERE root_message_id='cover@x'").fetchone()
+    assert sup["supersedes_root_message_id"] == "v1@x"
+    body = ctx.client.get("/my-patchsets").text
+    assert "×2" in body
+    assert "from lore" not in body
+
+
+def test_claim_links_a_new_lore_iteration(tmp_path):
+    """v1 claimed, v2 gathered later with the same title: the detail
+       page offers link-on-claim, and the POST stamps claim + link and
+       retires v1's queued pipeline work."""
+    ctx = _ctx(tmp_path)
+    _gathered(ctx.db, "<v1@x>")
+    ctx.client.post("/patchsets/v1@x/claim", follow_redirects=False)
+    ctx.client.post("/prepare-requests/v1@x", follow_redirects=False)
+    _gathered(ctx.db, "<v2@x>")
+
+    body = ctx.client.get("/patchsets/v2@x").text
+    assert "new iteration of" in body
+    assert 'name="link_iteration"' in body
+    r = ctx.client.post("/patchsets/v2@x/claim",
+                        data={"link_iteration": "1"},
+                        follow_redirects=False)
+    assert r.status_code == 303
+    row = ctx.db.execute(
+        "SELECT claimed_by_user_id, supersedes_root_message_id "
+        "FROM patchsets WHERE root_message_id='v2@x'").fetchone()
+    assert row["claimed_by_user_id"] == ctx.uid
+    assert row["supersedes_root_message_id"] == "v1@x"
+    assert ctx.db.execute("SELECT COUNT(*) AS n FROM work_items "
+                          "WHERE root_message_id='v1@x'") \
+                 .fetchone()["n"] == 0          # queued work retired
+    body = ctx.client.get("/my-patchsets").text
+    assert "×2" in body
+
+
+def test_claim_without_the_box_does_not_link(tmp_path):
+    """The checkbox is consent — unticking it claims without linking,
+       leaving two independent dashboard rows."""
+    ctx = _ctx(tmp_path)
+    _gathered(ctx.db, "<v1@x>")
+    ctx.client.post("/patchsets/v1@x/claim", follow_redirects=False)
+    _gathered(ctx.db, "<v2@x>")
+    ctx.client.post("/patchsets/v2@x/claim", follow_redirects=False)
+    row = ctx.db.execute(
+        "SELECT claimed_by_user_id, supersedes_root_message_id "
+        "FROM patchsets WHERE root_message_id='v2@x'").fetchone()
+    assert row["claimed_by_user_id"] == ctx.uid
+    assert row["supersedes_root_message_id"] is None
+
+
+def test_claim_strip_offers_the_link_checkbox(tmp_path):
+    ctx = _ctx(tmp_path)
+    _gathered(ctx.db, "<v1@x>")
+    ctx.client.post("/patchsets/v1@x/claim", follow_redirects=False)
+    _gathered(ctx.db, "<v2@x>")
+    body = ctx.client.get("/my-patchsets").text
+    assert "link as new iteration" in body
 
 
 def test_collision_callout_offers_claim_on_email_match(tmp_path):

@@ -572,15 +572,21 @@ async def my_patchsets(request: Request,
     # personal view — the admin everyone-view has no "yours".
     claimable = []
     if scope_user_id is not None:
-        claimable = [{
-            "subject":           c["subject"] or c["root_message_id"],
-            "detail_url":        f"/patchsets/{quote(c['root_message_id'])}",
-            "claim_url":         f"/patchsets/"
-                                 f"{quote(c['root_message_id'])}/claim",
-            "n_patches":         c["n_patches"],
-            "series_version":    c["series_version"],
-            "gathered_display":  _when(c["gathered_at"]),
-        } for c in core_db.claimable_patchsets(db, current_user.email)]
+        for c in core_db.claimable_patchsets(db, current_user.email):
+            prior = _claim_prior(db, c, current_user)
+            claimable.append({
+                "subject":          c["subject"] or c["root_message_id"],
+                "detail_url":       f"/patchsets/"
+                                    f"{quote(c['root_message_id'])}",
+                "claim_url":        f"/patchsets/"
+                                    f"{quote(c['root_message_id'])}/claim",
+                "n_patches":        c["n_patches"],
+                "series_version":   c["series_version"],
+                "gathered_display": _when(c["gathered_at"]),
+                "prior_subject":    (prior["subject"]
+                                     or prior["root_message_id"])
+                                    if prior else None,
+            })
     return templates.TemplateResponse(request, "my_patchsets.html", {
         "current_user": current_user, "items": items,
         "claimable": claimable, "show_owner": scope_user_id is None})
@@ -683,7 +689,7 @@ async def upload_preview(request: Request,
         # ticked. Candidates are the uploader's own chain heads.
         if existing is None and current_user.id is not None:
             prior = upload.find_prior_iteration(
-                core_db.unsuperseded_uploads(db, current_user.id),
+                core_db.unsuperseded_user_series(db, current_user.id),
                 subject=parsed["subject"],
                 change_id=parsed.get("change_id"))
         if collision is None:
@@ -1835,6 +1841,14 @@ async def patchset_detail(request: Request, root_message_id: str,
     ctx["can_act_on_patchset"] = _can_act_on_patchset(ctx["patchset"],
                                                       current_user)
     ctx["can_claim"] = _may_claim_patchset(ctx["patchset"], current_user)
+    ctx["claim_prior"] = None
+    if ctx["can_claim"]:
+        prior = _claim_prior(request.app.state.db, ctx["patchset"],
+                             current_user)
+        if prior:
+            ctx["claim_prior"] = {
+                "url": f"/patchsets/{quote(prior['root_message_id'])}",
+                "subject": prior["subject"] or prior["root_message_id"]}
     ctx["can_unclaim"] = (
         ctx["patchset"].get("claimed_by_user_id") is not None
         and (current_user.is_config_admin or current_user.is_maintainer
@@ -1920,6 +1934,19 @@ def _may_claim_patchset(patchset, current_user):
                 == current_user.email.lower())
 
 
+def _claim_prior(db, patchset, current_user):
+    """The chain head this claim looks like a new iteration of, or None
+       — find_prior_iteration over the claimant's own heads (uploads and
+       claimed series), the row being claimed excluded. Shared by the
+       POST handler and the pages that render the link checkbox."""
+    cands = [c for c in core_db.unsuperseded_user_series(db,
+                                                         current_user.id)
+             if c["root_message_id"] != patchset["root_message_id"]]
+    return upload.find_prior_iteration(
+        cands, subject=patchset.get("subject") or "",
+        change_id=patchset.get("change_id"))
+
+
 @router.post("/patchsets/{root_message_id:path}/claim", dependencies=[Depends(auth.require_csrf)])
 async def claim_patchset(request: Request, root_message_id: str,
                          current_user: auth.SessionUser = Depends(auth.require_session)):
@@ -1941,7 +1968,24 @@ async def claim_patchset(request: Request, root_message_id: str,
         raise HTTPException(status.HTTP_403_FORBIDDEN,
                             "this series can only be claimed by the "
                             "account matching its submitter address")
-    core_db.claim_patchset(db, root_message_id, current_user.id)
+    # Claim-time iteration linking — the claim doorways offer it as a
+    # pre-checked opt-out when one of the claimant's chain heads matches
+    # (same heuristic, same consent rule as upload confirm). The prior
+    # is recomputed here rather than trusted from the form: the
+    # candidate set is heads-only at POST time, so a raced re-link
+    # can't fork a chain.
+    supersedes = None
+    form = await request.form()
+    if form.get("link_iteration"):
+        prior = _claim_prior(db, ps, current_user)
+        supersedes = prior["root_message_id"] if prior else None
+    core_db.claim_patchset(db, root_message_id, current_user.id,
+                           supersedes=supersedes)
+    if supersedes:
+        # The new iteration replaces the old one's pending work — same
+        # retirement as upload-confirm linking; in-flight claimed work
+        # finishes and lands as that iteration's history.
+        core_db.cancel_unheld_pipeline_items(db, supersedes)
     return RedirectResponse(f"/patchsets/{quote(root_message_id)}",
                             status_code=303)
 

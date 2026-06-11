@@ -121,6 +121,47 @@ def test_list_user_patchsets_blends_uploads_and_claims(tmp_path):
         == {"u@x", "ub@x", "g@x"}
 
 
+def test_unsuperseded_user_series_crosses_the_origin_seam(tmp_path):
+    """Iteration candidates are the developer's chain heads from BOTH
+       origins — uploads and claimed gathered series — excluding
+       superseded rows, unclaimed corpus rows, and other users'."""
+    db = _db(tmp_path)
+    alice, bob = _user(db, "alice@x"), _user(db, "bob@x")
+    core_db.upsert_patchset(db, "<u@x>", subject="alice upload",
+                            n_patches=1,
+                            origin=core_db.PATCHSET_ORIGIN_UPLOADED,
+                            uploaded_by_user_id=alice)
+    _gathered(db, "<g1@x>")
+    _gathered(db, "<g2@x>", supersedes="<g1@x>")
+    core_db.claim_patchset(db, "<g2@x>", alice)
+    _gathered(db, "<loose@x>")                       # unclaimed: not hers
+    core_db.upsert_patchset(db, "<ub@x>", subject="bob upload",
+                            n_patches=1,
+                            origin=core_db.PATCHSET_ORIGIN_UPLOADED,
+                            uploaded_by_user_id=bob)
+    got = core_db.unsuperseded_user_series(db, alice)
+    assert {r["root_message_id"] for r in got} == {"u@x", "g2@x"}
+
+
+def test_claim_with_supersedes_stamps_both_atomically(tmp_path):
+    db = _db(tmp_path)
+    alice = _user(db, "alice@x")
+    _gathered(db, "<v1@x>")
+    _gathered(db, "<v2@x>")
+    core_db.claim_patchset(db, "<v1@x>", alice)
+    assert core_db.claim_patchset(db, "<v2@x>", alice,
+                                  supersedes="<v1@x>") is True
+    row = db.execute(
+        "SELECT claimed_by_user_id, supersedes_root_message_id "
+        "FROM patchsets WHERE root_message_id='v2@x'").fetchone()
+    assert row["claimed_by_user_id"] == alice
+    assert row["supersedes_root_message_id"] == "v1@x"
+    # A lost race stamps neither.
+    bob = _user(db, "bob@x")
+    assert core_db.claim_patchset(db, "<v2@x>", bob,
+                                  supersedes="<u@x>") is False
+
+
 def test_deleting_the_claimant_clears_the_claim(tmp_path):
     """ON DELETE SET NULL — a removed account releases its claims."""
     db = _db(tmp_path)

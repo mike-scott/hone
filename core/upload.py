@@ -110,8 +110,8 @@ def series_title(subject):
 
 def find_prior_iteration(candidates, *, subject, change_id=None):
     """The candidate this upload looks like a new iteration of, or None.
-       `candidates` is the uploader's un-superseded uploads, newest
-       first (core_db.unsuperseded_uploads). A matching b4 Change-Id
+       `candidates` are the developer's un-superseded chain heads,
+       newest first (core_db.unsuperseded_user_series). A matching b4 Change-Id
        wins outright (the precise signal); otherwise the first candidate
        with the same series title. Heuristic — the preview offers the
        link as an opt-out, never silently."""

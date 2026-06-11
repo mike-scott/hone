@@ -42,6 +42,19 @@
         <td class="text-end">
           <form method="post" action="{{ c.claim_url }}" class="m-0">
             {{ csrf_field(request) }}
+            {% if c.prior_subject %}
+            {# Looks like the next iteration of a series already on the
+               dashboard — link on claim (opt-out, as everywhere). #}
+            <div class="form-check form-check-inline small m-0 me-2 align-middle">
+              <input class="form-check-input" type="checkbox"
+                     name="link_iteration"
+                     id="link-{{ loop.index }}" value="1" checked>
+              <label class="form-check-label text-muted"
+                     for="link-{{ loop.index }}"
+                     title="{{ c.prior_subject }}">
+                link as new iteration</label>
+            </div>
+            {% endif %}
             <button type="submit" class="btn btn-sm btn-primary">
               Claim</button>
           </form>
