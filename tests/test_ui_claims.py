@@ -2,6 +2,7 @@
    — open eligibility, the rights a claim grants (and the curation it
    doesn't), per-viewer visibility, per-user chains, and the claim
    doorways on the patchset page and the upload-collision callout."""
+import re
 from types import SimpleNamespace
 
 from fastapi import FastAPI
@@ -183,6 +184,29 @@ def test_detail_page_shows_claims_per_viewer(tmp_path):
     body = mnt.client.get("/patchsets/s@x").text
     assert "Claimants" in body and "dev@x" in body
     assert "Revoke all claims" in body
+
+
+def test_detail_page_nav_highlights_per_viewer(tmp_path):
+    """The shared /patchsets/* detail routes light up the nav entry the
+       viewer actually has: Corpus for maintainers / admins, My
+       patchsets for regular users — whose Corpus entry is hidden, so
+       the highlight must not land on a hidden link (which read as no
+       highlight at all)."""
+    ctx = _ctx(tmp_path)
+    _gathered(ctx.db)
+    ctx.client.post("/patchsets/s@x/claim", follow_redirects=False)
+
+    def nav_class(body, href):
+        m = re.search(rf'<a href="{href}" class="(nav-link[^"]*)"', body)
+        return m.group(1) if m else None
+
+    body = ctx.client.get("/patchsets/s@x").text
+    assert "active" in nav_class(body, "/my-patchsets")
+    assert nav_class(body, "/") is None         # no Corpus entry at all
+    mnt = _ctx(tmp_path, email="mnt@x", maintainer=True, db=ctx.db)
+    body = mnt.client.get("/patchsets/s@x").text
+    assert "active" in nav_class(body, "/")
+    assert "active" not in nav_class(body, "/my-patchsets")
 
 
 def test_detail_page_banner_names_claimants_for_maintainers(tmp_path):

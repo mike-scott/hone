@@ -30,6 +30,14 @@
      `{% set active = request.url.path %}` lets each link decide
      whether to render with the .active style. #}
   {% set active = request.url.path %}
+  {# Whether the viewer gets the Corpus nav entry (maintainers/admins).
+     Also decides which entry a shared /patchsets/* detail page lights
+     up: Corpus when visible, otherwise My patchsets — for a regular
+     user the dashboard is the only doorway to a detail page, and the
+     highlight must not land on a hidden link. #}
+  {% set corpus_nav = current_user is defined and current_user
+        and (current_user.is_config_admin
+             or current_user.is_maintainer) %}
   <nav class="app-header navbar navbar-expand bg-body shadow-sm">
     <div class="container-fluid">
       {# Brand → the user's own dashboard: the right landing surface for
@@ -40,7 +48,9 @@
         <li class="nav-item">
           <a href="/my-patchsets" class="nav-link
              {%- if active.startswith('/my-patchsets')
-                  or active.startswith('/upload') %} active{% endif %}">
+                  or active.startswith('/upload')
+                  or (not corpus_nav
+                      and active.startswith('/patchsets')) %} active{% endif %}">
             <i class="bi bi-person-workspace me-1"></i>My patchsets</a>
         </li>
         {# "Corpus" is the system's own word for the gathered patchset
@@ -50,10 +60,10 @@
            and the nav entry hides accordingly. The /patchsets/* detail
            routes are shared by both populations, so an uploaded
            patchset's detail page highlights this entry too; harmless,
-           and the uploaded badge on the page carries the distinction. #}
-        {% if current_user is defined and current_user
-              and (current_user.is_config_admin
-                   or current_user.is_maintainer) %}
+           and the uploaded badge on the page carries the distinction.
+           (Viewers without this entry highlight My patchsets there
+           instead — see corpus_nav above.) #}
+        {% if corpus_nav %}
         <li class="nav-item">
           <a href="/" class="nav-link
              {%- if active == '/' or active.startswith('/patchsets') %} active{% endif %}">
