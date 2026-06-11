@@ -91,6 +91,36 @@ def test_claimable_patchsets_returns_chain_heads_only(tmp_path):
     assert [p["root_message_id"] for p in got] == ["v2@x"]
 
 
+def test_list_user_patchsets_blends_uploads_and_claims(tmp_path):
+    """The dashboard query returns the user's uploads AND their claimed
+       gathered series — and nobody else's; the admin everyone-view
+       carries every upload plus every claimed series, but never an
+       unclaimed gathered row."""
+    db = _db(tmp_path)
+    alice, bob = _user(db, "alice@x"), _user(db, "bob@x")
+    core_db.upsert_patchset(db, "<u@x>", subject="alice upload",
+                            n_patches=1,
+                            origin=core_db.PATCHSET_ORIGIN_UPLOADED,
+                            uploaded_by_user_id=alice)
+    core_db.upsert_patchset(db, "<ub@x>", subject="bob upload",
+                            n_patches=1,
+                            origin=core_db.PATCHSET_ORIGIN_UPLOADED,
+                            uploaded_by_user_id=bob)
+    _gathered(db, "<g@x>", submitter="alice@x")
+    _gathered(db, "<loose@x>", submitter="nobody@x")
+    core_db.claim_patchset(db, "<g@x>", alice)
+
+    mine = core_db.list_user_patchsets(db, user_id=alice)
+    assert {r["root_message_id"] for r in mine} == {"u@x", "g@x"}
+    by_root = {r["root_message_id"]: r for r in mine}
+    assert by_root["g@x"]["origin"] == core_db.PATCHSET_ORIGIN_GATHERED
+    assert by_root["g@x"]["iterations"] == 1
+
+    everyone = core_db.list_user_patchsets(db)
+    assert {r["root_message_id"] for r in everyone} \
+        == {"u@x", "ub@x", "g@x"}
+
+
 def test_deleting_the_claimant_clears_the_claim(tmp_path):
     """ON DELETE SET NULL — a removed account releases its claims."""
     db = _db(tmp_path)

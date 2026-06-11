@@ -8,18 +8,59 @@
 </div>
 
 <p class="text-muted small">
-  Patchsets you uploaded for review. They are kept apart from the
-  gathered corpus and are never used as training data; prepare and
-  review queue to your own nodes first, and the review chains
-  automatically once prepare completes.
+  Your series — uploaded for review, or claimed from the gathered
+  mailing-list corpus (badged <span class="badge text-bg-light border">from
+  lore</span>). Uploads are kept apart from the corpus and are never
+  used as training data; prepare and review queue to your own nodes
+  first, and an upload’s review chains automatically once prepare
+  completes.
 </p>
+
+{# The seam-remover: gathered series whose submitter address matches
+   this account — their developer never needs to upload at all. One
+   click claims; the row then joins the table below. #}
+{% if claimable %}
+<div class="card mb-4">
+  <div class="card-header py-2">
+    <strong><i class="bi bi-inbox me-1"></i>Series on lore that
+    look like yours</strong>
+    <span class="text-muted small ms-1">— same submitter address as your
+    account</span>
+  </div>
+  <table class="table table-sm table-hover align-middle mb-0">
+    <tbody>
+    {% for c in claimable %}
+      <tr>
+        <td>
+          <a href="{{ c.detail_url }}"
+             class="link-body-emphasis text-decoration-none">
+            {{ c.subject }}</a>
+        </td>
+        <td class="text-muted text-nowrap">{{ c.n_patches }} patches
+          · v{{ c.series_version }}</td>
+        <td class="text-nowrap text-muted">{{ c.gathered_display }}</td>
+        <td class="text-end">
+          <form method="post" action="{{ c.claim_url }}" class="m-0">
+            {{ csrf_field(request) }}
+            <button type="submit" class="btn btn-sm btn-primary">
+              Claim</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
 
 {% if items %}
 <table class="table table-sm table-hover align-middle">
   <thead>
     <tr><th>Patchset</th><th>Patches</th><th>Version</th>
         {% if show_owner %}<th>Owner</th>{% endif %}
-        <th>Status</th><th>Uploaded</th></tr>
+        {# "Added": upload time for uploads, gather time for claimed
+           lore series — one header that's true for both. #}
+        <th>Status</th><th>Added</th></tr>
   </thead>
   <tbody>
   {% for p in items %}
@@ -29,6 +70,10 @@
            class="link-body-emphasis text-decoration-none">
           {{ p.subject }}
         </a>
+        {% if p.from_lore %}
+        <span class="badge text-bg-light border"
+              title="A gathered corpus series you claimed — not an upload">from lore</span>
+        {% endif %}
       </td>
       <td>{{ p.n_patches }}</td>
       <td class="text-muted">v{{ p.series_version }}

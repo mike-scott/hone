@@ -1201,20 +1201,23 @@ def _patchset_list_where(q, state, comments, list_tag, patch_type):
     return where, params
 
 
-def list_uploaded_patchsets(db, *, uploaded_by_user_id=None):
-    """The /my-patchsets dashboard rows — uploaded-origin patchsets,
-       newest first, scoped to one uploader (None = the admin's
-       everyone view). Each row carries the pipeline facts the status
-       chip derives from: has_metadata / has_ai_review plus the latest
-       prepare and review work-item states (NULL when none exists).
+def list_user_patchsets(db, *, user_id=None):
+    """The /my-patchsets dashboard rows — the user's uploads BLENDED
+       with the gathered series they claimed, newest first (None = the
+       admin's everyone view: every upload plus every claimed series).
+       Each row carries `origin` (the "from lore" badge) and the
+       pipeline facts the status chip derives from: has_metadata /
+       has_ai_review plus the latest prepare and review work-item
+       states (NULL when none exists).
 
        Iteration chains collapse to one row: only chain HEADS (rows no
        other row supersedes) are returned, each carrying `iterations`
-       (the chain length — 1 for an unchained upload). Superseded
+       (the chain length — 1 for an unchained row). Superseded
        iterations stay reachable through the head's detail page."""
     sql = ("SELECT p.root_message_id, p.subject, p.n_patches, "
-           "p.series_version, p.base_commit, p.gathered_at, "
-           "p.uploaded_by_user_id, p.supersedes_root_message_id, "
+           "p.series_version, p.base_commit, p.gathered_at, p.origin, "
+           "p.uploaded_by_user_id, p.claimed_by_user_id, "
+           "p.supersedes_root_message_id, "
            f"{_PATCHSET_PREPARED} AS has_metadata, "
            f"{_PATCHSET_REVIEWED} AS has_ai_review, "
            "(SELECT w.state FROM work_items w "
@@ -1223,17 +1226,22 @@ def list_uploaded_patchsets(db, *, uploaded_by_user_id=None):
            "(SELECT w.state FROM work_items w "
            " WHERE w.root_message_id=p.root_message_id AND w.type=? "
            " ORDER BY w.id DESC LIMIT 1) AS review_state "
-           "FROM patchsets p WHERE p.origin=? ")
-    params = [WORK_ITEM_TYPE_PREPARE, WORK_ITEM_TYPE_REVIEW,
-              PATCHSET_ORIGIN_UPLOADED]
-    if uploaded_by_user_id is not None:
-        sql += "AND p.uploaded_by_user_id=? "
-        params.append(uploaded_by_user_id)
+           "FROM patchsets p ")
+    params = [WORK_ITEM_TYPE_PREPARE, WORK_ITEM_TYPE_REVIEW]
+    if user_id is not None:
+        sql += ("WHERE (p.origin=? AND p.uploaded_by_user_id=?) "
+                "OR (p.origin=? AND p.claimed_by_user_id=?) ")
+        params += [PATCHSET_ORIGIN_UPLOADED, user_id,
+                   PATCHSET_ORIGIN_GATHERED, user_id]
+    else:
+        sql += ("WHERE p.origin=? OR p.claimed_by_user_id IS NOT NULL ")
+        params.append(PATCHSET_ORIGIN_UPLOADED)
     sql += "ORDER BY p.gathered_at DESC, p.root_message_id"
     rows = [dict(r) for r in db.execute(sql, params)]
-    # Chains never cross uploaders (linking is offered only against the
+    # Chains never cross owners (linking is offered only against the
     # uploader's own rows), so even the scoped view holds every member
-    # of its chains and the walk below stays complete.
+    # of its chains and the walk below stays complete; a missing link
+    # target simply ends the count early (the `nxt in by_root` guard).
     by_root = {r["root_message_id"]: r for r in rows}
     superseded = {r["supersedes_root_message_id"] for r in rows
                   if r["supersedes_root_message_id"]}

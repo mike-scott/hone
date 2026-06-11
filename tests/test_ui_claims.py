@@ -150,6 +150,44 @@ def test_detail_page_shows_claimant_and_release_to_the_right_eyes(tmp_path):
     assert "Release claim" not in body
 
 
+def test_my_patchsets_blends_a_claimed_series(tmp_path):
+    """A claimed lore series joins the dashboard table, badged "from
+       lore", with the status chip starting at "gathered" (not
+       "uploaded")."""
+    ctx = _ctx(tmp_path)
+    _gathered(ctx.db)
+    ctx.client.post("/patchsets/s@x/claim", follow_redirects=False)
+    body = ctx.client.get("/my-patchsets").text
+    assert "[PATCH v2 0/2] net: fix" in body
+    assert "from lore" in body
+    assert ">gathered<" in body
+    rex = _ctx(tmp_path, email="rex@x", db=ctx.db)
+    assert "[PATCH v2 0/2] net: fix" not in rex.client.get(
+        "/my-patchsets").text
+
+
+def test_my_patchsets_suggests_matching_lore_series(tmp_path):
+    """The claim strip: an unclaimed gathered series with this account's
+       submitter address is offered with a one-click Claim; claiming it
+       moves it from the strip into the table."""
+    ctx = _ctx(tmp_path)
+    _gathered(ctx.db)
+    body = ctx.client.get("/my-patchsets").text
+    assert "look like yours" in body
+    assert 'action="/patchsets/s%40x/claim"' in body
+    ctx.client.post("/patchsets/s@x/claim", follow_redirects=False)
+    body = ctx.client.get("/my-patchsets").text
+    assert "look like yours" not in body
+    assert "from lore" in body
+
+
+def test_my_patchsets_strip_is_empty_on_no_match(tmp_path):
+    ctx = _ctx(tmp_path, email="rex@x")
+    _gathered(ctx.db, submitter="dev@x")
+    body = ctx.client.get("/my-patchsets").text
+    assert "look like yours" not in body
+
+
 def test_collision_callout_offers_claim_on_email_match(tmp_path):
     """The upload dead end becomes the doorway: colliding with your own
        gathered series renders the Claim button in the callout."""

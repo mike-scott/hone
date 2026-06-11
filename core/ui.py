@@ -514,7 +514,7 @@ def _upload_status(row, *, base_label="uploaded"):
     """The pipeline chip for a /my-patchsets row — uploaded → preparing
        → prepared → reviewing → reviewed, with the two failure states
        surfaced. Reads the booleans + latest work-item states
-       list_uploaded_patchsets computes. The patchset detail page shares
+       list_user_patchsets computes. The patchset detail page shares
        this for its Pipeline field, with `base_label="gathered"` for
        corpus patchsets (same ladder, different ingest verb)."""
     if row["has_ai_review"]:
@@ -537,33 +537,53 @@ def _upload_status(row, *, base_label="uploaded"):
 @router.get("/my-patchsets", response_class=HTMLResponse)
 async def my_patchsets(request: Request,
                        current_user: auth.SessionUser = Depends(auth.require_session)):
-    """The uploader's dashboard — their uploaded patchsets as a pipeline
-       view (status chip per row, the review one click away), with the
-       Upload button. Scoped like the queue: a regular user sees their
-       own uploads, an admin sees everyone's with an Owner column.
-       Uploaded patchsets do NOT appear on the corpus home page — this
-       page is where they live."""
+    """The developer's dashboard — their uploads blended with the
+       gathered series they claimed, as one pipeline view (status chip
+       per row, the review one click away), with the Upload button and
+       the claim suggestions ("series on lore that look like yours").
+       Scoped like the queue: a regular user sees their own rows, an
+       admin sees everyone's with an Owner column. Uploaded patchsets
+       do NOT appear on the corpus home page — this page is where they
+       live; claimed series live in both (the corpus row IS the
+       claimed row)."""
     db = request.app.state.db
     scope_user_id = _queue_scope_user_id(current_user)
     owner_emails = _owner_email_map(db) if scope_user_id is None else {}
     items = []
-    for r in core_db.list_uploaded_patchsets(
-            db, uploaded_by_user_id=scope_user_id):
-        label, badge = _upload_status(r)
+    for r in core_db.list_user_patchsets(db, user_id=scope_user_id):
+        from_lore = r["origin"] == core_db.PATCHSET_ORIGIN_GATHERED
+        label, badge = _upload_status(
+            r, base_label="gathered" if from_lore else "uploaded")
         items.append({
             "subject":          r["subject"] or r["root_message_id"],
             "detail_url":       f"/patchsets/{quote(r['root_message_id'])}",
             "n_patches":        r["n_patches"],
             "series_version":   r["series_version"],
             "iterations":       r["iterations"],
+            "from_lore":        from_lore,
             "status":           label,
             "status_badge":     badge,
             "uploaded_display": _when(r["gathered_at"]),
-            "owner_email":      owner_emails.get(r["uploaded_by_user_id"]),
+            "owner_email":      owner_emails.get(r["uploaded_by_user_id"]
+                                                 or r["claimed_by_user_id"]),
         })
+    # The seam-remover: gathered series whose submitter address matches
+    # this account, one click from being theirs. Suggested only on the
+    # personal view — the admin everyone-view has no "yours".
+    claimable = []
+    if scope_user_id is not None:
+        claimable = [{
+            "subject":           c["subject"] or c["root_message_id"],
+            "detail_url":        f"/patchsets/{quote(c['root_message_id'])}",
+            "claim_url":         f"/patchsets/"
+                                 f"{quote(c['root_message_id'])}/claim",
+            "n_patches":         c["n_patches"],
+            "series_version":    c["series_version"],
+            "gathered_display":  _when(c["gathered_at"]),
+        } for c in core_db.claimable_patchsets(db, current_user.email)]
     return templates.TemplateResponse(request, "my_patchsets.html", {
         "current_user": current_user, "items": items,
-        "show_owner": scope_user_id is None})
+        "claimable": claimable, "show_owner": scope_user_id is None})
 
 
 @router.get("/upload", response_class=HTMLResponse)
