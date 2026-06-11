@@ -17,3 +17,10 @@ core/backups/
 
 # hone-node simulator data dir (scripts/run-node-sim.sh)
 .sim/
+
+# Generated dev-metrics report — regenerate with reports/dev-metrics-pdf.py.
+reports/dev-metrics.jsonl
+reports/dev-metrics.pdf
+
+# Local scratch data (downloaded mboxes, test inputs) — never committed.
+data/
