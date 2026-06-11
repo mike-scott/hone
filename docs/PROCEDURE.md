@@ -97,6 +97,22 @@ My-patchsets dashboard tracks the pipeline (uploaded → preparing →
 reviewing → reviewed) with the review one click away. Uploads never
 enter the training corpus.
 
+## Claiming a series already on lore
+
+If your series already hit the mailing list, don't re-upload it —
+**claim** the gathered copy. My patchsets suggests gathered series
+whose submitter address matches your account ("series on lore that
+look like yours"), and every gathered series' detail page offers
+**Claim this series** to any signed-in account, whoever posted it. A
+claim adds the series to your My-patchsets pipeline and opens the
+request-prepare / request-review actions, routed to your own nodes
+first. If it looks like the next iteration of a series you already
+track (your v1 upload, say), the claim form offers to link it — one
+dashboard row spanning the upload → lore seam. Claims are cooperative
+(any number of accounts can claim the same series, independently) and
+reversible (**Release claim** on the detail page); the corpus row
+itself — origin, messages, training eligibility — is untouched.
+
 ## Watching the queue
 
 The queue page (`/queue`) shows the work queue with a two-axis chip

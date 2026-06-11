@@ -128,12 +128,20 @@ no JavaScript build step; the AdminLTE / Bootstrap / Bootstrap Icons /
 HTMX assets are vendored, not loaded from a CDN. Timestamps display in
 the viewer's local timezone (UTC without JS; hover shows UTC).
 
+The UI is **kernel-developer-first**: the primary persona is a
+developer getting their own series reviewed — upload it, or **claim**
+its gathered copy once it hits lore (claiming is cooperative and open
+to every account) — with the operator and training surfaces layered on
+for maintainers and admins.
+
 Operator pages: **Corpus** (the home page — the gathered patchset
 corpus, searchable and filterable; what training and maintainer-selected
 reviews draw from; visible to maintainers and admins only), **Queue**
-(the work queue with type × state chip filter), **My patchsets** (your uploaded patchsets as a pipeline view,
-plus the upload form — uploads are submissions for review, kept out of
-the corpus and never used as training data), **Nodes** (the fleet —
+(the work queue with type × state chip filter), **My patchsets** (your
+patchset pipeline — uploads blended with the gathered lore series you
+claimed, plus the upload form; uploads are submissions for review, kept
+out of the corpus and never used as training data, while a claimed
+series stays a corpus row), **Nodes** (the fleet —
 every node visible, controls gated to the node's owner — plus your
 pending-enrollment pairing queue), **Enroll** (the verification URL a
 node prints on startup; the first user to look a code up pairs the node

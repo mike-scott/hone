@@ -164,6 +164,13 @@ no single-page-app and no JavaScript build step (AdminLTE, Bootstrap,
 Bootstrap Icons and HTMX are vendored static assets, which is why the
 hone-core image needs no Node toolchain).
 
+The UI is built **kernel-developer-first**: the primary persona is a
+developer getting their own series reviewed — upload it (or claim the
+gathered copy once it hits lore), watch the pipeline, read the review —
+with the operator and training surfaces (corpus, sessions, merge gate)
+layered on for maintainers and admins. *My patchsets* is the landing
+page for every role.
+
 Timestamps render in the **viewer's local timezone**: the server emits
 every timestamp as a `<time datetime="…Z">` element with a UTC text
 fallback, and a small script localizes the text on load and after every
@@ -176,7 +183,9 @@ Pages:
   mailing list, patch type), sortable columns, and per-patchset detail
   pages (`/patchsets/<root>`). "Corpus" is the population training and
   maintainer-selected reviews draw from; a user's own uploads live on
-  *My patchsets*, not here. **Maintainers and admins only** — a regular
+  *My patchsets*, not here — a **claimed** gathered series lives in
+  both (the corpus row IS the claimed row; see *Claiming a gathered
+  series* below). **Maintainers and admins only** — a regular
   user landing on `/` is redirected to their dashboard, and the nav
   hides the entry.
 - **Queue** (`/queue`) — the work queue (prepare + review + train items),
@@ -195,15 +204,19 @@ Pages:
   deny it. The first user to look a code up **pairs** the enrollment to
   themselves (first-lookup-wins) and becomes the node's owner at
   approval.
-- **My patchsets** (`/my-patchsets`) — the uploader's dashboard: their
-  uploaded patchsets as a pipeline view (uploaded → preparing → reviewing
-  → reviewed, with the failure states surfaced), the review one click
-  away, and the **Upload** button (`/upload`: `git format-patch` output,
+- **My patchsets** (`/my-patchsets`) — the developer's dashboard: their
+  uploaded patchsets **blended with the gathered series they claimed**
+  as one pipeline view (uploaded/gathered → preparing → reviewing →
+  reviewed, with the failure states surfaced), the review one click
+  away, the **Upload** button (`/upload`: `git format-patch` output,
   a series mbox, or a pasted diff, parsed into a confirm-preview before
-  anything ingests). Scoped like the queue — a user sees their own, an
-  admin sees everyone's. Uploaded patchsets do **not** appear on the
-  corpus home page and are never training data (see `SOURCES.md` →
-  *Uploads are not a gather source*).
+  anything ingests), and a claim-suggestions strip — gathered series
+  whose submitter address matches the account, one click from being
+  claimed (see *Claiming a gathered series* below). Scoped like the
+  queue — a user sees their own, an admin sees everyone's with an Owner
+  column. Uploaded patchsets do **not** appear on the corpus home page
+  and are never training data (see `SOURCES.md` → *Uploads are not a
+  gather source*).
 - **Sessions** (`/sessions`) — the training-session list (drafts, active,
   complete, analysed) and the **session-draft page** (`/sessions/draft`)
   where an operator composes a new session against a corpus snapshot. See
@@ -224,6 +237,37 @@ Pages:
 
 Operators authenticate with a human login (session-based), distinct from the
 header credentials a node presents.
+
+### Claiming a gathered series
+
+A kernel developer's series often reaches hone twice: uploaded for a
+pre-post review, and gathered from lore once posted. **Claims remove
+that seam.** Claiming is cooperative — "I'm working with this series",
+not an authorship assertion — so any signed-in account may claim any
+gathered series from its detail page, and any number of developers may
+hold claims on the same one. A submitter-address match changes the
+wording of the claim offer (and feeds the My-patchsets suggestion
+strip) but is never a gate.
+
+A claim grants the claimant the pipeline actions on the series —
+request prepare / review, routed to their own nodes first (the work
+item carries them as `requested_by_user_id`) — and blends it into
+their My patchsets. It does **not** grant curation: deleting a review
+or a patchset stays with maintainers / admins (and the uploader, for
+their own uploads) — with open claiming, any account could otherwise
+wipe a shared review the corpus and other claimants rely on. The
+corpus row IS the claimed row: origin and message bodies stay as
+gathered, the series remains training data, other claims are
+unaffected.
+
+At claim time the series can be **linked as the next iteration** of
+one of the claimant's existing chain heads (their upload of v1, say) —
+the same heuristic + opt-out consent as the upload preview — so
+iteration chains span the uploaded ↔ gathered seam and collapse to one
+dashboard row. Visibility is per-viewer: each developer sees only
+their own claim ("claimed by you", plus a release control); a
+maintainer / admin additionally sees the claimant list — named in the
+claim banner and the detail rail — and a revoke-all control.
 
 ## Persistent storage
 
@@ -390,7 +434,7 @@ by concern:
 
 | Group | Tables | Holds |
 | --- | --- | --- |
-| **Corpus** | `patchsets`, `messages`, `ai_reviews`, `patchset_metadata`, `review_evaluations` | one row per patchset (root Message-ID + declared `base_commit`), each carrying an `origin` — `gathered` (a list archive; the corpus, training data) or `uploaded` (the web UI's Upload page, with `uploaded_by_user_id`; a submission, never training data — its review auto-chains when prepare completes, stamped with the uploader as the work-item origin); the per-message store (covers, patches, comments) keyed on Message-ID; one `ai_reviews` row per `(patchset, source)` with **scoped** concerns (see *Review output: concerns and scoping*); one `patchset_metadata` row per patchset with the structured metadata produced by the `prepare` task; one `review_evaluations` row per `(patchset, ai_review, session)` — written when every train a session created for the patchset has terminated; a patchset re-used across sessions produces one eval row per session |
+| **Corpus** | `patchsets`, `messages`, `ai_reviews`, `patchset_metadata`, `review_evaluations`, `patchset_claims` | one row per patchset (root Message-ID + declared `base_commit`), each carrying an `origin` — `gathered` (a list archive; the corpus, training data) or `uploaded` (the web UI's Upload page, with `uploaded_by_user_id`; a submission, never training data — its review auto-chains when prepare completes, stamped with the uploader as the work-item origin) — and an optional `supersedes_root_message_id` iteration link (chains may span the uploaded ↔ gathered seam); the per-message store (covers, patches, comments) keyed on Message-ID; one `ai_reviews` row per `(patchset, source)` with **scoped** concerns (see *Review output: concerns and scoping*); one `patchset_metadata` row per patchset with the structured metadata produced by the `prepare` task; one `review_evaluations` row per `(patchset, ai_review, session)` — written when every train a session created for the patchset has terminated; a patchset re-used across sessions produces one eval row per session; one `patchset_claims` row per `(patchset, user)` — the cooperative claim blending a gathered series into the claimant's My patchsets (pipeline actions, never curation; see *Operator web UI* → *Claiming a gathered series*) |
 | **List-tag filter** | `list_tags`, `patchset_tags` | the universe of mailing lists (origin = `manifest` from the lore manifest, or `observed` once seen on a patchset) and the per-patchset tag set; an operator-enabled tag set gates ingest |
 | **Methodology** | `methodology_versions`, `methodology_candidates`, `methodology_proposals`, `eligibility_flags` | the versioned methodology document (active + superseded); the candidate practices with their pooled `applied` / `catches` / `unique_catches` counters and **two parallel `severity_witness` histograms** — `severity_witness_introduced` across the five tags for findings the candidate has produced on patch-introduced code, and `severity_witness_preexisting` for findings on pre-existing code (per the concern's `is_preexisting` flag). Two histograms rather than one so the merge gate can show the introduced-vs-preexisting split directly without re-querying concerns; the human-dispositioned `methodology_proposals` queue + suppression log; and the `eligibility_flags` table — per-`(subject_kind, subject_id, kind)` rows recording which subjects currently satisfy which deterministic eligibility gate (graduate, prune-redundant, prune-ineffective, consolidate, revise, revise-severity-scale), with the evidence snapshot at flag-set time, a `suppressed_at` timestamp (set when the suppression log filters the flag), and a `defer_watermark_at` recording the counter value past which the flag was deferred — together driving the draft-task trigger pipeline described in *The merge gate* |
 | **Work queue** | `work_items`, `draft_tasks` | the unified prepare + review + train queue (`type` = prepare / review / train; one prepare per patchset, one review per patchset, one train per session-selected `(patch, comment)` pair), each row stamped with a `requested_by_user_id` origin (NULL = system, a user id = user-requested — the per-user claim-routing key; see [`ARCHITECTURE-WORK-LIFECYCLE.md`](ARCHITECTURE-WORK-LIFECYCLE.md)); draft tasks for merge-gate work |
