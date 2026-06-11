@@ -61,14 +61,31 @@
     {{ collision.holder | capitalize }} — uploading it again wouldn’t
     start a new prepare or review, and it wouldn’t appear under
     My&nbsp;patchsets.
-    {% if collision.gathered %}
+    {% if collision.claimable %}
+    But its submitter address matches your account: claim it to request
+    an AI review (run on your own nodes) and track it on
+    My&nbsp;patchsets.
+    {% elif collision.gathered %}
     Any review of the gathered copy is on its patchset page; reviews of
     corpus patchsets are managed by the maintainers.
     {% endif %}
   </p>
+  {% if collision.claimable %}
+  <form method="post"
+        action="/patchsets/{{ collision.root | urlencode }}/claim"
+        class="d-inline m-0">
+    {{ csrf_field(request) }}
+    <button type="submit" class="btn btn-sm btn-primary">
+      Claim this series</button>
+  </form>
+  <a class="btn btn-sm btn-outline-secondary"
+     href="/patchsets/{{ collision.root | urlencode }}">
+    View the existing patchset</a>
+  {% else %}
   <a class="btn btn-sm btn-primary"
      href="/patchsets/{{ collision.root | urlencode }}">
     View the existing patchset</a>
+  {% endif %}
 </div>
 {% endif %}
 

@@ -49,6 +49,31 @@
 <div class="row g-4">
   <div class="col-lg-8">
 
+{# The claim bridge: a gathered series whose submitter address matches
+   the signed-in account. One click makes it theirs — pipeline actions
+   appear and the series joins /my-patchsets — without touching the
+   corpus row (origin and bodies stay as gathered). #}
+{% if can_claim %}
+<div class="alert alert-info d-flex align-items-center justify-content-between mb-3">
+  <div>
+    <div class="fw-semibold">
+      <i class="bi bi-person-check me-1"></i>This looks like your series
+    </div>
+    <div class="small">
+      Its submitter address matches your account. Claim it to request an
+      AI review (run on your own nodes) and track it on My&nbsp;patchsets.
+    </div>
+  </div>
+  <form method="post"
+        action="/patchsets/{{ patchset.root_message_id | urlencode }}/claim"
+        class="m-0 ms-3">
+    {{ csrf_field(request) }}
+    <button type="submit" class="btn btn-sm btn-primary text-nowrap">
+      Claim this series</button>
+  </form>
+</div>
+{% endif %}
+
 <div class="d-flex align-items-center justify-content-between">
   <h2 class="h5 mb-0">AI review</h2>
   {# Pipeline cluster: the status chip (everyone — it carries what the
@@ -263,6 +288,11 @@
         <dl class="row mb-0">
       <dt class="col-5">Submitter</dt>
       <dd class="col-7 text-break">{{ patchset.submitter_email or "—" }}</dd>
+      {% if patchset.claimed_by_email %}
+      {# A claimed gathered series — the account that owns the work. #}
+      <dt class="col-5">Claimed by</dt>
+      <dd class="col-7 text-break">{{ patchset.claimed_by_email }}</dd>
+      {% endif %}
       <dt class="col-5">Sent</dt>
       <dd class="col-7">{{ patchset.sent_display }}</dd>
       <dt class="col-5">Gathered</dt>
@@ -335,6 +365,22 @@
          can remove an abandoned upload iteration outright. Corpus
          patchsets are data, never deletable — the POST handler
          enforces both gates. #}
+      {# Claim release: the claimant's undo, or a maintainer / admin
+         revoke. The POST handler enforces the same gate. #}
+      {% if can_unclaim %}
+      <div class="card-body border-top py-2">
+        <form method="post"
+              action="/patchsets/{{ patchset.root_message_id | urlencode }}/unclaim"
+              class="m-0"
+              onsubmit="return confirm('Release the claim on this series? It leaves My patchsets and its pipeline actions are withdrawn.');">
+          {{ csrf_field(request) }}
+          <button type="submit"
+                  class="btn btn-sm btn-outline-secondary w-100">
+            <i class="bi bi-person-dash me-1"></i>Release claim
+          </button>
+        </form>
+      </div>
+      {% endif %}
       {% if can_act_on_patchset and patchset.is_uploaded %}
       <div class="card-body border-top py-2">
         <form method="post"
