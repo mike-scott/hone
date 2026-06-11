@@ -852,11 +852,28 @@ CREATE INDEX idx_work_items_completed ON work_items(completed_at);
 CREATE INDEX idx_work_items_enqueued  ON work_items(enqueued_at);
 """
 
+_SCHEMA_V8 = """
+-- Claiming a gathered series: the submitter's account takes ownership of
+-- work that entered hone through the lore gather — "this is my series" —
+-- so it can surface on /my-patchsets and grant the pipeline actions
+-- (request prepare/review on the claimant's own nodes). An association
+-- only: origin stays GATHERED (the row remains corpus / training data,
+-- its bodies stay exactly what lore said) and it is deliberately NOT
+-- uploaded_by_user_id — "I uploaded these bytes" keeps driving the
+-- upload collision/invalidation logic, "this is my work" drives the
+-- dashboard and action rights. NULL = unclaimed; one claimant per
+-- series (claim_patchset is first-wins).
+ALTER TABLE patchsets ADD COLUMN claimed_by_user_id INTEGER
+    REFERENCES users(id) ON DELETE SET NULL;
+CREATE INDEX idx_patchsets_claimed ON patchsets(claimed_by_user_id);
+"""
+
 # A migration is either a DDL script (executescript) or a Python callable
 # taking the connection — for data fixes SQL can't express (v5 needs a
 # regex). Both run under the same user_version bookkeeping.
 _MIGRATIONS = [_SCHEMA_V1, _SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4,
-               _migrate_v5_series_version, _SCHEMA_V6, _SCHEMA_V7]
+               _migrate_v5_series_version, _SCHEMA_V6, _SCHEMA_V7,
+               _SCHEMA_V8]
 
 
 # How long a connection waits on another connection's write lock before
@@ -1232,6 +1249,49 @@ def list_uploaded_patchsets(db, *, uploaded_by_user_id=None):
         r["iterations"] = n
         heads.append(r)
     return heads
+
+
+def claim_patchset(db, root_message_id, user_id):
+    """Stamp a GATHERED, unclaimed patchset as user_id's work. First
+       wins: the WHERE carries the race (two claimants, one UPDATE
+       lands). Returns True when this call took the claim. Uploaded
+       rows are never claimable — they already have an owner."""
+    cur = db.execute(
+        "UPDATE patchsets SET claimed_by_user_id=? "
+        "WHERE root_message_id=? AND origin=? "
+        "AND claimed_by_user_id IS NULL",
+        (user_id, norm_msgid(root_message_id), PATCHSET_ORIGIN_GATHERED))
+    db.commit()
+    return cur.rowcount == 1
+
+
+def unclaim_patchset(db, root_message_id):
+    """Release a claim (the claimant's own undo, or an admin revoke).
+       Returns True when a claim was actually released."""
+    cur = db.execute(
+        "UPDATE patchsets SET claimed_by_user_id=NULL "
+        "WHERE root_message_id=? AND claimed_by_user_id IS NOT NULL",
+        (norm_msgid(root_message_id),))
+    db.commit()
+    return cur.rowcount == 1
+
+
+def claimable_patchsets(db, submitter_email, *, limit=10):
+    """Gathered, unclaimed chain-head patchsets whose submitter_email
+       matches this account's email (case-insensitive) — the
+       /my-patchsets "series on lore that look like yours" suggestions,
+       newest first."""
+    if not submitter_email:
+        return []
+    return [dict(r) for r in db.execute(
+        "SELECT root_message_id, subject, n_patches, series_version, "
+        "gathered_at FROM patchsets p "
+        "WHERE p.origin=? AND p.claimed_by_user_id IS NULL "
+        "AND p.submitter_email=? COLLATE NOCASE "
+        "AND NOT EXISTS (SELECT 1 FROM patchsets q "
+        "  WHERE q.supersedes_root_message_id=p.root_message_id) "
+        "ORDER BY p.gathered_at DESC, p.root_message_id LIMIT ?",
+        (PATCHSET_ORIGIN_GATHERED, submitter_email, limit))]
 
 
 def unsuperseded_uploads(db, uploaded_by_user_id):
