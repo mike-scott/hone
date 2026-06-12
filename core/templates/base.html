@@ -12,6 +12,9 @@
   <link rel="stylesheet" href="/static/bootstrap-icons.min.css">
   <link rel="stylesheet" href="/static/adminlte.min.css">
   <link rel="stylesheet" href="/static/app.css?v={{ asset_v('app.css') }}">
+  {# Last on purpose: the "Phosphor" theme overrides Bootstrap tokens
+     and app.css severity values — see static/theme.css. #}
+  <link rel="stylesheet" href="/static/theme.css?v={{ asset_v('theme.css') }}">
   <script>
     // Apply the saved light/dark choice before paint — no flash of the wrong
     // theme. Falls back to the OS preference when nothing is stored.

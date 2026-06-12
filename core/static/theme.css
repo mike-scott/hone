@@ -1,0 +1,470 @@
+/* "Phosphor" — hone-core's terminal-noir theme (non-vendored).
+   A CRT reading of the UI in the muted steel-blue of a P11 blue
+   phosphor: near-black cool surfaces, one live accent, monospace
+   where the data is. Loaded after bootstrap/adminlte/app.css;
+   everything rides Bootstrap 5 CSS variables so components restyle
+   without template churn.
+
+   The discipline that keeps it usable as a dense ops UI:
+   - glow = liveness: only the active nav link, the healthy fleet
+     pulse, primary-button hover and focus rings glow — static chrome
+     never does;
+   - edges over elevation: 2px corners and 1px accent-dim borders
+     instead of shadows;
+   - one atmospheric texture: a 3% scanline wash on the header bar,
+     never over content;
+   - prose stays off-white, chips stay tinted (never solid neon) —
+     the accent is for interaction and status, never body text, and
+     the palette is deliberately desaturated for all-day sessions.
+
+   Light mode is the quiet "paperwhite" counterpart: same hues, ink
+   text, the identity lives in dark (the default). */
+
+/* --- JetBrains Mono (vendored, OFL) ------------------------------------ */
+
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("/static/fonts/JetBrainsMono-Regular.woff2") format("woff2");
+  font-weight: 100 500; font-style: normal; font-display: swap;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("/static/fonts/JetBrainsMono-Bold.woff2") format("woff2");
+  font-weight: 600 800; font-style: normal; font-display: swap;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("/static/fonts/JetBrainsMono-Italic.woff2") format("woff2");
+  font-weight: 100 500; font-style: italic; font-display: swap;
+}
+
+/* --- Theme-independent: type + edges ------------------------------------ */
+
+:root {
+  --bs-font-monospace: "JetBrains Mono", SFMono-Regular, Menlo, Consolas,
+                       "Liberation Mono", monospace;
+  /* Sharp, wireframe-y corners everywhere components consult the
+     radius tokens (cards, buttons, badges, inputs, alerts). */
+  --bs-border-radius: .125rem;
+  --bs-border-radius-sm: .1rem;
+  --bs-border-radius-lg: .175rem;
+  --bs-border-radius-xl: .25rem;
+  --bs-border-radius-xxl: .5rem;
+}
+
+/* Headings and the brand in mono tip the register terminal-ward;
+   body prose stays sans for table-density legibility. */
+h1, h2, h3, h4, h5, h6, .navbar-brand { font-family: var(--bs-font-monospace); }
+
+/* Table headers: the classic terminal column header — small caps-ish
+   mono, letterspaced, muted. */
+thead th { font-family: var(--bs-font-monospace); font-size: .72rem;
+           text-transform: uppercase; letter-spacing: .08em;
+           color: var(--bs-secondary-color); font-weight: 600; }
+
+.badge { font-family: var(--bs-font-monospace); font-weight: 600;
+         letter-spacing: .02em; }
+
+/* --- Phosphor dark ------------------------------------------------------ */
+
+[data-bs-theme="dark"] {
+  color-scheme: dark;
+
+  /* Surfaces: near-black with a cool blue undertone — never pure #000. */
+  --bs-body-bg: #0b0e12;            --bs-body-bg-rgb: 11, 14, 18;
+  --bs-tertiary-bg: #10151c;        --bs-tertiary-bg-rgb: 16, 21, 28;
+  --bs-secondary-bg: #161d26;       --bs-secondary-bg-rgb: 22, 29, 38;
+
+  /* Text: blue-tinted off-white (~12:1 on the base bg). */
+  --bs-body-color: #cdd9e5;         --bs-body-color-rgb: 205, 217, 229;
+  --bs-emphasis-color: #eaf3fc;     --bs-emphasis-color-rgb: 234, 243, 252;
+  --bs-secondary-color: #8799a9;    --bs-secondary-color-rgb: 135, 153, 169;
+  --bs-tertiary-color: #5d6c7b;     --bs-tertiary-color-rgb: 93, 108, 123;
+
+  --bs-border-color: #1e2a38;
+  --bs-border-color-translucent: rgba(108, 178, 232, .14);
+
+  /* The accent: muted steel blue, for interaction and status only. */
+  --bs-primary: #6cb2e8;            --bs-primary-rgb: 108, 178, 232;
+  --bs-primary-text-emphasis: #a7d1f2;
+  --bs-primary-bg-subtle: #122334;
+  --bs-primary-border-subtle: #2d5f8a;
+
+  /* Success keeps a green hue (diff adds, reviewed) — desaturated to
+     sit beside the blue rather than fight it. */
+  --bs-success: #3aa873;            --bs-success-rgb: 58, 168, 115;
+  --bs-success-text-emphasis: #82d4ab;
+  --bs-success-bg-subtle: #0e231a;
+  --bs-success-border-subtle: #1f6b48;
+
+  /* Info: muted teal — distinct from the primary blue. */
+  --bs-info: #4ecfc4;               --bs-info-rgb: 78, 207, 196;
+  --bs-info-text-emphasis: #93e3db;
+  --bs-info-bg-subtle: #0e2422;
+  --bs-info-border-subtle: #22685f;
+
+  --bs-warning: #e0a458;            --bs-warning-rgb: 224, 164, 88;
+  --bs-warning-text-emphasis: #edc391;
+  --bs-warning-bg-subtle: #281c0c;
+  --bs-warning-border-subtle: #7d5a28;
+
+  --bs-danger: #e25d75;             --bs-danger-rgb: 226, 93, 117;
+  --bs-danger-text-emphasis: #ef99a9;
+  --bs-danger-bg-subtle: #29111a;
+  --bs-danger-border-subtle: #7f2f41;
+
+  --bs-link-color: #6cb2e8;         --bs-link-color-rgb: 108, 178, 232;
+  --bs-link-hover-color: #93c7f0;   --bs-link-hover-color-rgb: 147, 199, 240;
+
+  --bs-code-color: #93c7f0;
+  --bs-focus-ring-color: rgba(108, 178, 232, .3);
+  --bs-form-valid-color: var(--bs-success);
+  --bs-form-invalid-color: var(--bs-danger);
+}
+
+/* Atmosphere: a faint cool bloom high on the page, fixed so long
+   tables scroll under it. Sits on body, behind all content. */
+[data-bs-theme="dark"] body {
+  background:
+    radial-gradient(120rem 40rem at 50% -20rem,
+                    rgba(108, 178, 232, .045), transparent 60%),
+    var(--bs-body-bg) !important;
+  background-attachment: fixed;
+}
+
+/* ::selection in the accent — text feels "energised" when grabbed. */
+[data-bs-theme="dark"] ::selection {
+  background: rgba(108, 178, 232, .28); color: var(--bs-emphasis-color);
+}
+
+/* --- Chrome: header, nav, brand ----------------------------------------- */
+
+/* The single sanctioned texture: 3% scanlines across the header bar,
+   plus a hairline accent seam under it. */
+[data-bs-theme="dark"] .app-header {
+  background:
+    repeating-linear-gradient(180deg,
+      rgba(108, 178, 232, .03) 0 1px, transparent 1px 3px),
+    var(--bs-tertiary-bg) !important;
+  border-bottom: 1px solid rgba(108, 178, 232, .2);
+  box-shadow: none;
+}
+
+/* Brand: phosphor glow + the signature blinking block cursor. */
+[data-bs-theme="dark"] .navbar-brand {
+  color: var(--bs-primary);
+  text-shadow: 0 0 .55rem rgba(108, 178, 232, .4);
+}
+.navbar-brand::after {
+  content: "▮"; margin-left: .15em; font-size: .8em;
+  animation: phosphor-cursor 1.2s steps(1) infinite;
+}
+@keyframes phosphor-cursor { 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .navbar-brand::after { animation: none; }
+}
+
+[data-bs-theme="dark"] .app-header .nav-link { color: var(--bs-secondary-color); }
+[data-bs-theme="dark"] .app-header .nav-link:hover { color: var(--bs-body-color); }
+/* Glow rule #1: the active nav link is alive. */
+[data-bs-theme="dark"] .app-header .nav-link.active {
+  color: var(--bs-primary);
+  text-shadow: 0 0 .5rem rgba(108, 178, 232, .35);
+  box-shadow: inset 0 -2px 0 var(--bs-primary);
+}
+
+/* Glow rule #2: the healthy fleet pulse breathes; trouble tones stay
+   flat so the glow itself carries meaning. Header chips only. */
+[data-bs-theme="dark"] .app-header .text-bg-success {
+  box-shadow: 0 0 .6rem rgba(58, 168, 115, .4);
+}
+
+/* --- Components ---------------------------------------------------------- */
+
+/* Edges over elevation: hairline accent-dim borders, no shadows. */
+[data-bs-theme="dark"] .card {
+  --bs-card-bg: var(--bs-tertiary-bg);
+  border: 1px solid rgba(108, 178, 232, .14);
+  box-shadow: none;
+}
+[data-bs-theme="dark"] .card-header {
+  background: rgba(108, 178, 232, .04);
+  border-bottom: 1px solid rgba(108, 178, 232, .12);
+}
+
+[data-bs-theme="dark"] .dropdown-menu {
+  --bs-dropdown-bg: var(--bs-secondary-bg);
+  border: 1px solid rgba(108, 178, 232, .18);
+  box-shadow: 0 .5rem 1.5rem rgba(0, 0, 0, .5);
+}
+
+/* Buttons: terminal-style — dark fill, accent text and border; the
+   fill only ignites on hover (glow rule #3). A solid accent fill at
+   rest is a light source, not a control. */
+[data-bs-theme="dark"] .btn-primary {
+  --bs-btn-bg: #14283c;                  --bs-btn-border-color: #2d5f8a;
+  --bs-btn-color: #a7d1f2;
+  --bs-btn-hover-bg: #2d5f8a;            --bs-btn-hover-border-color: #6cb2e8;
+  --bs-btn-hover-color: #eaf3fc;
+  --bs-btn-active-bg: #3f86c4;           --bs-btn-active-border-color: #6cb2e8;
+  --bs-btn-active-color: #07111c;
+  --bs-btn-disabled-bg: #14283c;         --bs-btn-disabled-border-color: #1e2a38;
+  --bs-btn-disabled-color: #5d6c7b;
+}
+[data-bs-theme="dark"] .btn-primary:hover {
+  box-shadow: 0 0 .8rem rgba(108, 178, 232, .3);
+}
+[data-bs-theme="dark"] .btn-outline-secondary {
+  --bs-btn-color: var(--bs-secondary-color);
+  --bs-btn-border-color: var(--bs-border-color);
+  --bs-btn-hover-bg: var(--bs-secondary-bg);
+  --bs-btn-hover-color: var(--bs-body-color);
+  --bs-btn-hover-border-color: rgba(108, 178, 232, .35);
+}
+
+/* Badges: tinted, not lit. Bootstrap's solid text-bg-* fills read as
+   neon blocks on near-black — every chip gets the subtle treatment
+   instead: tinted ground, emphasis text, hairline border. The status
+   meaning stays in the hue; the chip stops being a light source. */
+[data-bs-theme="dark"] .badge { border: 1px solid transparent; }
+[data-bs-theme="dark"] .badge.text-bg-primary {
+  color: var(--bs-primary-text-emphasis) !important;
+  background-color: var(--bs-primary-bg-subtle) !important;
+  border-color: var(--bs-primary-border-subtle);
+}
+[data-bs-theme="dark"] .badge.text-bg-success {
+  color: var(--bs-success-text-emphasis) !important;
+  background-color: var(--bs-success-bg-subtle) !important;
+  border-color: var(--bs-success-border-subtle);
+}
+[data-bs-theme="dark"] .badge.text-bg-info {
+  color: var(--bs-info-text-emphasis) !important;
+  background-color: var(--bs-info-bg-subtle) !important;
+  border-color: var(--bs-info-border-subtle);
+}
+[data-bs-theme="dark"] .badge.text-bg-warning {
+  color: var(--bs-warning-text-emphasis) !important;
+  background-color: var(--bs-warning-bg-subtle) !important;
+  border-color: var(--bs-warning-border-subtle);
+}
+[data-bs-theme="dark"] .badge.text-bg-danger {
+  color: var(--bs-danger-text-emphasis) !important;
+  background-color: var(--bs-danger-bg-subtle) !important;
+  border-color: var(--bs-danger-border-subtle);
+}
+[data-bs-theme="dark"] .badge.text-bg-secondary,
+[data-bs-theme="dark"] .badge.text-bg-dark {
+  color: #a3b2c2 !important;
+  background-color: var(--bs-secondary-bg) !important;
+  border-color: #2a3a4d;
+}
+/* text-bg-light ("from lore", tags, pre-existing): the quietest chip
+   of all — transparent ground, muted mono text, hairline border. */
+[data-bs-theme="dark"] .badge.text-bg-light {
+  color: var(--bs-secondary-color) !important;
+  background-color: transparent !important;
+  border-color: var(--bs-border-color) !important;
+}
+
+/* Tables: cool striping, accent-tinted row hover. */
+[data-bs-theme="dark"] .table {
+  --bs-table-striped-bg: rgba(108, 178, 232, .03);
+  --bs-table-hover-bg: rgba(108, 178, 232, .06);
+  --bs-table-border-color: var(--bs-border-color);
+}
+
+/* Forms: surfaces sink, focus lifts with the ring (Bootstrap reuses
+   --bs-focus-ring-color set above). */
+[data-bs-theme="dark"] .form-control,
+[data-bs-theme="dark"] .form-select {
+  background-color: var(--bs-tertiary-bg);
+  border-color: var(--bs-border-color);
+}
+[data-bs-theme="dark"] .form-control:focus,
+[data-bs-theme="dark"] .form-select:focus {
+  background-color: var(--bs-tertiary-bg);
+  border-color: var(--bs-primary);
+  box-shadow: 0 0 0 .25rem var(--bs-focus-ring-color);
+}
+
+/* Scrollbars: part of the instrument, not the OS. */
+[data-bs-theme="dark"] * {
+  scrollbar-color: #1e2a38 var(--bs-tertiary-bg);
+}
+[data-bs-theme="dark"] *::-webkit-scrollbar { width: .6rem; height: .6rem; }
+[data-bs-theme="dark"] *::-webkit-scrollbar-track { background: var(--bs-tertiary-bg); }
+[data-bs-theme="dark"] *::-webkit-scrollbar-thumb {
+  background: #1e2a38; border-radius: .125rem;
+}
+[data-bs-theme="dark"] *::-webkit-scrollbar-thumb:hover { background: #2d5f8a; }
+
+/* --- Severity + diff retune (overrides app.css values) ------------------ */
+/* Same five-level meaning, retuned into the palette: a muted red at
+   the top, the tail cooling through amber into blue-greys. Diff
+   washes in app.css ride --bs-success-rgb / --bs-danger-rgb and
+   follow the theme automatically. */
+[data-bs-theme="dark"] .sev-critical { --sev: #e25d75; }
+[data-bs-theme="dark"] .sev-major    { --sev: #e08a5c; }
+[data-bs-theme="dark"] .sev-moderate { --sev: #d4b35e; }
+[data-bs-theme="dark"] .sev-minor    { --sev: #93a6b8; }
+[data-bs-theme="dark"] .sev-nit      { --sev: #5d6c7b; }
+[data-bs-theme="dark"] .sev-nit.sev-badge { color: #eaf3fc; }
+
+/* --- E-ink light ---------------------------------------------------------*/
+/* The daylight counterpart is an e-reader, not a website: warm paper
+   (never stark white), graphite ink, hairline rules, and a colour
+   budget cut to almost nothing — the accent is a deep ink-blue used
+   sparingly, semantic tones are heavily desaturated, and the primary
+   button is ink-filled like a reader's. No glow, no scanlines; the
+   matte stillness IS the motif. */
+
+[data-bs-theme="light"] {
+  --bs-body-bg: #e9e7e0;            --bs-body-bg-rgb: 233, 231, 224;
+  --bs-tertiary-bg: #efede6;        --bs-tertiary-bg-rgb: 239, 237, 230;
+  --bs-secondary-bg: #e0ddd4;       --bs-secondary-bg-rgb: 224, 221, 212;
+
+  --bs-body-color: #2e2c28;         --bs-body-color-rgb: 46, 44, 40;
+  --bs-emphasis-color: #1b1a17;     --bs-emphasis-color-rgb: 27, 26, 23;
+  --bs-secondary-color: #6e6a60;    --bs-secondary-color-rgb: 110, 106, 96;
+  --bs-tertiary-color: #95907f;     --bs-tertiary-color-rgb: 149, 144, 127;
+
+  --bs-border-color: #c9c5b9;
+  --bs-border-color-translucent: rgba(46, 44, 40, .18);
+
+  /* Ink-blue accent, used sparingly. */
+  --bs-primary: #3d5a74;            --bs-primary-rgb: 61, 90, 116;
+  --bs-primary-text-emphasis: #2c4458;
+  --bs-primary-bg-subtle: #dee3e6;
+  --bs-primary-border-subtle: #a9b8c2;
+
+  --bs-success: #44705a;            --bs-success-rgb: 68, 112, 90;
+  --bs-success-text-emphasis: #2f5240;
+  --bs-success-bg-subtle: #dde6df;
+  --bs-success-border-subtle: #a8c0b1;
+
+  --bs-info: #41706b;               --bs-info-rgb: 65, 112, 107;
+  --bs-info-text-emphasis: #2d524e;
+  --bs-info-bg-subtle: #dce5e3;
+  --bs-info-border-subtle: #a4c0bc;
+
+  --bs-warning: #8a672e;            --bs-warning-rgb: 138, 103, 46;
+  --bs-warning-text-emphasis: #664b1f;
+  --bs-warning-bg-subtle: #ebe3d2;
+  --bs-warning-border-subtle: #cdb98e;
+
+  --bs-danger: #9a4a4e;             --bs-danger-rgb: 154, 74, 78;
+  --bs-danger-text-emphasis: #743538;
+  --bs-danger-bg-subtle: #e9dcda;
+  --bs-danger-border-subtle: #cba6a5;
+
+  --bs-link-color: #3d5a74;         --bs-link-color-rgb: 61, 90, 116;
+  --bs-link-hover-color: #2c4458;   --bs-link-hover-color-rgb: 44, 68, 88;
+  --bs-code-color: #2c4458;
+  --bs-focus-ring-color: rgba(61, 90, 116, .25);
+  --bs-form-valid-color: var(--bs-success);
+  --bs-form-invalid-color: var(--bs-danger);
+}
+
+/* Links read like print references: underlined, ink-coloured. */
+[data-bs-theme="light"] a:not(.btn):not(.nav-link):not(.navbar-brand):not(.dropdown-item) {
+  text-decoration-color: rgba(61, 90, 116, .45);
+}
+
+/* Chrome: paper header over a single ink rule; brand and active nav
+   in plain ink — no glow in daylight. */
+[data-bs-theme="light"] .app-header {
+  background: var(--bs-tertiary-bg) !important;
+  border-bottom: 1px solid #b5b1a4;
+  box-shadow: none;
+}
+[data-bs-theme="light"] .navbar-brand { color: #2e2c28; }
+[data-bs-theme="light"] .app-header .nav-link.active {
+  color: #1b1a17; box-shadow: inset 0 -2px 0 #2e2c28;
+}
+
+[data-bs-theme="light"] .card {
+  --bs-card-bg: var(--bs-tertiary-bg);
+  border: 1px solid var(--bs-border-color);
+  box-shadow: none;
+}
+[data-bs-theme="light"] .card-header {
+  background: rgba(46, 44, 40, .03);
+  border-bottom: 1px solid var(--bs-border-color);
+}
+
+/* The reader's button: ink fill, paper text. */
+[data-bs-theme="light"] .btn-primary {
+  --bs-btn-bg: #2e2c28;             --bs-btn-border-color: #2e2c28;
+  --bs-btn-color: #efede6;
+  --bs-btn-hover-bg: #1b1a17;       --bs-btn-hover-border-color: #1b1a17;
+  --bs-btn-hover-color: #efede6;
+  --bs-btn-active-bg: #4a473f;      --bs-btn-active-border-color: #4a473f;
+  --bs-btn-active-color: #efede6;
+  --bs-btn-disabled-bg: #c9c5b9;    --bs-btn-disabled-border-color: #c9c5b9;
+  --bs-btn-disabled-color: #6e6a60;
+}
+
+/* Chips on paper: same tinted treatment as dark — subtle ground,
+   deep ink-toned text, hairline border. */
+[data-bs-theme="light"] .badge { border: 1px solid transparent; }
+[data-bs-theme="light"] .badge.text-bg-primary {
+  color: var(--bs-primary-text-emphasis) !important;
+  background-color: var(--bs-primary-bg-subtle) !important;
+  border-color: var(--bs-primary-border-subtle);
+}
+[data-bs-theme="light"] .badge.text-bg-success {
+  color: var(--bs-success-text-emphasis) !important;
+  background-color: var(--bs-success-bg-subtle) !important;
+  border-color: var(--bs-success-border-subtle);
+}
+[data-bs-theme="light"] .badge.text-bg-info {
+  color: var(--bs-info-text-emphasis) !important;
+  background-color: var(--bs-info-bg-subtle) !important;
+  border-color: var(--bs-info-border-subtle);
+}
+[data-bs-theme="light"] .badge.text-bg-warning {
+  color: var(--bs-warning-text-emphasis) !important;
+  background-color: var(--bs-warning-bg-subtle) !important;
+  border-color: var(--bs-warning-border-subtle);
+}
+[data-bs-theme="light"] .badge.text-bg-danger {
+  color: var(--bs-danger-text-emphasis) !important;
+  background-color: var(--bs-danger-bg-subtle) !important;
+  border-color: var(--bs-danger-border-subtle);
+}
+[data-bs-theme="light"] .badge.text-bg-secondary,
+[data-bs-theme="light"] .badge.text-bg-dark {
+  color: #4a473f !important;
+  background-color: var(--bs-secondary-bg) !important;
+  border-color: #b5b1a4;
+}
+[data-bs-theme="light"] .badge.text-bg-light {
+  color: var(--bs-secondary-color) !important;
+  background-color: transparent !important;
+  border-color: var(--bs-border-color) !important;
+}
+
+[data-bs-theme="light"] .table {
+  --bs-table-striped-bg: rgba(46, 44, 40, .025);
+  --bs-table-hover-bg: rgba(46, 44, 40, .05);
+  --bs-table-border-color: var(--bs-border-color);
+}
+
+[data-bs-theme="light"] .form-control,
+[data-bs-theme="light"] .form-select {
+  background-color: #f2f0ea;
+  border-color: #b5b1a4;
+}
+[data-bs-theme="light"] .form-control:focus,
+[data-bs-theme="light"] .form-select:focus {
+  background-color: #f5f4ef;
+  border-color: var(--bs-primary);
+  box-shadow: 0 0 0 .25rem var(--bs-focus-ring-color);
+}
+
+/* Severity in ink: same ladder, printed tones. */
+[data-bs-theme="light"] .sev-critical { --sev: #9a4a4e; }
+[data-bs-theme="light"] .sev-major    { --sev: #a06a42; }
+[data-bs-theme="light"] .sev-moderate { --sev: #8a7840; }
+[data-bs-theme="light"] .sev-minor    { --sev: #7d8690; }
+[data-bs-theme="light"] .sev-nit      { --sev: #aab0ac; }
