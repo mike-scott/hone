@@ -290,6 +290,96 @@ def _patch_popen(monkeypatch, *, events=(), returncode=0, stderr="",
     return state
 
 
+def _patch_popen_sequence(monkeypatch, attempts):
+    """Like _patch_popen, but each Popen construction consumes the next
+       (events, returncode, stderr) triple from `attempts` — for retry
+       paths. Returns the list of recorded cmds."""
+    cmds = []
+    seq = list(attempts)
+
+    class _Stdin:
+        def write(self, s): pass
+        def close(self): pass
+
+    class _FakePopen:
+        def __init__(self, cmd, stdin=None, stdout=None, stderr=None,
+                     text=False, cwd=None):
+            events, rc, err = seq[min(len(cmds), len(seq) - 1)]
+            cmds.append(cmd)
+            self._rc = rc
+            self.stdin = _Stdin()
+            self.stdout = iter([json.dumps(e) + "\n" for e in events])
+            self.stderr = iter([err] if err else [])
+        def wait(self, timeout=None):
+            return self._rc
+        def kill(self):
+            pass
+
+    monkeypatch.setattr("node.ai.subprocess.Popen", _FakePopen)
+    return cmds
+
+
+def test_cli_drops_unknown_deny_rule_and_retries(monkeypatch):
+    """A CLI that hard-fails on a deny rule naming a tool it doesn't ship
+       ('Permission deny rule "MultiEdit" matches no known tool' — newer
+       CLIs validate permission rules) must not take the task down: the
+       name is parked, the call retried without it, and later calls skip
+       it up front. Denying a nonexistent tool is a no-op, so nothing is
+       lost."""
+    monkeypatch.setattr(ai, "_CLI_UNKNOWN_DENY_RULES", set())
+    cmds = _patch_popen_sequence(monkeypatch, [
+        ([], 1, 'Permission deny rule "MultiEdit" matches no known tool '
+                '— check for typos.'),
+        ([_envelope()], 0, ""),
+    ])
+    out = ai.call_claude(_CliCfg(), "s", "u", tools=["Read"])
+    assert out["text"] == "ok"
+    assert len(cmds) == 2
+    deny1 = cmds[0][cmds[0].index("--disallowedTools") + 1]
+    deny2 = cmds[1][cmds[1].index("--disallowedTools") + 1]
+    assert "MultiEdit" in deny1.split(",")
+    assert "MultiEdit" not in deny2.split(",")
+    assert "Edit" in deny2.split(",")          # the rest of the list stays
+    # The next call skips the parked name without a failed attempt.
+    ai.call_claude(_CliCfg(), "s", "u", tools=["Read"])
+    assert len(cmds) == 3
+    deny3 = cmds[2][cmds[2].index("--disallowedTools") + 1]
+    assert "MultiEdit" not in deny3.split(",")
+
+
+def test_cli_unknown_allow_rule_stays_fatal(monkeypatch):
+    """Only DENY rules self-heal — silently dropping an unknown ALLOW
+       rule would degrade the task (a review without Read), so that
+       failure surfaces as the usual CallClaudeError."""
+    monkeypatch.setattr(ai, "_CLI_UNKNOWN_DENY_RULES", set())
+    cmds = _patch_popen_sequence(monkeypatch, [
+        ([], 1, 'Permission allow rule "Read" matches no known tool '
+                '— check for typos.'),
+    ])
+    with pytest.raises(ai.CallClaudeError):
+        ai.call_claude(_CliCfg(), "s", "u", tools=["Read"])
+    assert len(cmds) == 1
+    assert ai._CLI_UNKNOWN_DENY_RULES == set()
+
+
+def test_update_cli_rearms_dropped_deny_rules_on_version_change(monkeypatch):
+    """Parked deny names are version-specific: when `claude update`
+       lands a new version, the parked set clears so a re-introduced
+       tool is denied again (one cheap re-learn if it's still gone)."""
+    monkeypatch.setattr(ai, "_CLI_UNKNOWN_DENY_RULES", {"MultiEdit"})
+    monkeypatch.setattr(ai, "_ensure_persistent_cli", lambda: None)
+    monkeypatch.setattr(ai, "_probe_cli_version", lambda: "2.2.0 (new)")
+    ai._CLI_VERSION_CACHE.update(value="2.1.0 (old)", fresh=True)
+    monkeypatch.setattr(
+        "node.ai.subprocess.run",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout="updated",
+                                         stderr=""))
+    monkeypatch.delenv("HONE_CLAUDE_AUTOUPDATE", raising=False)
+    ai._update_cli()
+    assert ai._CLI_UNKNOWN_DENY_RULES == set()
+    assert ai._CLI_VERSION_CACHE["value"] == "2.2.0 (new)"
+
+
 def test_cli_backend_runs_claude_with_the_right_cmdline(monkeypatch):
     """The CLI invocation is `claude -p --output-format stream-json
        --verbose --system-prompt <sys> --model <model>`, with user_text

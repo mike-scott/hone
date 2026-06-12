@@ -404,6 +404,20 @@ def _update_cli():
             # Re-probe the version on the next health tick — an update
             # may have just landed.
             _CLI_VERSION_CACHE["fresh"] = False
+            # Deny rules parked as unknown are version-specific: a new
+            # CLI may re-introduce a name, and the deny must come back
+            # with it. Probe only when something is parked (the common
+            # empty case costs nothing).
+            if _CLI_UNKNOWN_DENY_RULES:
+                new = _probe_cli_version()
+                if new != _CLI_VERSION_CACHE.get("value"):
+                    log.info("claude CLI version changed (%s -> %s) — "
+                             "re-arming dropped deny rules %s",
+                             _CLI_VERSION_CACHE.get("value"), new,
+                             sorted(_CLI_UNKNOWN_DENY_RULES))
+                    _CLI_UNKNOWN_DENY_RULES.clear()
+                _CLI_VERSION_CACHE["value"] = new
+                _CLI_VERSION_CACHE["fresh"] = True
         else:
             log.warning("claude update failed (rc=%d): %s — proceeding "
                         "on current version", r.returncode, last[:300])
@@ -499,6 +513,24 @@ _CLI_BLOCKED_TOOLS = ["Task", "Agent", "Bash", "BashOutput", "KillShell",
                       "Write", "Edit", "MultiEdit", "NotebookEdit",
                       "WebFetch", "WebSearch"]
 
+# Deny-rule names the RUNNING CLI has rejected as unknown. The list above
+# deliberately over-names across CLI versions (Task/Agent, MultiEdit) so
+# every version's spelling of a tool is denied — but newer CLIs hard-FAIL
+# on a permission rule naming a tool they don't have ('Permission deny
+# rule "MultiEdit" matches no known tool'), turning the safety margin
+# into an outage (auto-update flipped this under a running fleet,
+# 2026-06-12). Denying a tool the CLI doesn't ship is semantically a
+# no-op, so on that error the name is parked here and the call retried
+# without it; the failed attempt exits at flag validation, before any
+# model turn. ALLOW-rule rejections are NOT self-healed: silently
+# dropping an allowed tool would degrade the task (a review without
+# Read), so those stay loud. Cleared when the CLI version changes
+# (_update_cli) — a later version may re-introduce a name.
+_CLI_UNKNOWN_DENY_RULES = set()
+
+_UNKNOWN_DENY_RULE_RE = re.compile(
+    r'[Pp]ermission deny rule "([^"]+)" matches no known tool')
+
 
 def _call_claude_cli(cfg, system, user_text, *, model, tools=None, cwd=None):
     """`claude` CLI subprocess path — uses the OAuth session in
@@ -542,8 +574,12 @@ def _call_claude_cli(cfg, system, user_text, *, model, tools=None, cwd=None):
     if tools is not None:
         cmd += ["--allowedTools", ",".join(tools)]   # [] → "" → no tools
         # Hard exclusion — the allowlist alone does not stop unlisted tools
-        # (Bash, Task/Agent subagents) from running; this does.
-        cmd += ["--disallowedTools", ",".join(_CLI_BLOCKED_TOOLS)]
+        # (Bash, Task/Agent subagents) from running; this does. Names the
+        # running CLI rejected as unknown are skipped (see
+        # _CLI_UNKNOWN_DENY_RULES).
+        cmd += ["--disallowedTools",
+                ",".join(t for t in _CLI_BLOCKED_TOOLS
+                         if t not in _CLI_UNKNOWN_DENY_RULES)]
     if chosen:
         cmd += ["--model", chosen]
     log.info("claude CLI → model=%s system=%d user=%d chars tools=%s cwd=%s "
@@ -631,8 +667,21 @@ def _call_claude_cli(cfg, system, user_text, *, model, tools=None, cwd=None):
             duration_ms=duration_ms, model=model_used) from None
     stderr = "".join(stderr_chunks)
     if rc != 0:
-        category = _classify_cli_message(
-            _cli_failure_text(stderr, result_event, trace))
+        failure_text = _cli_failure_text(stderr, result_event, trace)
+        # Self-heal a deny rule the CLI rejects as unknown: park the name
+        # and retry — the failed attempt died at flag validation (no model
+        # turn), and not-denying a tool the CLI doesn't have is a no-op.
+        m = _UNKNOWN_DENY_RULE_RE.search(failure_text)
+        if (tools is not None and m
+                and m.group(1) in _CLI_BLOCKED_TOOLS
+                and m.group(1) not in _CLI_UNKNOWN_DENY_RULES):
+            _CLI_UNKNOWN_DENY_RULES.add(m.group(1))
+            log.warning("claude CLI rejects deny rule %r as unknown — "
+                        "dropping it for this CLI version and retrying",
+                        m.group(1))
+            return _call_claude_cli(cfg, system, user_text, model=model,
+                                    tools=tools, cwd=cwd)
+        category = _classify_cli_message(failure_text)
         log.warning("claude CLI ← exit=%d category=%s in %.1fs: %s",
                      rc, category, duration_ms / 1000,
                      stderr.strip()[:200])
