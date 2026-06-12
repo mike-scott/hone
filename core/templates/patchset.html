@@ -312,6 +312,24 @@
 {% else %}
 <p class="text-muted small">No messages in the corpus for this patchset yet.</p>
 {% endif %}
+<script>
+  // Expanding a comment jumps its scrollable body to the first line
+  // the author actually wrote (.pl-plain — the highlighted ones): a
+  // reply usually opens onto screens of quoted context. Scrolls the
+  // body's own overflow box, never the page; the first authored line
+  // lands ~1/4 from the top so a little context stays above.
+  document.querySelectorAll(".msg-comment").forEach(function (d) {
+    d.addEventListener("toggle", function () {
+      if (!d.open) return;
+      var body = d.querySelector(".patch-body");
+      var first = body && body.querySelector(".pl-plain");
+      if (!first) return;
+      var delta = first.getBoundingClientRect().top
+                  - body.getBoundingClientRect().top + body.scrollTop;
+      body.scrollTop = Math.max(0, delta - body.clientHeight / 4);
+    });
+  });
+</script>
 
   </div>{# /col-lg-8 — the main browsing column #}
 
