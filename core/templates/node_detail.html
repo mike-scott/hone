@@ -81,6 +81,7 @@
 <h2 class="h5 mt-4">Recent claims ({{ claims_paging.total }})</h2>
 {% if claims %}
 {{ paging_bar(claims_paging, margin="mb-2") }}
+<div class="table-responsive">
 <table class="table table-sm align-middle">
   <thead>
     <tr><th>Type</th><th>Work state</th><th>Patchset</th>
@@ -109,6 +110,7 @@
   {% endfor %}
   </tbody>
 </table>
+</div>
 {{ paging_bar(claims_paging, margin="mt-2") }}
 {% else %}
 <p class="text-muted small">This node hasn't claimed any work yet.</p>
@@ -116,6 +118,7 @@
 
 <h2 class="h5 mt-4">Reviews produced ({{ reviews|length }})</h2>
 {% if reviews %}
+<div class="table-responsive">
 <table class="table table-sm align-middle">
   <thead>
     <tr><th>Patchset</th><th>Concerns</th><th>Model</th>
@@ -139,6 +142,7 @@
   {% endfor %}
   </tbody>
 </table>
+</div>
 {% else %}
 <p class="text-muted small">This node hasn't produced any reviews yet.</p>
 {% endif %}

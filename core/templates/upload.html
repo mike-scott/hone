@@ -113,6 +113,7 @@
       </dd>
     </dl>
   </div>
+  <div class="table-responsive">
   <table class="table table-sm table-hover align-middle mb-0">
     <thead><tr><th>#</th><th>Subject</th><th>Message-ID</th></tr></thead>
     <tbody>
@@ -128,6 +129,7 @@
       {% endfor %}
     </tbody>
   </table>
+  </div>
   {% if token %}
   <div class="card-body border-top">
     <form method="post" action="/upload/confirm">

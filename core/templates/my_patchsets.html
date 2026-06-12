@@ -27,6 +27,10 @@
     <span class="text-muted small ms-1">— same submitter address as your
     account</span>
   </div>
+  {# table-responsive + d-none d-md-table-cell: on phones the table
+     scrolls in place instead of clipping, and the secondary columns
+     drop — subject + the claim action are the mobile use case. #}
+  <div class="table-responsive">
   <table class="table table-sm table-hover align-middle mb-0">
     <tbody>
     {% for c in claimable %}
@@ -36,9 +40,9 @@
              class="link-body-emphasis text-decoration-none">
             {{ c.subject }}</a>
         </td>
-        <td class="text-muted text-nowrap">{{ c.n_patches }} patches
+        <td class="text-muted text-nowrap d-none d-md-table-cell">{{ c.n_patches }} patches
           · v{{ c.series_version }}</td>
-        <td class="text-nowrap text-muted">{{ c.gathered_display }}</td>
+        <td class="text-nowrap text-muted d-none d-md-table-cell">{{ c.gathered_display }}</td>
         <td class="text-end">
           <form method="post" action="{{ c.claim_url }}" class="m-0">
             {{ csrf_field(request) }}
@@ -63,17 +67,24 @@
     {% endfor %}
     </tbody>
   </table>
+  </div>
 </div>
 {% endif %}
 
 {% if items %}
+{# Same mobile treatment as the claim strip above: contained scroll,
+   and only Patchset + Status survive below md. #}
+<div class="table-responsive">
 <table class="table table-sm table-hover align-middle">
   <thead>
-    <tr><th>Patchset</th><th>Patches</th><th>Version</th>
-        {% if show_owner %}<th>Owner</th>{% endif %}
+    <tr><th>Patchset</th>
+        <th class="d-none d-md-table-cell">Patches</th>
+        <th class="d-none d-md-table-cell">Version</th>
+        {% if show_owner %}<th class="d-none d-md-table-cell">Owner</th>{% endif %}
         {# "Added": upload time for uploads, gather time for claimed
            lore series — one header that's true for both. #}
-        <th>Status</th><th>Added</th></tr>
+        <th>Status</th>
+        <th class="d-none d-md-table-cell">Added</th></tr>
   </thead>
   <tbody>
   {% for p in items %}
@@ -88,8 +99,8 @@
               title="A gathered corpus series you claimed — not an upload">from lore</span>
         {% endif %}
       </td>
-      <td>{{ p.n_patches }}</td>
-      <td class="text-muted">v{{ p.series_version }}
+      <td class="d-none d-md-table-cell">{{ p.n_patches }}</td>
+      <td class="text-muted d-none d-md-table-cell">v{{ p.series_version }}
         {# Linked re-uploads collapse to this row (the newest iteration);
            the ×N badge says how deep the chain is. Older iterations are
            reachable via Supersedes links on the detail page. #}
@@ -98,17 +109,18 @@
               title="{{ p.iterations }} linked iterations — this is the newest">×{{ p.iterations }}</span>
         {% endif %}</td>
       {% if show_owner %}
-      <td class="small">
+      <td class="small d-none d-md-table-cell">
         {% if p.owner_email %}<code>{{ p.owner_email }}</code>
         {% else %}<span class="text-muted">—</span>{% endif %}
       </td>
       {% endif %}
       <td><span class="badge {{ p.status_badge }}">{{ p.status }}</span></td>
-      <td class="text-nowrap">{{ p.uploaded_display }}</td>
+      <td class="text-nowrap d-none d-md-table-cell">{{ p.uploaded_display }}</td>
     </tr>
   {% endfor %}
   </tbody>
 </table>
+</div>
 {% else %}
 <p class="text-muted">
   Nothing uploaded yet — use the button above to submit a series

@@ -41,12 +41,28 @@
   {% set corpus_nav = current_user is defined and current_user
         and (current_user.is_config_admin
              or current_user.is_maintainer) %}
-  <nav class="app-header navbar navbar-expand bg-body shadow-sm">
+  <nav class="app-header navbar navbar-expand-md bg-body shadow-sm">
     <div class="container-fluid">
       {# Brand → the user's own dashboard: the right landing surface for
          every role (the corpus stays one nav click away for those who
          can see it). #}
       <a href="/my-patchsets" class="navbar-brand fw-light">hone-core</a>
+      {# Phone layout: the page links collapse behind the hamburger,
+         but the right cluster — fleet pulse and the user menu (sign
+         out, theme) — stays OUT of the collapse so health and account
+         are always one tap away. order-* puts the phone row as
+         brand · cluster · toggler with the expanded menu dropping
+         below (collapse is order-3), and restores the classic
+         brand · links · cluster row ≥md where the toggler vanishes.
+         flex-row on the cluster overrides navbar-nav's stacked
+         (column) direction below the expand breakpoint. #}
+      <button class="navbar-toggler border-0 p-1 order-2" type="button"
+              data-bs-toggle="collapse" data-bs-target="#page-nav"
+              aria-controls="page-nav" aria-expanded="false"
+              aria-label="Toggle navigation">
+        <span class="navbar-toggler-icon"></span>
+      </button>
+      <div class="collapse navbar-collapse order-3 order-md-0" id="page-nav">
       <ul class="navbar-nav me-auto">
         <li class="nav-item">
           <a href="/my-patchsets" class="nav-link
@@ -95,11 +111,13 @@
         </li>
         {% endif %}
       </ul>
-      <ul class="navbar-nav ms-auto align-items-center">
+      </div>{# /collapse #}
+      <ul class="navbar-nav align-items-center flex-row ms-auto order-1 order-md-4">
         {# Fleet throughput sparkline — claims/min over the last
            hour. Sits just left of the pulse chip so the operator
-           sees the activity trend next to the health rollup. #}
-        <li class="nav-item me-2">
+           sees the activity trend next to the health rollup. Hidden
+           on phones: 80px of trend isn't worth the navbar overflow. #}
+        <li class="nav-item me-2 d-none d-sm-block">
           <span hx-get="/fleet-sparkline"
                 hx-trigger="load, every 10s"
                 hx-swap="outerHTML"
@@ -110,7 +128,7 @@
         {# Fleet-pulse chip — the placeholder fires hx-trigger="load"
            immediately and then polls every 10s. Lives between the
            page-level nav links and the theme icon. #}
-        <li class="nav-item me-3">
+        <li class="nav-item me-md-3 me-2">
           <span hx-get="/fleet-status"
                 hx-trigger="load, every 10s"
                 hx-swap="outerHTML"

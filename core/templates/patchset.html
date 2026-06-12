@@ -45,9 +45,12 @@
    lives in a permanent right rail. Sections with potentially-long
    content (the maintainer list) are capped with a max-height and
    scroll internally, so the rail stays compact. The rail sticks
-   while the main column scrolls; on narrow screens it stacks below. #}
+   while the main column scrolls. On narrow screens the columns
+   stack RAIL FIRST (the order-* swap): the rail carries the facts
+   and the pipeline/claim actions, which must not end up below a
+   17-message thread. #}
 <div class="row g-4">
-  <div class="col-lg-8">
+  <div class="col-lg-8 order-2 order-lg-1">
 
 {# The claim bridge: claiming is cooperative — any signed-in developer
    can claim any gathered series to work with it. One click adds it to
@@ -211,6 +214,8 @@
 
 <h2 class="h5 mt-4">Work-item history</h2>
 {% if work_items %}
+{# table-responsive: 8 columns — phones scroll the table in place. #}
+<div class="table-responsive">
 <table class="table table-sm table-hover align-middle" id="work-item-history">
   <thead>
     <tr><th>Type</th><th>Work state</th><th>Worker</th><th>Requested by</th>
@@ -243,6 +248,7 @@
   {% endfor %}
   </tbody>
 </table>
+</div>
 <script>
   // Delegated row-click → work-item detail. Same pattern as the
   // queue and node listings — Name/Type cell is an anchor for
@@ -308,8 +314,9 @@
   </div>{# /col-lg-8 — the main browsing column #}
 
   {# Permanent metadata rail (right). Sticks while the main column
-     scrolls; stacks below the main column on narrow screens. #}
-  <div class="col-lg-4">
+     scrolls; stacks ABOVE the main column on narrow screens (the
+     order-* swap) — facts and actions before the long thread. #}
+  <div class="col-lg-4 order-1 order-lg-2">
    <div style="position: sticky; top: 1rem;">
 
     <div class="card mb-3">

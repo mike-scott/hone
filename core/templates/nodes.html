@@ -1,7 +1,9 @@
 {% extends "base.html" %}
 {% block title %}Node management · hone-core{% endblock %}
 {% block content %}
-<div class="d-flex align-items-center justify-content-between mb-4">
+{# flex-wrap: on phones the pairing form drops below the heading
+   instead of colliding with it. #}
+<div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-4">
   <h1 class="h3 mb-0">Node management</h1>
   <form method="get" action="/enroll" class="d-flex" role="search">
     <input type="text" name="code" class="form-control form-control-sm me-2"
@@ -17,6 +19,7 @@
   "Pair a new node" above, then approve it to bring it into the fleet.
 </p>
 {% if pending %}
+<div class="table-responsive">
 <table class="table table-sm align-middle">
   <thead>
     <tr><th>User code</th><th>Node</th><th>Capabilities</th>
@@ -45,6 +48,7 @@
   {% endfor %}
   </tbody>
 </table>
+</div>
 {% else %}
 <p class="text-muted">No node is waiting for approval.</p>
 {% endif %}

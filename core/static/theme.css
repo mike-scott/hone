@@ -56,6 +56,13 @@
    body prose stays sans for table-density legibility. */
 h1, h2, h3, h4, h5, h6, .navbar-brand { font-family: var(--bs-font-monospace); }
 
+/* Phone navbar: the brand shares one row with the fleet chip, the
+   user menu and the hamburger — shed a few px so 360-390px wide
+   viewports keep it to a single line. */
+@media (max-width: 575.98px) {
+  .navbar-brand { font-size: 1.05rem; }
+}
+
 /* Table headers: the classic terminal column header — small caps-ish
    mono, letterspaced, muted. */
 thead th { font-family: var(--bs-font-monospace); font-size: .72rem;

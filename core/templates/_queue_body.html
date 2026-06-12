@@ -14,7 +14,10 @@
   {# Rows are clickable: the subject is a real <a> for keyboard / screen-
      reader navigation, and a delegated JS handler turns the rest of the
      row into a click target (`data-href`). The detail page reads
-     `?back=` to restore this exact view on its ← Back button. #}
+     `?back=` to restore this exact view on its ← Back button.
+     table-responsive: 8 columns — on phones the table scrolls in
+     place instead of clipping against the viewport. #}
+  <div class="table-responsive">
   <table class="table table-sm table-hover align-middle">
     <thead>
       {# Date columns ordered to match the sort: Started (the queue's
@@ -52,6 +55,7 @@
     {% endfor %}
     </tbody>
   </table>
+  </div>
   <script>
     // Delegated row-click → detail page. Skips when the click already hit
     // a link or interactive element, so the subject anchor and any future

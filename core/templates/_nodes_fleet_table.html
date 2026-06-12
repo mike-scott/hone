@@ -16,6 +16,9 @@
   {% if total == 0 %}
     <p class="text-muted">No nodes enrolled yet.</p>
   {% else %}
+    {# table-responsive: 9 columns — phones scroll the table in place.
+       Inside the swap target, so the wrapper survives every poll. #}
+    <div class="table-responsive">
     <table class="table table-sm table-hover align-middle mt-3"
            id="nodes-list">
       <thead>
@@ -118,6 +121,7 @@
       {% endfor %}
       </tbody>
     </table>
+    </div>
 
     {# Delegated row click → node detail. Skips clicks on a/button/
        input/select/textarea/label so the Name anchor and Delete
