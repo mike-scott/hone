@@ -276,6 +276,43 @@ def test_sort_by_subject_ascending(ctx):
     assert body.index("alpha") < body.index("zebra")    # despite newer date
 
 
+def test_sort_by_annotated_columns(ctx):
+    """Sorts whose key is a display annotation (author / parts /
+       comments) take the single-query slow path in list_patchsets_page
+       — the fast path LIMITs before the annotations exist. Both paths
+       must order identically and carry the same row fields."""
+    _plant(ctx.db, "<r1@x>", subject="busy thread", author="Zoe", sent=1000,
+           parts=2, comments=3)
+    _plant(ctx.db, "<r2@x>", subject="quiet thread", author="Abe", sent=3000,
+           parts=1, comments=0)
+    body = ctx.client.get(
+        "/", params={"sort": "comments", "direction": "desc"}).text
+    assert body.index("busy thread") < body.index("quiet thread")
+    body = ctx.client.get(
+        "/", params={"sort": "author", "direction": "asc"}).text
+    assert body.index("quiet thread") < body.index("busy thread")  # Abe < Zoe
+
+
+def test_fast_and_slow_sort_paths_return_identical_rows(ctx):
+    """The two-phase fast path (date/subject sorts) must produce the
+       same annotated rows as the slow path — same authors, counts and
+       lifecycle flags — just computed for the page instead of the
+       whole corpus."""
+    _plant(ctx.db, "<r1@x>", subject="first", author="Ann", sent=2000,
+           parts=2, comments=1, prepared=True, reviewed=True)
+    _plant(ctx.db, "<r2@x>", subject="second", author="Bob", sent=1000)
+    fast = core_db.list_patchsets_page(ctx.db, sort="date", direction="asc")
+    slow = core_db.list_patchsets_page(ctx.db, sort="parts", direction="asc")
+    by_root = {r["root_message_id"]: r for r in slow}
+    for r in fast:
+        assert r == by_root[r["root_message_id"]]
+    assert fast[0]["author"] == "Bob"
+    assert by_root["r1@x"]["n_parts"] == 2
+    assert by_root["r1@x"]["n_comments"] == 1
+    assert by_root["r1@x"]["is_prepared"] == 1
+    assert by_root["r1@x"]["is_reviewed"] == 1
+
+
 def test_unknown_sort_and_state_fall_back(ctx):
     _plant(ctx.db, "<r1@x>", subject="a patch", author="A", sent=1)
     r = ctx.client.get("/", params={"sort": "bogus", "state": "bogus"})

@@ -1464,13 +1464,18 @@ def distinct_patch_types(db):
 def count_patchsets(db, *, q=None, state=None, comments=None, list_tag=None,
                     patch_type=None):
     """Total patchsets matching the listing's search + filter axes — the
-       pager's denominator. Joins the root message so an author-name search
-       term is honoured."""
+       pager's denominator. The root-message join exists only so an
+       author-name search term is honoured, so it is attached only when
+       there IS a search term: it is 1:1 (messages.message_id is the PK)
+       and can never change the count, but probing the messages PK once
+       per gathered patchset costs ~165ms at 11k rows — the join made
+       every corpus page-load pay that for nothing."""
     where, params = _patchset_list_where(q, state, comments, list_tag,
                                          patch_type)
+    join = (" LEFT JOIN messages rm ON rm.message_id = p.root_message_id"
+            if q else "")
     return db.execute(
-        "SELECT count(*) FROM patchsets p "
-        "LEFT JOIN messages rm ON rm.message_id = p.root_message_id" + where,
+        "SELECT count(*) FROM patchsets p" + join + where,
         params).fetchone()[0]
 
 
@@ -1487,13 +1492,26 @@ def list_patchsets_page(db, *, q=None, state=None, comments=None,
 
        `sort` is one of PATCHSET_SORT_COLUMNS (anything else → date);
        `direction` is asc/desc. Results are stably tie-broken by sent DESC
-       then root id so paging is deterministic."""
+       then root id so paging is deterministic.
+
+       Two-phase shape: the inner query filters, sorts and LIMITs the bare
+       patchsets rows; the outer query attaches the display annotations —
+       the author join plus the count/EXISTS subqueries — to just the
+       emitted page. SQLite materialises the select-list into the sorter
+       BEFORE applying LIMIT, so the single-query form evaluated five
+       correlated subqueries and a messages-PK probe for every gathered
+       row on every page load (~170ms at 11k patchsets; ~1.6ms this way,
+       and O(page) rather than O(corpus) as the corpus grows). The inner
+       query takes the author join only when a search term needs it, and
+       sorts that ORDER BY an annotation (author / parts / comments) keep
+       the single-query slow path — their sort key doesn't exist until
+       the annotations do."""
     col = PATCHSET_SORT_COLUMNS.get(sort, PATCHSET_SORT_COLUMNS["date"])
     direction = "ASC" if str(direction).lower() == "asc" else "DESC"
     where, params = _patchset_list_where(q, state, comments, list_tag,
                                          patch_type)
-    rows = db.execute(
-        "SELECT p.*, "
+    order = (f" ORDER BY {col} {direction}, p.sent DESC, p.root_message_id ")
+    annotations = (
         "COALESCE(rm.author_name, rm.author_email, p.submitter_email) AS author, "
         "(SELECT count(*) FROM messages c "
         "   WHERE c.root_message_id = p.root_message_id AND c.type = ?) "
@@ -1503,12 +1521,22 @@ def list_patchsets_page(db, *, q=None, state=None, comments=None,
         "  AS n_parts, "
         f"{_PATCHSET_PREPARED} AS is_prepared, "
         f"{_PATCHSET_REVIEWED} AS is_reviewed, "
-        f"{_PATCHSET_TRAINING} AS is_training "
-        "FROM patchsets p "
-        "LEFT JOIN messages rm ON rm.message_id = p.root_message_id" + where +
-        f" ORDER BY {col} {direction}, p.sent DESC, p.root_message_id "
-        "LIMIT ? OFFSET ?",
-        [MSG_TYPE_COMMENT, MSG_TYPE_PATCH, *params, limit, offset])
+        f"{_PATCHSET_TRAINING} AS is_training ")
+    author_join = " LEFT JOIN messages rm ON rm.message_id = p.root_message_id"
+    if sort in ("author", "parts", "comments"):
+        rows = db.execute(
+            "SELECT p.*, " + annotations +
+            "FROM patchsets p" + author_join + where + order +
+            "LIMIT ? OFFSET ?",
+            [MSG_TYPE_COMMENT, MSG_TYPE_PATCH, *params, limit, offset])
+    else:
+        rows = db.execute(
+            "SELECT p.*, " + annotations +
+            "FROM (SELECT p.* FROM patchsets p"
+            + (author_join if q else "") + where + order +
+            "  LIMIT ? OFFSET ?) AS p"
+            + author_join + order,
+            [MSG_TYPE_COMMENT, MSG_TYPE_PATCH, *params, limit, offset])
     return [dict(r) for r in rows]
 
 
