@@ -318,10 +318,9 @@ def test_sort_by_subject_ascending(ctx):
 
 
 def test_sort_by_annotated_columns(ctx):
-    """Sorts whose key is a display annotation (author / parts /
-       comments) take the single-query slow path in list_patchsets_page
-       — the fast path LIMITs before the annotations exist. Both paths
-       must order identically and carry the same row fields."""
+    """Sorts keyed on the message-derived display fields (author /
+       parts / comments) — since v11 these are denormalised onto the
+       patchsets row, so they sort in the same fast path as date."""
     _plant(ctx.db, "<r1@x>", subject="busy thread", author="Zoe", sent=1000,
            parts=2, comments=3)
     _plant(ctx.db, "<r2@x>", subject="quiet thread", author="Abe", sent=3000,
@@ -334,11 +333,10 @@ def test_sort_by_annotated_columns(ctx):
     assert body.index("quiet thread") < body.index("busy thread")  # Abe < Zoe
 
 
-def test_fast_and_slow_sort_paths_return_identical_rows(ctx):
-    """The two-phase fast path (date/subject sorts) must produce the
-       same annotated rows as the slow path — same authors, counts and
-       lifecycle flags — just computed for the page instead of the
-       whole corpus."""
+def test_sort_orders_return_identical_rows(ctx):
+    """Different sort orders are different traversals of the same
+       annotated rows — same authors, denormalised counts and lifecycle
+       flags regardless of which column ordered the page."""
     _plant(ctx.db, "<r1@x>", subject="first", author="Ann", sent=2000,
            parts=2, comments=1, prepared=True, reviewed=True)
     _plant(ctx.db, "<r2@x>", subject="second", author="Bob", sent=1000)

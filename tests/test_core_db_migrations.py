@@ -94,6 +94,45 @@ def test_v10_backfills_the_search_index(tmp_path):
     assert db.execute("SELECT count(*) FROM patchset_fts").fetchone()[0] == 1
 
 
+def test_v11_backfills_the_denormalised_listing_fields(tmp_path):
+    """A pre-v10 database picks up the v11 listing columns with the
+       message-derived values backfilled: attached-part and comment
+       counts, and the root message's author pair (NULL when the root
+       message never landed)."""
+    path = str(tmp_path / "v9.db")
+    raw = _v4_db(path)
+    for ddl in (core_db._SCHEMA_V6, core_db._SCHEMA_V7,
+                core_db._SCHEMA_V8, core_db._SCHEMA_V9):
+        raw.executescript(ddl)
+    raw.execute("PRAGMA user_version=9")
+    raw.execute("INSERT INTO patchsets (root_message_id, subject, "
+                "n_patches, gathered_at) VALUES ('<g@x>', 's', 2, 100)")
+    raw.executemany(
+        "INSERT INTO messages (message_id, root_message_id, type, "
+        "author_name, author_email, body) VALUES (?,?,?,?,?,'x')",
+        [("<g@x>",  "<g@x>", 2, "Ann Author", "ann@e.x"),
+         ("<p2@x>", "<g@x>", 2, "Ann Author", "ann@e.x"),
+         ("<c1@x>", "<g@x>", 3, "Rev",        "rev@e.x"),
+         ("<c2@x>", "<g@x>", 3, "Rev",        "rev@e.x"),
+         ("<c3@x>", "<g@x>", 3, "Rev",        "rev@e.x")])
+    raw.execute("INSERT INTO patchsets (root_message_id, n_patches, "
+                "gathered_at) VALUES ('<bare@x>', 1, 100)")  # no messages
+    raw.commit()
+    raw.close()
+
+    db = core_db.connect(path)                # applies v10 + v11
+    assert (db.execute("PRAGMA user_version").fetchone()[0]
+            == len(core_db._MIGRATIONS))
+    got = {r["root_message_id"]: r for r in db.execute(
+        "SELECT * FROM patchsets")}
+    assert got["<g@x>"]["n_parts"] == 2
+    assert got["<g@x>"]["n_comments"] == 3
+    assert got["<g@x>"]["root_author_name"] == "Ann Author"
+    assert got["<g@x>"]["root_author_email"] == "ann@e.x"
+    assert (got["<bare@x>"]["n_parts"], got["<bare@x>"]["n_comments"]) == (0, 0)
+    assert got["<bare@x>"]["root_author_name"] is None
+
+
 def test_v9_carries_v8_claims_into_the_junction(tmp_path):
     """A database stopped at v8 (the single-claimant column) upgrades
        with its claims preserved in patchset_claims and the column

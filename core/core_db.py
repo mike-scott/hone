@@ -943,12 +943,50 @@ INSERT INTO patchset_fts
     LEFT JOIN messages rm ON rm.message_id = p.root_message_id;
 """
 
+_SCHEMA_V11 = """
+-- Corpus-listing scale, final tier: denormalise the listing's
+-- message-derived display fields onto patchsets, so NO corpus-listing
+-- query path touches the messages table (1.2GB at 11k patchsets and
+-- growing with the corpus). Before this, sorting by author / parts /
+-- comments still computed those values for every gathered row on
+-- every load (~183ms at 11k, seconds at 1M), and the sub-trigram
+-- LIKE search fallback still probed messages once per row.
+--
+--   n_parts / n_comments    what the corpus actually holds: attached
+--                           patch messages and thread comments.
+--                           DISTINCT from n_patches, the [PATCH N/M]
+--                           series total the submitter declared.
+--   root_author_name/email  the root message's author — the listing's
+--                           Author column (falls back to
+--                           submitter_email when NULL).
+--
+-- Maintained by upsert_message (the single message-write path) per
+-- landed message; whole-thread deletes go through delete_patchset
+-- where the row itself goes. Backfilled here from messages.
+ALTER TABLE patchsets ADD COLUMN n_parts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE patchsets ADD COLUMN n_comments INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE patchsets ADD COLUMN root_author_name TEXT;
+ALTER TABLE patchsets ADD COLUMN root_author_email TEXT;
+
+UPDATE patchsets SET
+    n_parts = (SELECT count(*) FROM messages m
+               WHERE m.root_message_id = patchsets.root_message_id
+               AND m.type = 2),
+    n_comments = (SELECT count(*) FROM messages m
+                  WHERE m.root_message_id = patchsets.root_message_id
+                  AND m.type = 3),
+    root_author_name = (SELECT m.author_name FROM messages m
+                        WHERE m.message_id = patchsets.root_message_id),
+    root_author_email = (SELECT m.author_email FROM messages m
+                         WHERE m.message_id = patchsets.root_message_id);
+"""
+
 # A migration is either a DDL script (executescript) or a Python callable
 # taking the connection — for data fixes SQL can't express (v5 needs a
 # regex). Both run under the same user_version bookkeeping.
 _MIGRATIONS = [_SCHEMA_V1, _SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4,
                _migrate_v5_series_version, _SCHEMA_V6, _SCHEMA_V7,
-               _SCHEMA_V8, _SCHEMA_V9, _SCHEMA_V10]
+               _SCHEMA_V8, _SCHEMA_V9, _SCHEMA_V10, _SCHEMA_V11]
 
 
 # How long a connection waits on another connection's write lock before
@@ -1255,12 +1293,16 @@ def list_patchsets(db, *, state=None, limit=200):
 # `author` and `n_comments` are SELECT aliases (resolvable in ORDER BY).
 # State is deliberately absent — it's a multi-flag column, not a single
 # sortable value.
+# Every sort key is an expression over the patchsets row alone (the
+# v11 denormalisation) — any sort can run in the listing's inner
+# filter/sort/LIMIT query without touching messages.
 PATCHSET_SORT_COLUMNS = {
     "date":     "p.sent",
     "subject":  "p.subject",
-    "author":   "author",
-    "parts":    "n_parts",
-    "comments": "n_comments",
+    "author":   ("COALESCE(p.root_author_name, p.root_author_email, "
+                 "p.submitter_email)"),
+    "parts":    "p.n_parts",
+    "comments": "p.n_comments",
 }
 
 # Lifecycle "flag" predicates for a patchset, as correlated EXISTS subqueries
@@ -1276,10 +1318,9 @@ _PATCHSET_TRAINING = ("EXISTS (SELECT 1 FROM patchset_session_history ph "
                       "WHERE ph.root_message_id = p.root_message_id)")
 
 # Whether the patchset's thread drew at least one comment message — an
-# independent filter axis from the lifecycle flags above.
-_PATCHSET_HAS_COMMENTS = (f"EXISTS (SELECT 1 FROM messages mc "
-                          f"WHERE mc.root_message_id = p.root_message_id "
-                          f"AND mc.type = {MSG_TYPE_COMMENT})")
+# independent filter axis from the lifecycle flags above. Reads the
+# v11 denormalised counter, not the messages table.
+_PATCHSET_HAS_COMMENTS = "p.n_comments > 0"
 
 # State-filter key → its WHERE predicate. The lifecycle flags are not
 # mutually exclusive (a patchset can be prepared AND reviewed AND trained);
@@ -1307,16 +1348,13 @@ def _patchset_list_where(q, state, comments, list_tag, patch_type):
        unconditionally — they are submissions, browsed on /my-patchsets,
        not corpus rows to search / filter / train against.
 
-       Returns (where, params, author_join) — author_join is True when
-       the clause references the rm alias (the root-message join), so
-       callers attach that join only when it can matter. Search runs
-       against patchset_fts (trigram FTS5 — substring semantics at
-       index speed, O(matches) not O(corpus)); a term under 3 chars
-       can't produce a trigram, so it keeps the LIKE scan — and is the
-       one case that still needs rm."""
+       Every clause reads the patchsets row alone (author fields are
+       the v11 denormalised columns). Search runs against patchset_fts
+       (trigram FTS5 — substring semantics at index speed, O(matches)
+       not O(corpus)); a term under 3 chars can't produce a trigram,
+       so it keeps a LIKE scan over the same columns."""
     clauses = [f"p.origin = {PATCHSET_ORIGIN_GATHERED}"]
     params = []
-    author_join = False
     if q and len(q) >= 3:
         # The term is matched as one quoted FTS5 phrase — internal
         # quotes doubled — so user-typed syntax (*, OR, parens) is
@@ -1328,10 +1366,10 @@ def _patchset_list_where(q, state, comments, list_tag, patch_type):
         params.append('"' + q.replace('"', '""') + '"')
     elif q:
         like = f"%{q}%"
-        clauses.append("(p.subject LIKE ? OR rm.author_name LIKE ? "
-                       "OR rm.author_email LIKE ? OR p.submitter_email LIKE ?)")
+        clauses.append("(p.subject LIKE ? OR p.root_author_name LIKE ? "
+                       "OR p.root_author_email LIKE ? "
+                       "OR p.submitter_email LIKE ?)")
         params += [like, like, like, like]
-        author_join = True
     if state in _PATCHSET_FILTER_CLAUSES:
         clauses.append(_PATCHSET_FILTER_CLAUSES[state])
     if comments == "with":
@@ -1347,7 +1385,7 @@ def _patchset_list_where(q, state, comments, list_tag, patch_type):
                        "AND json_extract(pmt.patch_type, '$.primary') = ?)")
         params.append(patch_type)
     where = " WHERE " + " AND ".join(clauses)
-    return where, params, author_join
+    return where, params
 
 
 def list_user_patchsets(db, *, user_id=None):
@@ -1572,20 +1610,15 @@ def distinct_patch_types(db):
 def count_patchsets(db, *, q=None, state=None, comments=None, list_tag=None,
                     patch_type=None):
     """Total patchsets matching the listing's search + filter axes — the
-       pager's denominator. The root-message join exists only so an
-       author-name search term is honoured, so it is attached only when
-       the WHERE references it (the sub-trigram LIKE fallback): it is
-       1:1 (messages.message_id is the PK) and can never change the
-       count, but probing the messages PK once per gathered patchset
-       costs ~165ms at 11k rows — the join made every corpus page-load
-       pay that for nothing. FTS searches don't need it either: the
-       author fields are mirrored into patchset_fts."""
-    where, params, author_join = _patchset_list_where(
-        q, state, comments, list_tag, patch_type)
-    join = (" LEFT JOIN messages rm ON rm.message_id = p.root_message_id"
-            if author_join else "")
+       pager's denominator. Reads patchsets (and, for a search, the FTS
+       index) only — never messages: the author fields it once joined
+       for are denormalised onto the row (v11), and probing the
+       messages PK once per gathered patchset had cost ~165ms at 11k
+       rows on every page-load."""
+    where, params = _patchset_list_where(q, state, comments, list_tag,
+                                         patch_type)
     return db.execute(
-        "SELECT count(*) FROM patchsets p" + join + where,
+        "SELECT count(*) FROM patchsets p" + where,
         params).fetchone()[0]
 
 
@@ -1604,49 +1637,32 @@ def list_patchsets_page(db, *, q=None, state=None, comments=None,
        `direction` is asc/desc. Results are stably tie-broken by sent DESC
        then root id so paging is deterministic.
 
-       Two-phase shape: the inner query filters, sorts and LIMITs the bare
-       patchsets rows; the outer query attaches the display annotations —
-       the author join plus the count/EXISTS subqueries — to just the
-       emitted page. SQLite materialises the select-list into the sorter
-       BEFORE applying LIMIT, so the single-query form evaluated five
-       correlated subqueries and a messages-PK probe for every gathered
-       row on every page load (~170ms at 11k patchsets; ~1.6ms this way,
-       and O(page) rather than O(corpus) as the corpus grows). The inner
-       query takes the author join only when a search term needs it, and
-       sorts that ORDER BY an annotation (author / parts / comments) keep
-       the single-query slow path — their sort key doesn't exist until
-       the annotations do."""
+       Two-phase shape: the inner query filters, sorts and LIMITs the
+       patchsets rows; the outer query attaches the lifecycle EXISTS
+       flags to just the emitted page. SQLite materialises the
+       select-list into the sorter BEFORE applying LIMIT, so a
+       single-query form would evaluate them for every gathered row on
+       every page load. Everything else the listing shows — author,
+       n_parts, n_comments — is denormalised ON the row (v11), which is
+       what lets every sort key run in the inner query and keeps the
+       whole listing path off the messages table: O(page), not
+       O(corpus), in row width as well as count."""
     col = PATCHSET_SORT_COLUMNS.get(sort, PATCHSET_SORT_COLUMNS["date"])
     direction = "ASC" if str(direction).lower() == "asc" else "DESC"
-    where, params, author_join_filter = _patchset_list_where(
-        q, state, comments, list_tag, patch_type)
+    where, params = _patchset_list_where(q, state, comments, list_tag,
+                                         patch_type)
     order = (f" ORDER BY {col} {direction}, p.sent DESC, p.root_message_id ")
-    annotations = (
-        "COALESCE(rm.author_name, rm.author_email, p.submitter_email) AS author, "
-        "(SELECT count(*) FROM messages c "
-        "   WHERE c.root_message_id = p.root_message_id AND c.type = ?) "
-        "  AS n_comments, "
-        "(SELECT count(*) FROM messages mp "
-        "   WHERE mp.root_message_id = p.root_message_id AND mp.type = ?) "
-        "  AS n_parts, "
+    rows = db.execute(
+        "SELECT p.*, "
+        "COALESCE(p.root_author_name, p.root_author_email, "
+        "         p.submitter_email) AS author, "
         f"{_PATCHSET_PREPARED} AS is_prepared, "
         f"{_PATCHSET_REVIEWED} AS is_reviewed, "
-        f"{_PATCHSET_TRAINING} AS is_training ")
-    author_join = " LEFT JOIN messages rm ON rm.message_id = p.root_message_id"
-    if sort in ("author", "parts", "comments"):
-        rows = db.execute(
-            "SELECT p.*, " + annotations +
-            "FROM patchsets p" + author_join + where + order +
-            "LIMIT ? OFFSET ?",
-            [MSG_TYPE_COMMENT, MSG_TYPE_PATCH, *params, limit, offset])
-    else:
-        rows = db.execute(
-            "SELECT p.*, " + annotations +
-            "FROM (SELECT p.* FROM patchsets p"
-            + (author_join if author_join_filter else "") + where + order +
-            "  LIMIT ? OFFSET ?) AS p"
-            + author_join + order,
-            [MSG_TYPE_COMMENT, MSG_TYPE_PATCH, *params, limit, offset])
+        f"{_PATCHSET_TRAINING} AS is_training "
+        "FROM (SELECT p.* FROM patchsets p" + where + order +
+        "  LIMIT ? OFFSET ?) AS p"
+        + order,
+        [*params, limit, offset])
     return [dict(r) for r in rows]
 
 
@@ -1676,10 +1692,28 @@ def upsert_message(db, message_id, *, root_message_id, type, body,
          author_name,
          norm_email(author_email) if author_email else None,
          subject, sent, body))
-    # The ROOT message carries the author fields the corpus search
-    # indexes — landing (or re-landing) it refreshes the FTS mirror.
-    if norm_msgid(message_id) == norm_msgid(root_message_id):
-        _refresh_patchset_fts(db, root_message_id)
+    # Keep the patchsets row's denormalised listing fields current —
+    # the corpus listing never touches this (large) table. Recomputed,
+    # not incremented: an upsert may change an existing message's type.
+    root = norm_msgid(root_message_id)
+    db.execute(
+        "UPDATE patchsets SET "
+        "n_parts=(SELECT count(*) FROM messages m "
+        "  WHERE m.root_message_id=? AND m.type=?), "
+        "n_comments=(SELECT count(*) FROM messages m "
+        "  WHERE m.root_message_id=? AND m.type=?) "
+        "WHERE root_message_id=?",
+        (root, MSG_TYPE_PATCH, root, MSG_TYPE_COMMENT, root))
+    # The ROOT message carries the author fields the listing displays
+    # and the corpus search indexes — landing (or re-landing) it
+    # updates the denormalised author and refreshes the FTS mirror.
+    if norm_msgid(message_id) == root:
+        db.execute(
+            "UPDATE patchsets SET root_author_name=?, root_author_email=? "
+            "WHERE root_message_id=?",
+            (author_name,
+             norm_email(author_email) if author_email else None, root))
+        _refresh_patchset_fts(db, root)
     db.commit()
 
 
