@@ -213,7 +213,7 @@ def test_lore_clone_panel_when_cloning_renders_progress_and_polls(ctx):
     assert "Cloning" in body and "47%" in body
     # the HTMX poll attributes attach to the swap target
     assert 'hx-get="/site-settings/lore-clone-status"' in body
-    assert 'hx-trigger="every 5s"' in body
+    assert "hx-trigger=\"every 5s [document.visibilityState === 'visible']\"" in body
     # the most recent git progress line is surfaced
     assert "Receiving objects:  47%" in body
 

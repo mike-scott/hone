@@ -164,7 +164,7 @@ def test_fleet_table_partial_endpoint_returns_self_replacing_block(ctx):
     assert r.status_code == 200
     assert 'id="fleet-table"' in r.text
     assert 'hx-get="/nodes/fleet-table"' in r.text
-    assert 'hx-trigger="every 10s"' in r.text
+    assert "hx-trigger=\"every 10s [document.visibilityState === 'visible']\"" in r.text
 
 
 def test_nodes_page_includes_the_polled_partial(ctx):
@@ -250,7 +250,7 @@ def test_live_panel_endpoint_returns_self_replacing_partial(ctx):
     assert r.status_code == 200
     assert 'id="node-live-panel"' in r.text
     assert f'hx-get="/nodes/{nid}/live"' in r.text
-    assert 'hx-trigger="every 10s"' in r.text
+    assert "hx-trigger=\"every 10s [document.visibilityState === 'visible']\"" in r.text
 
 
 def test_live_panel_404_for_unknown_node(ctx):

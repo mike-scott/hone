@@ -4,7 +4,7 @@
 <div id="lore-clone-panel"
      {% if lore_clone.phase == "cloning" %}
        hx-get="/site-settings/lore-clone-status"
-       hx-trigger="every 5s"
+       hx-trigger="every 5s [document.visibilityState === 'visible']"
        hx-swap="outerHTML"
      {% endif %}>
 

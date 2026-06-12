@@ -5,7 +5,7 @@
 <div id="node-live-panel"
      class="row g-3 mb-4"
      hx-get="/nodes/{{ node.id }}/live"
-     hx-trigger="every 10s"
+     hx-trigger="every 10s [document.visibilityState === 'visible']"
      hx-swap="outerHTML">
 
   <div class="col-md-6">

@@ -116,10 +116,15 @@
         {# Fleet throughput sparkline — claims/min over the last
            hour. Sits just left of the pulse chip so the operator
            sees the activity trend next to the health rollup. Hidden
-           on phones: 80px of trend isn't worth the navbar overflow. #}
+           on phones: 80px of trend isn't worth the navbar overflow.
+           Every poll in the app carries the [visibilityState]
+           condition: HTMX re-evaluates it each tick, so hidden tabs
+           (a phone with the screen off, a background tab) skip the
+           request and the next visible tick repaints — status polls
+           must not be a battery/data drain. #}
         <li class="nav-item me-2 d-none d-sm-block">
           <span hx-get="/fleet-sparkline"
-                hx-trigger="load, every 10s"
+                hx-trigger="load, every 10s [document.visibilityState === 'visible']"
                 hx-swap="outerHTML"
                 class="d-inline-block align-middle"
                 style="width: 80px; height: 18px;"
@@ -130,7 +135,7 @@
            page-level nav links and the theme icon. #}
         <li class="nav-item me-md-3 me-2">
           <span hx-get="/fleet-status"
-                hx-trigger="load, every 10s"
+                hx-trigger="load, every 10s [document.visibilityState === 'visible']"
                 hx-swap="outerHTML"
                 class="badge rounded-pill text-bg-secondary"
                 title="Loading fleet status…">…</span>

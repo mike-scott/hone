@@ -18,7 +18,7 @@
    claimed/completed. See core_db.queue_version + core/ui.py queue(). #}
 <div id="queue-pane"
      hx-get="{{ this_url }}"
-     hx-trigger="every 5s"
+     hx-trigger="every 5s [document.visibilityState === 'visible']"
      hx-target="#queue-pane"
      hx-swap="outerHTML"
      hx-headers='{"X-Queue-Version": "{{ queue_version }}"}'>

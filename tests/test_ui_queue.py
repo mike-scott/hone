@@ -118,7 +118,7 @@ def test_queue_pane_carries_htmx_polling_attributes(ctx):
     # stays scoped to whatever view the operator is currently watching).
     assert 'id="queue-pane"' in body
     assert 'hx-get="/queue?type=review"' in body
-    assert 'hx-trigger="every 5s"' in body
+    assert "hx-trigger=\"every 5s [document.visibilityState === 'visible']\"" in body
     assert 'hx-target="#queue-pane"' in body
     assert 'hx-swap="outerHTML"' in body
     # The pane echoes the current queue version back on every poll, so
@@ -230,7 +230,7 @@ def test_queue_htmx_partial_returns_self_renewing_pane(ctx):
     assert r.status_code == 200
     body = r.text
     assert 'id="queue-pane"' in body
-    assert 'hx-trigger="every 5s"' in body
+    assert "hx-trigger=\"every 5s [document.visibilityState === 'visible']\"" in body
     # The full-page chrome is OUT of the partial — no <html>, no sidebar.
     assert "<html" not in body
     assert "app-sidebar" not in body
