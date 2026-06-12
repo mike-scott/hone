@@ -56,6 +56,19 @@
                      background: rgba(127, 127, 127, .18);
                      background: color-mix(in srgb, var(--bs-body-color) 12%, transparent); }
 
+/* Thread view: within a comment, the reviewer's OWN words are the
+   signal — most of a reply body is quoted context (pl-quote, dimmed).
+   Wash + edge exactly the written lines (pl-plain; pl-blank gaps stay
+   clear so paragraphs read as separate blocks). The row box itself
+   stays unstyled — .msg-comment is the scoping hook the template sets
+   on comment rows. Bootstrap theme variables, so both themes get
+   their own info tone. */
+.msg-comment .patch-body .pl-plain {
+  color: var(--bs-emphasis-color);
+  background: rgba(var(--bs-info-rgb), .10);
+  background: color-mix(in srgb, var(--bs-info) 10%, transparent);
+  box-shadow: inset 2px 0 0 var(--bs-info); padding-left: .4rem; }
+
 /* /reports charts: Chart.js needs a sized positioned box when
    maintainAspectRatio is off. */
 .report-chart { position: relative; height: 280px; }

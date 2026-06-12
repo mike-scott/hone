@@ -151,10 +151,59 @@ def diff_line_spans(body: str):
     return origin, spans
 
 
+def _attribution_lines(lines):
+    """Indices of the "On <date>, <someone> wrote:" attribution —
+       including continuations when the mailer hard-wrapped it (the
+       break can land anywhere, even mid-word in "wrote:", so the test
+       is on the joined text). Context, not authored prose: the
+       comment-thread highlight must dim it with the quotes."""
+    idx = set()
+    for i, line in enumerate(lines):
+        s = line.rstrip()
+        if s.endswith("wrote:"):
+            idx.add(i)
+        elif s.startswith("On "):
+            acc = s
+            for k in (1, 2):
+                if i + k >= len(lines):
+                    break
+                if acc.endswith("="):
+                    # Raw quoted-printable soft line break — the "="
+                    # is the wrap marker, not content ("wrot=" + "e:").
+                    acc = acc[:-1]
+                acc += lines[i + k].strip()
+                if acc.endswith("wrote:"):
+                    idx.update(range(i, i + k + 1))
+                    break
+    return idx
+
+
 def _prose_html(content: str) -> str:
+    """Prose (non-patch) lines: quoted `>` context and the wrote:-
+       attribution are `quote`, the author's own text is `plain`, and
+       BLANK lines are `blank` — kept distinct so the comment-thread
+       highlight can wash exactly the written lines without bridging
+       paragraph gaps (app.css .msg-comment).
+
+       Bodies are stored as raw transport text, so quoted-printable
+       soft line breaks (a trailing `=`) appear verbatim — the
+       continuation line carries no `>` of its own and inherits the
+       class of the line it continues, otherwise a wrapped quote would
+       read as authored text."""
+    lines = content.split("\n")
+    attribution = _attribution_lines(lines)
     out = []
-    for line in content.split("\n"):
-        cls = "quote" if line.startswith(">") else "plain"
+    cls, prev_soft = "blank", False
+    for i, line in enumerate(lines):
+        if prev_soft and line.strip():
+            pass                            # continuation: keep cls
+        elif line.startswith(">") or i in attribution:
+            cls = "quote"
+        elif line.strip():
+            cls = "plain"
+        else:
+            cls = "blank"
+        prev_soft = line.rstrip().endswith("=")
         text = html.escape(line) or _BLANK
         out.append(f'<span class="pl pl-{cls}">{text}</span>')
     return "".join(out)

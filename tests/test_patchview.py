@@ -182,6 +182,40 @@ def test_prose_mode_does_not_colour_plus_minus():
     assert spans["&gt; quoted reply"] == "quote"
 
 
+def test_prose_mode_classifies_authored_vs_context_lines():
+    """The comment-thread highlight (app.css .msg-comment) washes only
+       pl-plain: the author's own words. Quotes, blank separators and
+       the wrote:-attribution — single-line OR hard-wrapped, even
+       mid-word in "wrote:" — must all classify as context."""
+    body = ("hdr: x\n\n"
+            # raw quoted-printable: "=" is a soft line break, splitting
+            # "wrote:" mid-word across the wrap
+            "On Fri, May 22, 2026 at 8:59 AM Nico Pache <n@r.com> wrot=\n"
+            "e:\n"
+            "> the quoted patch line\n"
+            "\n"
+            "On Sat, Vlastimil Babka (SUSE)\n"
+            "wrote:\n"
+            "Ann Author wrote:\n"
+            "I think this leaks the mTHP refcount.\n"
+            "\n"
+            # a QP-soft-wrapped QUOTE: the continuation has no ">" but
+            # must stay quote-classed, not read as authored text
+            "> if a mTHP collapse is attempted, we don't perform the=\n"
+            "collapse at all.\n")
+    spans = dict_of(_spans(patchview.render(body, is_patch=False).body_html))
+    assert spans["I think this leaks the mTHP refcount."] == "plain"
+    assert spans["&gt; the quoted patch line"] == "quote"
+    assert spans["On Fri, May 22, 2026 at 8:59 AM Nico Pache &lt;n@r.com&gt; wrot="] == "quote"
+    assert spans["e:"] == "quote"
+    assert spans["On Sat, Vlastimil Babka (SUSE)"] == "quote"
+    assert spans["wrote:"] == "quote"
+    assert spans["Ann Author wrote:"] == "quote"
+    assert spans["&gt; if a mTHP collapse is attempted, we don&#x27;t perform the="] == "quote"
+    assert spans["collapse at all."] == "quote"   # soft-wrap continuation
+    assert spans["​"] == "blank"          # the blank separator line
+
+
 def dict_of(pairs):
     """{text: cls} from (cls, text) span pairs; last write wins."""
     return {text: cls for cls, text in pairs}
