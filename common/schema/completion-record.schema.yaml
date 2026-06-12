@@ -139,7 +139,8 @@ $defs:
         minLength: 1
         description: >-
           What was challenged. Free-form per operation conventions:
-          review uses "concern" / "location" / "stage3"; train uses
+          review uses "concern" / "location" / "stage3" /
+          "consolidation"; train uses
           "match_verdict" / "point_decomposition" / "candidate_credit"
           / "proposal"; draft uses "proposal" / "batch" /
           "alternative_consideration" / "recommendation_authority";

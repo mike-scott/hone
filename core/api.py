@@ -331,6 +331,47 @@ def _completion_record_schemas():
 
 _COMPLETION_RECORD_SCHEMAS = _completion_record_schemas()
 
+
+def _render_field_contract(def_name, intro):
+    """A prose-ready field contract rendered from a completion-record
+       $defs entry — the field names, enums and the schema's own
+       descriptions, so methodology guidance can state the binding
+       shape AT THE POINT OF EMISSION without hand-maintaining a copy
+       that drifts (the 2026-06-11 schema rejection: a model
+       paraphrased the challenge field names that prose had only
+       described at a distance). Required fields lead, in schema
+       order; optional ones follow, marked."""
+    d = _RECORD_SCHEMA.get("$defs", {}).get(def_name, {})
+    req = d.get("required", [])
+    props = d.get("properties", {})
+    lines = [intro]
+    for name in list(req) + [n for n in props if n not in req]:
+        p = props.get(name, {})
+        parts = [f"- `{name}`"]
+        if name not in req:
+            parts.append(" (optional)")
+        if "enum" in p:
+            parts.append(" — exactly one of "
+                         + " / ".join(f"`{v}`" for v in p["enum"]))
+        desc = re.sub(r"\s+", " ", p.get("description") or "").strip()
+        if desc:
+            parts.append(f". {desc}" if "enum" in p else f": {desc}")
+        lines.append("".join(parts))
+    return "\n".join(lines)
+
+
+# Schema-derived prose contracts, substituted into methodology guidance
+# via %SELF_REVIEW_CHALLENGE_CONTRACT% / %PATCH_SCOPE_CONTRACT%. Built
+# once at import (the schema is static for the process lifetime).
+_SELF_REVIEW_CHALLENGE_CONTRACT = _render_field_contract(
+    "self_review_challenge",
+    "Every `self_review_record.challenges[]` entry carries EXACTLY "
+    "these fields — schema-enforced names, no paraphrase or synonyms:")
+_PATCH_SCOPE_CONTRACT = _render_field_contract(
+    "patch_scope",
+    "`patch_scope` is schema-enforced — every concern carries it, "
+    "with these fields:")
+
 # Appended to every check/candidate body when compiling a REVIEW slice
 # (see _compile_methodology). Point-of-use reinforcement of the concern
 # return contract; the binding shape is the schema injected into the
@@ -356,7 +397,14 @@ def _methodology_variables(task_type=None):
            record (with $refs resolved). Lets the methodology drop
            a single placeholder where it wants the authoritative
            output contract, instead of hardcoding a verbal
-           description that drifts from the schema."""
+           description that drifts from the schema.
+         - %SELF_REVIEW_CHALLENGE_CONTRACT% /
+           %PATCH_SCOPE_CONTRACT% — schema-derived prose contracts
+           for the two record fragments models historically
+           paraphrase, for point-of-use reinforcement inside the
+           guidance (the full schema rides far away in the return
+           block; in a long context, shape rules at the emission
+           instruction are what hold)."""
     now = datetime.datetime.now(datetime.timezone.utc)
     out = {
         # "Tuesday, 26 May 2026" — natural-language form for prose
@@ -364,6 +412,9 @@ def _methodology_variables(task_type=None):
         "%DATE_LONG%":  now.strftime("%A, %-d %B %Y"),
         # "2026-05-26" — ISO-8601 for trailers / comparisons / logs.
         "%DATE_SHORT%": now.strftime("%Y-%m-%d"),
+        "%SELF_REVIEW_CHALLENGE_CONTRACT%":
+            _SELF_REVIEW_CHALLENGE_CONTRACT,
+        "%PATCH_SCOPE_CONTRACT%": _PATCH_SCOPE_CONTRACT,
     }
     if task_type and task_type in _COMPLETION_RECORD_SCHEMAS:
         out["%COMPLETION_RECORD_SCHEMA_JSON%"] = \

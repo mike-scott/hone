@@ -142,6 +142,51 @@ def test_substitute_recurses_through_lists_and_dicts():
     assert out["operations"]["prepare"]["guidance"] == "now: L"
 
 
+def test_schema_derived_contracts_track_the_schema():
+    """%SELF_REVIEW_CHALLENGE_CONTRACT% / %PATCH_SCOPE_CONTRACT% are
+       rendered FROM common/schema/completion-record.schema.yaml, so
+       the methodology's point-of-use shape rules can never drift from
+       the schema again (the 2026-06-11 rejection: prose described the
+       challenge fields at a distance, the model paraphrased them).
+       Every required field, every enum value, and the schema's own
+       descriptions must appear in the rendered prose."""
+    variables = api._methodology_variables("review")
+    challenge = variables["%SELF_REVIEW_CHALLENGE_CONTRACT%"]
+    scope = variables["%PATCH_SCOPE_CONTRACT%"]
+    defs = api._RECORD_SCHEMA["$defs"]
+    for field in defs["self_review_challenge"]["required"]:
+        assert f"`{field}`" in challenge, field
+    for value in defs["self_review_challenge"]["properties"]["outcome"]["enum"]:
+        assert f"`{value}`" in challenge, value
+    for field in defs["patch_scope"]["required"]:
+        assert f"`{field}`" in scope, field
+    # the schema's own description carries the per-kind patches rule
+    assert "full set" in scope and "cross_patch" in scope
+    # optional fields are present but marked
+    assert "`spans_lines_in_diff` (optional)" in scope
+
+
+def test_default_methodology_emits_the_schema_contracts():
+    """The shipped methodology drops the contract placeholders (not a
+       hand-written field list) in every operation's self-review
+       guidance; substitution at claim time expands them to the
+       schema-derived prose."""
+    import os
+    import yaml as _yaml
+    with open(os.path.join(os.path.dirname(api.__file__),
+                           "default-methodology.yaml")) as f:
+        doc = _yaml.safe_load(f)
+    for op in ("prepare", "review", "train", "draft"):
+        assert ("%SELF_REVIEW_CHALLENGE_CONTRACT%"
+                in doc["operations"][op]["guidance"]), op
+    assert "%PATCH_SCOPE_CONTRACT%" in doc["operations"]["review"]["guidance"]
+    out = api._substitute(doc["operations"]["review"]["guidance"],
+                          api._methodology_variables("review"))
+    assert "%SELF_REVIEW_CHALLENGE_CONTRACT%" not in out
+    assert "`challenge_text`" in out
+    assert "exactly one of `upheld` / `revised` / `dropped`" in out
+
+
 def test_substitute_passes_non_string_values_through():
     """Non-string leaves (int, bool, None) are not touched; only
        string nodes are scanned."""
@@ -189,10 +234,13 @@ def test_substitute_uses_only_leading_whitespace_not_full_prefix():
 
 def test_methodology_variables_returns_iso_and_long_dates():
     """The variable registry exposes %DATE_SHORT% (ISO-8601, fixed
-       length 10) and %DATE_LONG% (natural-language form). Both
-       come off the same UTC `now` snapshot."""
+       length 10) and %DATE_LONG% (natural-language form) — both off
+       the same UTC `now` snapshot — plus the two schema-derived
+       record-fragment contracts (task-type independent)."""
     vars_ = api._methodology_variables()
-    assert set(vars_) == {"%DATE_LONG%", "%DATE_SHORT%"}
+    assert set(vars_) == {"%DATE_LONG%", "%DATE_SHORT%",
+                          "%SELF_REVIEW_CHALLENGE_CONTRACT%",
+                          "%PATCH_SCOPE_CONTRACT%"}
     # ISO date: YYYY-MM-DD, ten chars, three dashes.
     assert len(vars_["%DATE_SHORT%"]) == 10
     assert vars_["%DATE_SHORT%"].count("-") == 2

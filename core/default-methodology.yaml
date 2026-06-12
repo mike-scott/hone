@@ -1021,13 +1021,16 @@ operations:
       - **Did I guess a base commit?** `tree_state.base_commit_declared` comes only
         from a `base-commit:` trailer in the text — never inferred.
 
-      Record this pass's outcomes in `self_review_record` per docs/API.md → *The
-      self-review record*. Each challenge captured carries `target_kind` (typically
-      "claim", "verification", or "field"), `target_id` (the field path challenged,
-      e.g., `"metadata.subsystem.primary[0]"`), `challenge_kind` (e.g.,
-      `"mode_honesty"`, `"verification_skipped"`, `"silent_scope_narrowing"`),
-      `challenge_text`, `outcome` (`upheld` / `revised` / `dropped`), and
-      `outcome_note`. The `summary` is required even when no challenges arose. Process
+      Record this pass's outcomes in `self_review_record`.
+
+      %SELF_REVIEW_CHALLENGE_CONTRACT%
+
+      For prepare, `target_kind` is typically "claim", "verification", or
+      "field"; `target_id` is the field path challenged (e.g.,
+      `"metadata.subsystem.primary[0]"`); `challenge_kind` e.g.
+      `"mode_honesty"`, `"verification_skipped"`,
+      `"silent_scope_narrowing"`. The `summary` is required even when no
+      challenges arose. Process
       warnings (about tool failures, parse errors, etc.) stay in
       `preparation_notes.warnings` — `self_review_record` is for adversarial-pass
       outcomes, `preparation_notes` for the extraction-process state.
@@ -1284,9 +1287,10 @@ operations:
       code rewrite); `severity`
       (a tag from `report_finalization.severity_scale.levels[].tag`);
       `is_preexisting` (true exactly when the finding originates from the
-      `preexisting-issues` check); `patch_scope` (kind + patches +
-      `spans_lines_in_diff` — for a finding scoped to a single patch
-      (`kind: patch`) this is **required** and is how hone-core renders the
+      `preexisting-issues` check); `patch_scope` (the per-field contract
+      below — `patches` holds message-ids from the PATCH DIFFS section. For
+      a finding scoped to a single patch (`kind: patch`) `spans_lines_in_diff`
+      is **required** and is how hone-core renders the
       cited hunk: give `[start, end]`, 0-indexed from the patch's first
       `diff --git` line, bounding the lines you are quoting. hone-core
       slices that range out of the patch's own body and renders it as a
@@ -1298,6 +1302,8 @@ operations:
       `text` and let `file`/`function_symbol` locate it. Do **not**
       hand-author diff text: `code_snippet` is not rendered, and the
       suggested change is one prose sentence in `text`).
+
+      %PATCH_SCOPE_CONTRACT%
 
       ### Adversarial self-review
 
@@ -1325,11 +1331,16 @@ operations:
         `contributing_check_ids`?
 
       Record this pass's outcomes (the Stage 3 hostile-maintainer challenges and
-      the per-concern adversarial pass) in `self_review_record` per docs/API.md →
-      *The self-review record*. `target_kind` values: `"concern"` for a concern,
-      `"location"` for a location citation, `"stage3"` for a Stage 3 challenge,
-      `"consolidation"` for a Stage C merge or keep-separate decision. The
-      `summary` is required even when no challenges arose.
+      the per-concern adversarial pass) in `self_review_record`.
+
+      %SELF_REVIEW_CHALLENGE_CONTRACT%
+
+      For review, `target_kind` is `"concern"` for a concern, `"location"`
+      for a location citation, `"stage3"` for a Stage 3 challenge,
+      `"consolidation"` for a Stage C merge or keep-separate decision;
+      `target_id` is the concern_id challenged, or a stable label you mint
+      for stage3/consolidation entries (e.g. `"stage3-1"`). The `summary`
+      is required even when no challenges arose.
     return: |
       The outcome is "reviewed" (with concerns[]) or "unappliable" / "deferred" (with
       a reason string).
@@ -1424,12 +1435,15 @@ operations:
       methodology gap. A miss better attributed to "this patch is outside our usual
       stratum" is a corpus gap, not a methodology gap.
 
-      Record this pass's outcomes in `self_review_record` per docs/API.md → *The
-      self-review record*. `target_kind` values: `"match_verdict"` for a point-match
-      classification, `"point_decomposition"` for a comment-point boundary issue,
-      `"candidate_credit"` for a candidate outcome's `caught_points`, `"proposal"` for
-      a proposed new_candidate or revise_existing (pool role only). The `summary` is
-      required even when no challenges arose.
+      Record this pass's outcomes in `self_review_record`.
+
+      %SELF_REVIEW_CHALLENGE_CONTRACT%
+
+      For train, `target_kind` is `"match_verdict"` for a point-match
+      classification, `"point_decomposition"` for a comment-point boundary
+      issue, `"candidate_credit"` for a candidate outcome's `caught_points`,
+      `"proposal"` for a proposed new_candidate or revise_existing (pool
+      role only). The `summary` is required even when no challenges arose.
     return: |
       The outcome is "trained" (with concerns_considered, comment_points,
       point_matches, candidate_outcomes, check_outcomes, summary, and proposals[]) or
@@ -1501,13 +1515,17 @@ operations:
         differs from the original. A revise-severity-scale must trace to measured
         temporal drift.
 
-      Record this pass's outcomes in `self_review_record` per docs/API.md → *The
-      self-review record*. `target_kind` values: `"proposal"` for a drafted proposal
+      Record this pass's outcomes in `self_review_record`.
+
+      %SELF_REVIEW_CHALLENGE_CONTRACT%
+
+      For draft, `target_kind` is `"proposal"` for a drafted proposal
       challenged for acceptance, wording, or alternatives; `"batch"` for the
-      batch-as-a-whole overload challenge; `"alternative_consideration"` for an
-      alternative weighed against a proposal; `"recommendation_authority"` for a
-      payload challenged on bounded-authoring grounds. The `summary` is required even
-      when no challenges arose.
+      batch-as-a-whole overload challenge; `"alternative_consideration"` for
+      an alternative weighed against a proposal;
+      `"recommendation_authority"` for a payload challenged on
+      bounded-authoring grounds. The `summary` is required even when no
+      challenges arose.
     return: |
       The outcome is "drafted" (with eligibility_dispositions[], proposals[],
       cross_proposal_dependencies[], and node_notes) or "failed" (with a reason
