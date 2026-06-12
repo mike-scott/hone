@@ -17,6 +17,9 @@ import os
 import re
 import subprocess
 
+import jsonschema
+import yaml
+
 from node import ai, cgit, refrepo, tier0
 from node.client import HoneCoreClient
 from node.config import Config
@@ -380,6 +383,135 @@ def _apply_series(wt: str, patches: list) -> tuple:
     return (True, None)
 
 
+# --- completion-record validation + repair ----------------------------------
+#
+# The node validates every model-emitted record against the SAME schema
+# hone-core enforces, BEFORE submitting. A long-context review (the
+# contract sits megatokens behind the emission point) occasionally
+# paraphrases the record shape — plausible field names, wrong contract.
+# Submitting that costs the whole task: hone-core 422s and the runner's
+# fallback buries an otherwise-sound review. Caught node-side, one cheap
+# no-tools repair turn (the validator's errors + the binding schema +
+# the model's own JSON) recovers it.
+
+_RECORD_SCHEMA_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "common", "schema",
+    "completion-record.schema.yaml")
+with open(_RECORD_SCHEMA_PATH, encoding="utf-8") as _f:
+    _RECORD_SCHEMA = yaml.safe_load(_f)
+
+_BRANCH_VALIDATORS = {}
+
+# Caps on what a validation failure attaches to prompts / meta: each
+# jsonschema message can embed the whole offending instance.
+_SCHEMA_ERR_MSG_CAP = 300
+_SCHEMA_ERR_LIST_CAP = 30
+
+
+def _record_schema_errors(record):
+    """Validate `record` against its task_type's schema branch, NOT the
+       root oneOf — the root's "not valid under any of the given
+       schemas" hides the actual failures; the branch enumerates them.
+       Returns jsonschema errors sorted by path (empty = valid)."""
+    tt = record.get("task_type")
+    v = _BRANCH_VALIDATORS.get(tt)
+    if v is None:
+        branch = {"$ref": f"#/$defs/{tt}_record",
+                  "$defs": _RECORD_SCHEMA.get("$defs", {})}
+        v = jsonschema.Draft202012Validator(branch)
+        _BRANCH_VALIDATORS[tt] = v
+    return sorted(v.iter_errors(record),
+                  key=lambda e: [str(p) for p in e.absolute_path])
+
+
+def _format_schema_errors(errors):
+    """The capped, human/model-readable error list — prompt and meta
+       payload for a repair turn / deferred record."""
+    out = []
+    for e in errors[:_SCHEMA_ERR_LIST_CAP]:
+        loc = "/".join(str(p) for p in e.absolute_path) or "<root>"
+        out.append(f"at {loc}: {e.message[:_SCHEMA_ERR_MSG_CAP]}")
+    if len(errors) > _SCHEMA_ERR_LIST_CAP:
+        out.append(f"... and {len(errors) - _SCHEMA_ERR_LIST_CAP} more")
+    return out
+
+
+def _resolve_schema_refs(node, defs, seen=()):
+    """Inline `{"$ref": "#/$defs/X"}` nodes so a schema branch is
+       self-contained for prompt injection (mirrors core/api.py)."""
+    if isinstance(node, dict):
+        ref = node.get("$ref", "")
+        if isinstance(ref, str) and ref.startswith("#/$defs/"):
+            name = ref.split("/")[-1]
+            if name in seen or name not in defs:
+                return node
+            return _resolve_schema_refs(defs[name], defs, seen + (name,))
+        return {k: _resolve_schema_refs(v, defs, seen)
+                for k, v in node.items()}
+    if isinstance(node, list):
+        return [_resolve_schema_refs(v, defs, seen) for v in node]
+    return node
+
+
+# The record keys a repair turn may rewrite — the model-emitted body.
+# Errors anywhere else (header fields, meta) are node-built and a node
+# bug; a model turn can't fix those.
+_REVIEW_REPAIRABLE_KEYS = ("concerns", "self_review_record")
+
+_REPAIR_SYSTEM = (
+    "You repair the JSON body of a Linux-kernel patchset review so it "
+    "conforms to its completion-record JSON Schema. You are given the "
+    "schema, the current JSON, and the validator's error list. Fix "
+    "EXACTLY what the errors require — renaming mis-named fields, "
+    "supplying required fields, mapping off-enum values to the nearest "
+    "enum value — while preserving every finding and every piece of "
+    "prose verbatim. Never drop, add, reorder or rewrite review "
+    "content. Respond with ONE JSON object and nothing else: "
+    '{"concerns": [...], "self_review_record": {...}}')
+
+
+def _attempt_record_repair(cfg, record, errors):
+    """One no-tools repair turn for an off-contract review record:
+       hand the model its own concerns[] + self_review_record, the
+       validator's errors, and the binding schema; get back a corrected
+       body. Returns (body_or_None, usage) — usage accrues to the
+       record either way (the turn was spent)."""
+    defs = _RECORD_SCHEMA.get("$defs", {})
+    branch = _resolve_schema_refs(
+        defs.get("review_record", {}), defs)
+    user_text = (
+        "=== VALIDATOR ERRORS ===\n"
+        + "\n".join(_format_schema_errors(errors))
+        + "\n\n=== CURRENT JSON (to repair) ===\n"
+        + json.dumps({k: record.get(k) for k in _REVIEW_REPAIRABLE_KEYS},
+                     indent=2)
+        + "\n\n=== JSON SCHEMA (the binding contract; the keys above "
+          "live at the record's top level) ===\n"
+        + json.dumps(branch, indent=2))
+    try:
+        response = ai.call_claude(cfg, _REPAIR_SYSTEM, user_text, tools=[])
+    except ai.CallClaudeError as exc:
+        log.warning("record repair: Claude call failed (%s): %s",
+                    exc.category, exc)
+        return None, None
+    usage = response.get("usage")
+    try:
+        body = ai.parse_json_response(response["text"])
+    except ValueError as exc:
+        log.warning("record repair: response not valid JSON: %s", exc)
+        return None, usage
+    return body, usage
+
+
+def _sum_usage(a, b):
+    """Combined cost accounting for a record whose emission took more
+       than one turn (the review + its repair)."""
+    if not b:
+        return a
+    return {k: (a.get(k) or 0) + (b.get(k) or 0)
+            for k in ("input_tokens", "output_tokens", "duration_ms")}
+
+
 # --- review: prompt assembly -----------------------------------------------
 
 def _render_core_reference(core: dict) -> str:
@@ -641,11 +773,54 @@ def handle_review_task(cfg: Config, client: HoneCoreClient,
                              "raw_response":
                                  (response.get("text") or "")[
                                      :_RAW_RESPONSE_CAP]}}
+        record = {**header,
+                  "outcome": "reviewed",
+                  "concerns": body.get("concerns") or [],
+                  "self_review_record": body.get("self_review_record"),
+                  "meta": meta}
+        # Validate against the schema hone-core will enforce, BEFORE
+        # submitting. Submitting off-contract loses the whole review
+        # (422 → the runner's terminal fallback); a single no-tools
+        # repair turn usually recovers it for a few thousand tokens.
+        errors = _record_schema_errors(record)
+        if not errors:
+            return record
+        formatted = _format_schema_errors(errors)
+        log.warning("review: record fails schema (%d error(s)) — first: %s",
+                    len(errors), formatted[0])
+        if any(e.absolute_path
+               and e.absolute_path[0] not in _REVIEW_REPAIRABLE_KEYS
+               for e in errors):
+            # An error outside the model-emitted body is a node bug a
+            # repair turn can't fix — defer loudly with the evidence.
+            return {**header, "outcome": "deferred",
+                    "reason": "review record failed schema validation "
+                              "outside the model-emitted body (node bug): "
+                              + formatted[0],
+                    "meta": {**meta, "schema_errors": formatted}}
+        log.info("review: attempting record repair turn")
+        fixed, repair_usage = _attempt_record_repair(cfg, record, errors)
+        if fixed is not None:
+            repaired = {**header,
+                        "usage": _sum_usage(header["usage"], repair_usage),
+                        "outcome": "reviewed",
+                        "concerns": fixed.get("concerns") or [],
+                        "self_review_record":
+                            fixed.get("self_review_record"),
+                        "meta": {**meta,
+                                 "schema_repair": {"errors": formatted,
+                                                   "attempts": 1}}}
+            if not _record_schema_errors(repaired):
+                log.info("review: record repaired — submitting")
+                return repaired
+            log.warning("review: repaired record STILL fails schema")
         return {**header,
-                "outcome": "reviewed",
-                "concerns": body.get("concerns") or [],
-                "self_review_record": body.get("self_review_record"),
-                "meta": meta}
+                "usage": _sum_usage(header["usage"], repair_usage),
+                "outcome": "deferred",
+                "reason": "review record failed completion-record schema "
+                          "validation; repair turn did not converge: "
+                          + formatted[0],
+                "meta": {**meta, "schema_errors": formatted}}
     finally:
         refrepo.cleanup(wt)
 

@@ -3,3 +3,5 @@
 anthropic>=0.40     # the Claude API client — the node's AI reviews
 httpx>=0.27         # HTTP client for the hone-core v1 REST API
 zstandard>=0.23     # decompress the .tar.zst patchset blobs
+PyYAML>=6.0         # load the shared completion-record schema
+jsonschema>=4.21    # validate records node-side before submit

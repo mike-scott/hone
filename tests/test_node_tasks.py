@@ -590,6 +590,116 @@ def test_review_handler_emits_schema_valid_reviewed_record(monkeypatch,
     assert cleaned == [calls[0]["cwd"]]          # worktree torn down
 
 
+# The off-contract shapes from the 2026-06-11 schema rejection: the model
+# paraphrased the challenge fields (challenge/response/confirmed instead
+# of challenge_kind/challenge_text/outcome_note/upheld) and dropped the
+# required patch_scope.patches on a series-scoped concern.
+_OFF_CONTRACT_REVIEW_BODY = {
+    "concerns": [{
+        "concern_id":            "rev-c-1",
+        "stage_id":              "2",
+        "candidate_or_check_id": "concurrency",
+        "text":                  "Field foo is read without holding the lock.",
+        "severity":              "major",
+        "is_preexisting":        False,
+        "patch_scope":           {"kind": "series"},
+        "locations":             [{"file": "x.c",
+                                    "function_symbol": "foo_probe"}]}],
+    "self_review_record": {"summary": "checked 1 concern; held up",
+                            "challenges": [
+                                {"target_kind": "stage3",
+                                 "challenge":   "would this survive?",
+                                 "response":    "yes — verified by reading.",
+                                 "outcome":     "confirmed"}]},
+}
+
+_REPAIRED_REVIEW_BODY = {
+    "concerns": [{**_OFF_CONTRACT_REVIEW_BODY["concerns"][0],
+                  "patch_scope": {"kind": "series", "patches": ["p2@x"]}}],
+    "self_review_record": {"summary": "checked 1 concern; held up",
+                            "challenges": [
+                                {"target_kind":    "stage3",
+                                 "target_id":      "stage3-1",
+                                 "challenge_kind": "evidence_check",
+                                 "challenge_text": "would this survive?",
+                                 "outcome":        "upheld",
+                                 "outcome_note":   "yes — verified by "
+                                                   "reading."}]},
+}
+
+
+def _sequenced_call_claude(texts):
+    """A call_claude stub returning each of `texts` in turn — the review
+       turn, then the repair turn. Captures every call's kwargs."""
+    calls = []
+    def _stub(cfg, system, user_text, *, model=None, max_tokens=None,
+              tools=None, cwd=None):
+        calls.append({"system": system, "user_text": user_text,
+                       "tools": tools, "cwd": cwd})
+        return {"text":  texts[min(len(calls), len(texts)) - 1],
+                "model": "claude-opus-4-7",
+                "usage": {"input_tokens": 1000, "output_tokens": 200,
+                          "duration_ms": 5000}}
+    return _stub, calls
+
+
+def test_review_handler_repairs_off_contract_record(monkeypatch, tmp_path):
+    """A record that would 422 at hone-core is caught node-side and fixed
+       by one no-tools repair turn: the submitted record is schema-valid,
+       carries the summed usage of both turns, and notes the repair in
+       meta. The review content survives verbatim."""
+    _stub_refrepo(monkeypatch)
+    monkeypatch.setattr("node.tasks._apply_series",
+                        lambda wt, patches: (True, None))
+    stub, calls = _sequenced_call_claude(
+        [json.dumps(_OFF_CONTRACT_REVIEW_BODY),
+         json.dumps(_REPAIRED_REVIEW_BODY)])
+    monkeypatch.setattr("node.ai.call_claude", stub)
+
+    record = tasks.handle_review_task(_review_cfg(tmp_path), None,
+                                      _REVIEW_CLAIM)
+
+    _validate_record(record)
+    assert record["outcome"] == "reviewed"
+    assert record["concerns"][0]["text"] == \
+        "Field foo is read without holding the lock."
+    assert record["usage"]["input_tokens"] == 2000          # both turns
+    assert record["meta"]["schema_repair"]["errors"]        # what was wrong
+    # The repair turn: no tools, and it carried the validator's errors,
+    # the model's own JSON, and the binding schema.
+    assert len(calls) == 2
+    assert calls[1]["tools"] == []
+    assert "VALIDATOR ERRORS" in calls[1]["user_text"]
+    assert "'patches' is a required property" in calls[1]["user_text"]
+    assert "self_review_challenge" not in calls[1]["user_text"]  # resolved
+    assert '"upheld"' in calls[1]["user_text"]               # schema inlined
+
+
+def test_review_handler_defers_when_repair_does_not_converge(monkeypatch,
+                                                              tmp_path):
+    """A repair turn that returns a still-invalid body must not be
+       submitted (hone-core would 422 → the runner's TERMINAL unappliable
+       fallback would bury the review). Defer instead — re-arm — with the
+       validator's errors as evidence."""
+    _stub_refrepo(monkeypatch)
+    monkeypatch.setattr("node.tasks._apply_series",
+                        lambda wt, patches: (True, None))
+    stub, calls = _sequenced_call_claude(
+        [json.dumps(_OFF_CONTRACT_REVIEW_BODY),
+         json.dumps(_OFF_CONTRACT_REVIEW_BODY)])    # repair changes nothing
+    monkeypatch.setattr("node.ai.call_claude", stub)
+
+    record = tasks.handle_review_task(_review_cfg(tmp_path), None,
+                                      _REVIEW_CLAIM)
+
+    _validate_record(record)
+    assert record["outcome"] == "deferred"
+    assert "schema" in record["reason"]
+    assert record["meta"]["schema_errors"]
+    assert len(calls) == 2
+    assert record["usage"]["input_tokens"] == 2000          # both turns
+
+
 def test_review_handler_unappliable_when_series_wont_apply(monkeypatch,
                                                             tmp_path):
     _stub_refrepo(monkeypatch)
