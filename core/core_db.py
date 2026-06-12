@@ -893,12 +893,62 @@ DROP INDEX idx_patchsets_claimed;
 ALTER TABLE patchsets DROP COLUMN claimed_by_user_id;
 """
 
+_SCHEMA_V10 = """
+-- Corpus-listing scale (the 100k-patchsets tier; see the two-phase
+-- listing queries in count_patchsets / list_patchsets_page for the
+-- O(page) tier below it).
+--
+-- 1. The default corpus view is WHERE origin ORDER BY sent LIMIT n:
+--    without an index the planner scans every gathered row into the
+--    sorter on every page-load (linear — ~33ms/1M rows in-memory,
+--    worse on disk). With it, it walks 25 index entries and stops.
+CREATE INDEX idx_patchsets_origin_sent ON patchsets(origin, sent DESC);
+
+-- 2. The search box: LIKE '%term%' is categorically un-indexable
+--    (leading wildcard), so every search scanned the corpus AND
+--    probed messages once per row for the author fields. FTS5 with
+--    the TRIGRAM tokenizer keeps today's substring semantics (plain
+--    FTS5 matches word/prefix only — 'ohn' would silently stop
+--    finding 'John') at index speed, O(matches) not O(corpus). The
+--    index trades disk for that (~3 tokens per character).
+--
+--    FTS5 is addressed by integer rowid, and patchsets is a WITHOUT
+--    ROWID table — patchset_fts_map is the bridge: a plain rowid
+--    table keyed by root_message_id whose implicit rowid IS the FTS
+--    docid, giving the per-upsert refresh an indexed delete (rowid
+--    lookup) instead of an FTS-table scan. Gathered rows only: the
+--    corpus listing excludes uploads unconditionally. Sync is in
+--    code, not triggers (_refresh_patchset_fts from the upsert /
+--    delete paths) — gather is the single writer, and the refresh
+--    needs the patchsets ⋈ messages join anyway. Searches shorter
+--    than 3 chars can't produce a trigram; they keep the LIKE scan
+--    (_patchset_list_where).
+CREATE TABLE patchset_fts_map (
+    root_message_id TEXT PRIMARY KEY    -- implicit rowid = FTS docid
+);
+
+CREATE VIRTUAL TABLE patchset_fts USING fts5(
+    subject, author_name, author_email, submitter_email,
+    tokenize='trigram');
+
+INSERT INTO patchset_fts_map (root_message_id)
+    SELECT root_message_id FROM patchsets WHERE origin = 1;
+
+INSERT INTO patchset_fts
+    (rowid, subject, author_name, author_email, submitter_email)
+    SELECT m.rowid, p.subject, rm.author_name, rm.author_email,
+           p.submitter_email
+    FROM patchset_fts_map m
+    JOIN patchsets p ON p.root_message_id = m.root_message_id
+    LEFT JOIN messages rm ON rm.message_id = p.root_message_id;
+"""
+
 # A migration is either a DDL script (executescript) or a Python callable
 # taking the connection — for data fixes SQL can't express (v5 needs a
 # regex). Both run under the same user_version bookkeeping.
 _MIGRATIONS = [_SCHEMA_V1, _SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4,
                _migrate_v5_series_version, _SCHEMA_V6, _SCHEMA_V7,
-               _SCHEMA_V8, _SCHEMA_V9]
+               _SCHEMA_V8, _SCHEMA_V9, _SCHEMA_V10]
 
 
 # How long a connection waits on another connection's write lock before
@@ -1076,6 +1126,43 @@ def _hash(secret):
 # Patchsets
 # ===========================================================================
 
+def _refresh_patchset_fts(db, root_message_id):
+    """Mirror one GATHERED patchset's searchable fields (subject, root
+       author, submitter) into patchset_fts — called wherever those
+       fields are written: upsert_patchset / mark_skipped (subject,
+       submitter) and upsert_message for the root message (author).
+       Uploaded/unknown roots are a no-op: the corpus search never sees
+       them. Delete-then-insert keyed on the patchset_fts_map rowid
+       (patchsets is WITHOUT ROWID — the map row's implicit rowid is
+       the FTS docid), inside the caller's transaction. The author
+       fields are NULL until the root message lands — the next refresh
+       fills them."""
+    root = norm_msgid(root_message_id)
+    row = db.execute(
+        "SELECT p.subject, rm.author_name, rm.author_email, "
+        "p.submitter_email "
+        "FROM patchsets p "
+        "LEFT JOIN messages rm ON rm.message_id = p.root_message_id "
+        "WHERE p.root_message_id=? AND p.origin=?",
+        (root, PATCHSET_ORIGIN_GATHERED)).fetchone()
+    if row is None:
+        return
+    rid = db.execute("SELECT rowid FROM patchset_fts_map "
+                     "WHERE root_message_id=?", (root,)).fetchone()
+    if rid is not None:
+        rid = rid[0]
+        db.execute("DELETE FROM patchset_fts WHERE rowid=?", (rid,))
+    else:
+        rid = db.execute("INSERT INTO patchset_fts_map (root_message_id) "
+                         "VALUES (?)", (root,)).lastrowid
+    db.execute(
+        "INSERT INTO patchset_fts "
+        "(rowid, subject, author_name, author_email, submitter_email) "
+        "VALUES (?,?,?,?,?)",
+        (rid, row["subject"], row["author_name"],
+         row["author_email"], row["submitter_email"]))
+
+
 def upsert_patchset(db, root_message_id, *, subject=None, submitter_email=None,
                     sent=None, n_patches=None, base_commit=None,
                     change_id=None, series_version=1, gathered_at=None,
@@ -1115,6 +1202,7 @@ def upsert_patchset(db, root_message_id, *, subject=None, submitter_email=None,
          uploaded_by_user_id,
          norm_msgid(supersedes_root_message_id)
          if supersedes_root_message_id else None))
+    _refresh_patchset_fts(db, root)
     db.commit()
     return root
 
@@ -1144,6 +1232,7 @@ def mark_skipped(db, root_message_id, reason, *, subject=None):
     db.execute("UPDATE patchsets SET state=?, skip_reason=? "
                "WHERE root_message_id=?",
                (PATCHSET_STATE_SKIPPED, reason, root))
+    _refresh_patchset_fts(db, root)   # the INSERT path may carry a subject
     db.commit()
 
 
@@ -1216,14 +1305,33 @@ def _patchset_list_where(q, state, comments, list_tag, patch_type):
 
        The listing is the CORPUS view, so uploaded patchsets are excluded
        unconditionally — they are submissions, browsed on /my-patchsets,
-       not corpus rows to search / filter / train against."""
+       not corpus rows to search / filter / train against.
+
+       Returns (where, params, author_join) — author_join is True when
+       the clause references the rm alias (the root-message join), so
+       callers attach that join only when it can matter. Search runs
+       against patchset_fts (trigram FTS5 — substring semantics at
+       index speed, O(matches) not O(corpus)); a term under 3 chars
+       can't produce a trigram, so it keeps the LIKE scan — and is the
+       one case that still needs rm."""
     clauses = [f"p.origin = {PATCHSET_ORIGIN_GATHERED}"]
     params = []
-    if q:
+    author_join = False
+    if q and len(q) >= 3:
+        # The term is matched as one quoted FTS5 phrase — internal
+        # quotes doubled — so user-typed syntax (*, OR, parens) is
+        # literal text, never a query-parse error.
+        clauses.append("p.root_message_id IN "
+                       "(SELECT root_message_id FROM patchset_fts_map "
+                       " WHERE rowid IN (SELECT rowid FROM patchset_fts "
+                       "  WHERE patchset_fts MATCH ?))")
+        params.append('"' + q.replace('"', '""') + '"')
+    elif q:
         like = f"%{q}%"
         clauses.append("(p.subject LIKE ? OR rm.author_name LIKE ? "
                        "OR rm.author_email LIKE ? OR p.submitter_email LIKE ?)")
         params += [like, like, like, like]
+        author_join = True
     if state in _PATCHSET_FILTER_CLAUSES:
         clauses.append(_PATCHSET_FILTER_CLAUSES[state])
     if comments == "with":
@@ -1239,7 +1347,7 @@ def _patchset_list_where(q, state, comments, list_tag, patch_type):
                        "AND json_extract(pmt.patch_type, '$.primary') = ?)")
         params.append(patch_type)
     where = " WHERE " + " AND ".join(clauses)
-    return where, params
+    return where, params, author_join
 
 
 def list_user_patchsets(db, *, user_id=None):
@@ -1466,14 +1574,16 @@ def count_patchsets(db, *, q=None, state=None, comments=None, list_tag=None,
     """Total patchsets matching the listing's search + filter axes — the
        pager's denominator. The root-message join exists only so an
        author-name search term is honoured, so it is attached only when
-       there IS a search term: it is 1:1 (messages.message_id is the PK)
-       and can never change the count, but probing the messages PK once
-       per gathered patchset costs ~165ms at 11k rows — the join made
-       every corpus page-load pay that for nothing."""
-    where, params = _patchset_list_where(q, state, comments, list_tag,
-                                         patch_type)
+       the WHERE references it (the sub-trigram LIKE fallback): it is
+       1:1 (messages.message_id is the PK) and can never change the
+       count, but probing the messages PK once per gathered patchset
+       costs ~165ms at 11k rows — the join made every corpus page-load
+       pay that for nothing. FTS searches don't need it either: the
+       author fields are mirrored into patchset_fts."""
+    where, params, author_join = _patchset_list_where(
+        q, state, comments, list_tag, patch_type)
     join = (" LEFT JOIN messages rm ON rm.message_id = p.root_message_id"
-            if q else "")
+            if author_join else "")
     return db.execute(
         "SELECT count(*) FROM patchsets p" + join + where,
         params).fetchone()[0]
@@ -1508,8 +1618,8 @@ def list_patchsets_page(db, *, q=None, state=None, comments=None,
        the annotations do."""
     col = PATCHSET_SORT_COLUMNS.get(sort, PATCHSET_SORT_COLUMNS["date"])
     direction = "ASC" if str(direction).lower() == "asc" else "DESC"
-    where, params = _patchset_list_where(q, state, comments, list_tag,
-                                         patch_type)
+    where, params, author_join_filter = _patchset_list_where(
+        q, state, comments, list_tag, patch_type)
     order = (f" ORDER BY {col} {direction}, p.sent DESC, p.root_message_id ")
     annotations = (
         "COALESCE(rm.author_name, rm.author_email, p.submitter_email) AS author, "
@@ -1533,7 +1643,7 @@ def list_patchsets_page(db, *, q=None, state=None, comments=None,
         rows = db.execute(
             "SELECT p.*, " + annotations +
             "FROM (SELECT p.* FROM patchsets p"
-            + (author_join if q else "") + where + order +
+            + (author_join if author_join_filter else "") + where + order +
             "  LIMIT ? OFFSET ?) AS p"
             + author_join + order,
             [MSG_TYPE_COMMENT, MSG_TYPE_PATCH, *params, limit, offset])
@@ -1566,6 +1676,10 @@ def upsert_message(db, message_id, *, root_message_id, type, body,
          author_name,
          norm_email(author_email) if author_email else None,
          subject, sent, body))
+    # The ROOT message carries the author fields the corpus search
+    # indexes — landing (or re-landing) it refreshes the FTS mirror.
+    if norm_msgid(message_id) == norm_msgid(root_message_id):
+        _refresh_patchset_fts(db, root_message_id)
     db.commit()
 
 
@@ -1743,6 +1857,13 @@ def delete_patchset(db, root_message_id):
     db.execute("UPDATE patchsets SET supersedes_root_message_id=? "
                "WHERE supersedes_root_message_id=?",
                (ps["supersedes_root_message_id"], root))
+    # Defensive: uploaded rows are never IN the search index, but a
+    # stale map/FTS pair must not linger if one ever appeared.
+    db.execute("DELETE FROM patchset_fts WHERE rowid="
+               "(SELECT rowid FROM patchset_fts_map WHERE root_message_id=?)",
+               (root,))
+    db.execute("DELETE FROM patchset_fts_map WHERE root_message_id=?",
+               (root,))
     db.execute("DELETE FROM patchsets WHERE root_message_id=?", (root,))
     db.commit()
     return "ok"

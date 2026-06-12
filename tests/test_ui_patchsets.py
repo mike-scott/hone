@@ -144,6 +144,47 @@ def test_search_matches_partial_author_name(ctx):
     assert "patch two" not in body
 
 
+def test_search_shorter_than_a_trigram_falls_back_to_like(ctx):
+    """A 1-2 char term can't produce a trigram for the FTS index, so it
+       keeps the LIKE scan — short searches must degrade to slow, never
+       to empty."""
+    _plant(ctx.db, "<r1@x>", subject="net: frobnicate", author="Alice", sent=2)
+    _plant(ctx.db, "<r2@x>", subject="mm: tidy slab", author="Bob", sent=1)
+    body = ctx.client.get("/", params={"q": "fr"}).text
+    assert "net: frobnicate" in body
+    assert "mm: tidy slab" not in body
+
+
+def test_search_treats_fts_syntax_as_literal_text(ctx):
+    """User-typed FTS5 syntax (quotes, stars, booleans) is matched as
+       literal text — never a query-parse 500, never an operator."""
+    _plant(ctx.db, "<r1@x>", subject='fix the "frob" path', author="A", sent=2)
+    _plant(ctx.db, "<r2@x>", subject="unrelated", author="B", sent=1)
+    r = ctx.client.get("/", params={"q": '"frob" OR'})
+    assert r.status_code == 200
+    for q in ('the "frob"', "frob*", "(frob"):
+        assert ctx.client.get("/", params={"q": q}).status_code == 200
+    body = ctx.client.get("/", params={"q": '"frob"'}).text
+    assert "frob" in body and "unrelated" not in body
+
+
+def test_search_index_follows_author_and_subject_rewrites(ctx):
+    """The FTS mirror refreshes when the indexed fields are re-written:
+       a re-gathered root message with a corrected author, or a patchset
+       upsert with a new subject, must be findable by the NEW values
+       (and not linger under the old author)."""
+    _plant(ctx.db, "<r1@x>", subject="net: fix frob", author="Wrong Name",
+           sent=2)
+    core_db.upsert_message(ctx.db, "<r1@x>", root_message_id="<r1@x>",
+                           type=core_db.MSG_TYPE_PATCH, part_index=1,
+                           author_name="Right Person", author_email="rp@e.x",
+                           subject="net: fix frob", sent=2, body="diff")
+    body = ctx.client.get("/", params={"q": "Right Person"}).text
+    assert "net: fix frob" in body
+    body = ctx.client.get("/", params={"q": "Wrong Name"}).text
+    assert "net: fix frob" not in body
+
+
 def test_state_filter_by_lifecycle_flag(ctx):
     """The state filter partitions by lifecycle flag: prepared / reviewed /
        training each show only patchsets carrying that flag, and skipped

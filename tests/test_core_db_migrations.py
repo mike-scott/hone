@@ -57,6 +57,43 @@ def test_v7_adds_daily_stats_to_an_existing_database(tmp_path):
     assert {"idx_work_items_completed", "idx_work_items_enqueued"} <= names
 
 
+def test_v10_backfills_the_search_index(tmp_path):
+    """A pre-v10 database picks up patchset_fts with every GATHERED
+       row's searchable fields backfilled — subject and submitter from
+       patchsets, author from the root message — and uploads excluded."""
+    path = str(tmp_path / "v9.db")
+    raw = _v4_db(path)
+    for ddl in (core_db._SCHEMA_V6, core_db._SCHEMA_V7,
+                core_db._SCHEMA_V8, core_db._SCHEMA_V9):
+        raw.executescript(ddl)
+    raw.execute("PRAGMA user_version=9")
+    raw.execute("INSERT INTO patchsets (root_message_id, subject, "
+                "submitter_email, n_patches, gathered_at, origin) "
+                "VALUES ('<g@x>', '[PATCH] net: fix frobnicator', "
+                "'dev@e.x', 1, 100, 1)")
+    raw.execute("INSERT INTO messages (message_id, root_message_id, "
+                "type, author_name, author_email, body) "
+                "VALUES ('<g@x>', '<g@x>', 2, 'Hans Zimmermann', "
+                "'hz@e.x', 'diff')")
+    raw.execute("INSERT INTO patchsets (root_message_id, subject, "
+                "n_patches, gathered_at, origin) "
+                "VALUES ('<u@x>', 'my private upload', 1, 100, 2)")
+    raw.commit()
+    raw.close()
+
+    db = core_db.connect(path)                # applies v10
+    assert (db.execute("PRAGMA user_version").fetchone()[0]
+            == len(core_db._MIGRATIONS))
+    # Substring semantics via the trigram tokenizer: mid-word fragments
+    # match, against subject and author alike; the upload is invisible.
+    for term in ("frobnic", "robni", "Zimmerm", "immer"):
+        hits = db.execute(
+            "SELECT rowid FROM patchset_fts WHERE patchset_fts MATCH ?",
+            ('"' + term + '"',)).fetchall()
+        assert len(hits) == 1, term
+    assert db.execute("SELECT count(*) FROM patchset_fts").fetchone()[0] == 1
+
+
 def test_v9_carries_v8_claims_into_the_junction(tmp_path):
     """A database stopped at v8 (the single-claimant column) upgrades
        with its claims preserved in patchset_claims and the column
