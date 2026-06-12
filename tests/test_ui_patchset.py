@@ -239,6 +239,138 @@ def test_request_review_stamps_current_user_id_for_a_maintainer(tmp_path):
     assert row["requested_by_user_id"] == uid
 
 
+# --- unappliable-review retry ----------------------------------------------
+
+def _unappliable_review(db, *, requested_by=None):
+    """Drive r1@x's review work-item to the terminal UNAPPLIABLE state —
+       enqueue, claim, submit an unappliable result."""
+    core_db.enqueue_review(db, "<r1@x>", requested_by_user_id=requested_by)
+    claim = core_db.claim_work_item(db, "node-1", methodology_version=1,
+                                    types=(core_db.WORK_ITEM_TYPE_REVIEW,))
+    core_db.submit_work_result(
+        db, claim["claim_id"],
+        state=core_db.WORK_ITEM_STATE_UNAPPLIABLE,
+        record={"outcome": "unappliable", "reason": "did not apply"})
+
+
+def _review_item(db):
+    return db.execute(
+        "SELECT state, requested_by_user_id FROM work_items "
+        "WHERE type=? AND root_message_id=?",
+        (core_db.WORK_ITEM_TYPE_REVIEW, "r1@x")).fetchone()
+
+
+def test_retry_review_offered_when_review_unappliable(ctx):
+    """A terminal unappliable review must not be a dead end on the
+       detail page: the pertinent action is Retry review (the same
+       audience as Request review), not nothing."""
+    _plant_patchset(ctx.db)
+    _unappliable_review(ctx.db)
+    body = ctx.client.get(f"/patchsets/{quote('r1@x')}").text
+    assert "review unappliable" in body            # the chip
+    assert "Retry review" in body
+    assert f'action="/review-requests/{quote("r1@x")}/retry"' in body
+    assert "Request review" not in body
+
+
+def test_retry_review_rearms_the_work_item(ctx):
+    """POSTing the retry flips the review item back to CLAIMABLE with
+       its claim-time fields cleared; the detail page returns to the
+       reviewing state with the admin Cancel as the pertinent action."""
+    _plant_patchset(ctx.db)
+    _unappliable_review(ctx.db)
+    r = ctx.client.post(f"/review-requests/{quote('r1@x')}/retry",
+                        follow_redirects=False)
+    assert r.status_code == 303
+    assert _review_item(ctx.db)["state"] == \
+        core_db.WORK_ITEM_STATE_CLAIMABLE
+    body = ctx.client.get(f"/patchsets/{quote('r1@x')}").text
+    assert "Retry review" not in body
+    assert ">reviewing<" in body
+
+
+def test_retry_review_restamps_the_requester(tmp_path):
+    """The retry is a fresh request on the retrier's behalf: the item's
+       requested_by_user_id is REWRITTEN to them, so the re-run routes
+       to their nodes — what makes this a per-user action rather than
+       the admin-only work-item-page re-arm (which keeps origin)."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from core import auth, runtime_config
+
+    db = core_db.connect(str(tmp_path / "hone.db"))
+    core_db.add_methodology_version(db, {"name": "test", "version": 1})
+    uid = core_db.create_user(db, "alice@x", "alice", "local")
+    core_db.set_user_state(db, uid, "approved")
+    core_db.set_user_maintainer(db, uid, True)
+    alice = auth.SessionUser(id=uid, email="alice@x",
+                              display_name="alice", is_config_admin=False,
+                              is_maintainer=True)
+    app = FastAPI()
+    app.include_router(ui.router)
+    app.dependency_overrides[auth.require_session] = lambda: alice
+    app.dependency_overrides[auth.require_csrf] = lambda: None
+    app.state.db = db
+    app.state.runtime_config = runtime_config.load(
+        str(tmp_path / "config.yaml"))
+    client = TestClient(app)
+
+    _plant_patchset(db)
+    _unappliable_review(db, requested_by=None)     # was system-origin
+    r = client.post(f"/review-requests/{quote('r1@x')}/retry",
+                    follow_redirects=False)
+    assert r.status_code == 303
+    row = db.execute(
+        "SELECT state, requested_by_user_id FROM work_items "
+        "WHERE type=? AND root_message_id=?",
+        (core_db.WORK_ITEM_TYPE_REVIEW, "r1@x")).fetchone()
+    assert row["state"] == core_db.WORK_ITEM_STATE_CLAIMABLE
+    assert row["requested_by_user_id"] == uid
+
+
+def test_retry_review_403_for_a_user_without_standing(tmp_path):
+    """The retry gate mirrors request_review: a regular account that
+       neither claimed nor uploaded the patchset gets 403."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from core import auth, runtime_config
+
+    db = core_db.connect(str(tmp_path / "hone.db"))
+    core_db.add_methodology_version(db, {"name": "test", "version": 1})
+    uid = core_db.create_user(db, "rex@x", "rex", "local")
+    core_db.set_user_state(db, uid, "approved")
+    rex = auth.SessionUser(id=uid, email="rex@x", display_name="rex",
+                           is_config_admin=False, is_maintainer=False)
+    app = FastAPI()
+    app.include_router(ui.router)
+    app.dependency_overrides[auth.require_session] = lambda: rex
+    app.dependency_overrides[auth.require_csrf] = lambda: None
+    app.state.db = db
+    app.state.runtime_config = runtime_config.load(
+        str(tmp_path / "config.yaml"))
+    client = TestClient(app)
+
+    _plant_patchset(db)
+    _unappliable_review(db)
+    r = client.post(f"/review-requests/{quote('r1@x')}/retry",
+                    follow_redirects=False)
+    assert r.status_code == 403
+    assert _review_item(db)["state"] == \
+        core_db.WORK_ITEM_STATE_UNAPPLIABLE
+
+
+def test_retry_review_is_a_noop_on_other_states(ctx):
+    """Retrying a review that isn't unappliable (claimable here — a
+       double-click or a stale page) changes nothing and still 303s."""
+    _plant_patchset(ctx.db)
+    core_db.enqueue_review(ctx.db, "<r1@x>")
+    r = ctx.client.post(f"/review-requests/{quote('r1@x')}/retry",
+                        follow_redirects=False)
+    assert r.status_code == 303
+    assert _review_item(ctx.db)["state"] == \
+        core_db.WORK_ITEM_STATE_CLAIMABLE
+
+
 # --- AI review producer attribution --------------------------------------
 
 def _approved_node(db, name):

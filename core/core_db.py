@@ -2578,6 +2578,42 @@ def retry_unappliable(db, item_id):
     return "ok"
 
 
+def retry_review(db, root_message_id, *, requested_by_user_id=None):
+    """Patchset-scoped retry of an UNAPPLIABLE review — the "Retry
+       review" action on the patchset detail page (the work-item-page
+       retry_unappliable above is its admin, item-id-keyed sibling).
+       Unappliable can be stale: the tip-at-submission base moves on,
+       and a node-side failure (e.g. a schema-rejection fallback) lands
+       here too — so the people the review is FOR (claimant/uploader,
+       via _can_act_on_patchset at the route) get a way out of the
+       dead end.
+
+       Unlike retry_unappliable, the re-arm RE-STAMPS the requester:
+       the retry is a fresh request on the retrier's behalf, routing to
+       their nodes — which is exactly what makes it a per-user action
+       rather than an operator one. Returns 'ok', 'not_unappliable'
+       (any other state — idempotent no-op), or 'unknown' (no review
+       work-item for this patchset)."""
+    root = norm_msgid(root_message_id)
+    row = db.execute(
+        "SELECT id, state FROM work_items WHERE root_message_id=? "
+        "AND type=?", (root, WORK_ITEM_TYPE_REVIEW)).fetchone()
+    if row is None:
+        return "unknown"
+    if row["state"] != WORK_ITEM_STATE_UNAPPLIABLE:
+        return "not_unappliable"
+    log.info("retry_review: patchset %s review item %s → claimable "
+             "(requested_by=%s)", root, row["id"], requested_by_user_id)
+    db.execute(
+        "UPDATE work_items SET state=?, requested_by_user_id=?, "
+        "claim_id=NULL, claimed_by=NULL, claimed_at=NULL, "
+        "lease_expires=NULL, heartbeat_at=NULL, methodology_version=NULL "
+        "WHERE id=?",
+        (WORK_ITEM_STATE_CLAIMABLE, requested_by_user_id, row["id"]))
+    db.commit()
+    return "ok"
+
+
 def cancel_work_item(db, item_id):
     """Admin-triggered cancellation of an UNHELD work item — the row is
        deleted, removing the request from the queue entirely. Only

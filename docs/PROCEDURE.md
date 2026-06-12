@@ -128,8 +128,12 @@ elapses; a node that goes down has its work re-offered automatically.
 
 **Normal**: items flow claimable → claimed → completed. Occasional
 `unappliable` outcomes (patch doesn't apply to its declared base —
-recorded with a reason; no review produced; the patchset doesn't
-re-arm). Occasional `deferred`
+recorded with a reason; no review produced. The patchset doesn't
+re-arm on its own, but unappliable can be stale — the
+tip-at-submission base moves on — so the detail page offers **Retry
+review** to anyone who could have requested it, re-running on the
+retrier's nodes; admins can also re-arm from the work-item page).
+Occasional `deferred`
 outcomes (base unobtainable, will retry — the work-item re-arms
 after the lease elapses).
 

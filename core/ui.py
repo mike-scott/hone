@@ -1799,6 +1799,15 @@ def _patchset_view(db, root, viewer_user_id=None):
             pipeline_actions.append({
                 "kind": "cancel-review", "permission": "admin",
                 "url": f"/work-items/{rev_id}/cancel{work_item_back_qs}"})
+        elif rev_state == core_db.WORK_ITEM_STATE_UNAPPLIABLE:
+            # Unappliable is terminal but can be stale — the tip-at-
+            # submission base moves on, and node-side failures land
+            # here too. Without this the badge is a dead end: enqueue_
+            # review no-ops while the item exists, and the work-item
+            # retry is admin-only. Same audience as request-review.
+            pipeline_actions.append({
+                "kind": "retry-review", "permission": "act",
+                "url": f"/review-requests/{quote(root)}/retry"})
     else:
         # Deleting the shared review is curation, not a request — with
         # open cooperative claiming, claimants must not be able to wipe
@@ -1947,6 +1956,36 @@ async def delete_review(request: Request, root_message_id: str,
     core_db.delete_review(db, root_message_id)
     return RedirectResponse(f"/patchsets/{quote(root_message_id)}",
                              status_code=303)
+
+
+@router.post("/review-requests/{root_message_id:path}/retry", dependencies=[Depends(auth.require_csrf)])
+async def retry_review(request: Request, root_message_id: str,
+                       current_user: auth.SessionUser = Depends(auth.require_session)):
+    """Re-arm a patchset's UNAPPLIABLE review — the "Retry review"
+       button on the detail page POSTs here. Unappliable can be stale
+       (the tip-at-submission base moves on; a node-side failure
+       fallback lands here too), and it is otherwise a dead end:
+       enqueue_review no-ops while the work-item exists, and the
+       work-item-page retry is admin-only. Gated by
+       _can_act_on_patchset — the same audience as request_review —
+       and core_db.retry_review re-stamps the item's origin to the
+       retrier, so the re-run routes to THEIR nodes. Registered before
+       the catch-all request_review route below, like `/delete`, so
+       the `:path` converter doesn't swallow the `/retry` suffix.
+       Redirect-after-POST back to the detail page."""
+    db = request.app.state.db
+    ps = core_db.get_patchset(db, root_message_id)
+    if ps is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND,
+                            f"no patchset with root_message_id "
+                            f"{root_message_id!r}")
+    if not _can_act_on_patchset(db, ps, current_user):
+        raise HTTPException(status.HTTP_403_FORBIDDEN,
+                            "claim, upload or maintainer access required")
+    core_db.retry_review(db, root_message_id,
+                         requested_by_user_id=current_user.id)
+    return RedirectResponse(f"/patchsets/{quote(root_message_id)}",
+                            status_code=303)
 
 
 @router.post("/patchsets/{root_message_id:path}/delete", dependencies=[Depends(auth.require_csrf)])
