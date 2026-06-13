@@ -2369,10 +2369,13 @@ def _try_claim(db, worker_id, methodology_version, types, lease_seconds,
     if types is not None:
         type_clause = f"AND type IN ({','.join('?' * len(types))}) "
         type_params = types
+    # completed_at=NULL: a deferred row re-offered on lease lapse arrives
+    # here straight from a terminal state, still carrying its superseded
+    # verdict's timestamp — a claimed row is by definition not completed.
     row = db.execute(
         f"UPDATE work_items SET state=?, claim_id=?, claimed_by=?, "
         f"claimed_at=?, lease_expires=?, heartbeat_at=?, "
-        f"methodology_version=? "
+        f"methodology_version=?, completed_at=NULL "
         f"WHERE id=("
         f"  SELECT id FROM work_items "
         f"  WHERE (state=? "
@@ -2513,8 +2516,9 @@ def release_deferred(db, item_id):
        lease lapses; this lets the operator skip the wait from the
        work-item detail page). The row's state flips DEFERRED → CLAIMABLE
        and every claim-time field is cleared (claim_id, claimed_by,
-       claimed_at, lease_expires, heartbeat_at, methodology_version) so the
-       next claimer sees a fresh row.
+       claimed_at, lease_expires, heartbeat_at, methodology_version) —
+       along with the stale completed_at, which belongs to the superseded
+       verdict — so the next claimer sees a fresh row.
 
        Safe: a deferred item is terminal and unheld — the node that
        deferred it already submitted and moved on — so there is no
@@ -2537,7 +2541,7 @@ def release_deferred(db, item_id):
     db.execute(
         "UPDATE work_items SET state=?, claim_id=NULL, claimed_by=NULL, "
         "claimed_at=NULL, lease_expires=NULL, heartbeat_at=NULL, "
-        "methodology_version=NULL, defer_count=0 "
+        "methodology_version=NULL, defer_count=0, completed_at=NULL "
         "WHERE id=?",
         (WORK_ITEM_STATE_CLAIMABLE, item_id))
     db.commit()
@@ -2554,8 +2558,9 @@ def retry_unappliable(db, item_id):
        tip-at-submission base, so a retry can succeed once the underlying
        tree has moved on. Like release_deferred, the row is terminal and
        unheld — there is no in-flight claim to disrupt — so we just clear
-       every claim-time field and re-arm it; the next claimer sees a fresh
-       row and overwrites the stale completion record on resubmission.
+       every claim-time field plus the superseded completed_at and re-arm
+       it; the next claimer sees a fresh row and overwrites the stale
+       completion record on resubmission.
 
        Keyed on `item_id` (the operator acts from the UI, holding the row
        id). Returns 'ok' on re-arm, 'not_unappliable' when the row is in
@@ -2571,7 +2576,7 @@ def retry_unappliable(db, item_id):
     db.execute(
         "UPDATE work_items SET state=?, claim_id=NULL, claimed_by=NULL, "
         "claimed_at=NULL, lease_expires=NULL, heartbeat_at=NULL, "
-        "methodology_version=NULL "
+        "methodology_version=NULL, completed_at=NULL "
         "WHERE id=?",
         (WORK_ITEM_STATE_CLAIMABLE, item_id))
     db.commit()
@@ -2607,7 +2612,8 @@ def retry_review(db, root_message_id, *, requested_by_user_id=None):
     db.execute(
         "UPDATE work_items SET state=?, requested_by_user_id=?, "
         "claim_id=NULL, claimed_by=NULL, claimed_at=NULL, "
-        "lease_expires=NULL, heartbeat_at=NULL, methodology_version=NULL "
+        "lease_expires=NULL, heartbeat_at=NULL, methodology_version=NULL, "
+        "completed_at=NULL "
         "WHERE id=?",
         (WORK_ITEM_STATE_CLAIMABLE, requested_by_user_id, row["id"]))
     db.commit()

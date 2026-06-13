@@ -2762,6 +2762,14 @@ def _work_item_view(db, work_item_id):
         "record":            record if isinstance(record, dict) else None,
         "record_json":       json.dumps(record, indent=2)
                               if isinstance(record, dict) else None,
+        # A record on a non-terminal row is the SUPERSEDED attempt's: a
+        # retry/release re-armed the item but deliberately keeps the old
+        # record visible (it's the only surviving evidence of why the
+        # attempt failed) until the re-run's submission overwrites it.
+        # The template labels it so it doesn't read as a current result.
+        "record_superseded": bool(record) and w["state"] in (
+                                  core_db.WORK_ITEM_STATE_CLAIMABLE,
+                                  core_db.WORK_ITEM_STATE_CLAIMED),
         "meta_schema_error":  meta.get("schema_error"),
         "meta_claude_cli":    meta.get("claude_cli_version"),
         "meta_raw_response":  meta.get("raw_response"),

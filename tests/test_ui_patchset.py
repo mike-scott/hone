@@ -255,7 +255,7 @@ def _unappliable_review(db, *, requested_by=None):
 
 def _review_item(db):
     return db.execute(
-        "SELECT state, requested_by_user_id FROM work_items "
+        "SELECT state, requested_by_user_id, completed_at FROM work_items "
         "WHERE type=? AND root_message_id=?",
         (core_db.WORK_ITEM_TYPE_REVIEW, "r1@x")).fetchone()
 
@@ -279,11 +279,15 @@ def test_retry_review_rearms_the_work_item(ctx):
        reviewing state with the admin Cancel as the pertinent action."""
     _plant_patchset(ctx.db)
     _unappliable_review(ctx.db)
+    assert _review_item(ctx.db)["completed_at"] is not None
     r = ctx.client.post(f"/review-requests/{quote('r1@x')}/retry",
                         follow_redirects=False)
     assert r.status_code == 303
-    assert _review_item(ctx.db)["state"] == \
-        core_db.WORK_ITEM_STATE_CLAIMABLE
+    item = _review_item(ctx.db)
+    assert item["state"] == core_db.WORK_ITEM_STATE_CLAIMABLE
+    # the superseded verdict's timestamp goes with the verdict — a
+    # re-armed item must not display "completed at" while pending
+    assert item["completed_at"] is None
     body = ctx.client.get(f"/patchsets/{quote('r1@x')}").text
     assert "Retry review" not in body
     assert ">reviewing<" in body

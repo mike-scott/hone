@@ -414,10 +414,14 @@ def test_claim_rearms_a_lease_elapsed_deferred_item(db):
                (1, c["claim_id"]))
     again = core_db.claim_work_item(db, "node-y", methodology_version=1)
     assert again is not None and again["id"] == c["id"]
-    row = db.execute("SELECT state, claimed_by FROM work_items WHERE id=?",
-                     (c["id"],)).fetchone()
+    row = db.execute(
+        "SELECT state, claimed_by, completed_at FROM work_items WHERE id=?",
+        (c["id"],)).fetchone()
     assert row["state"] == core_db.WORK_ITEM_STATE_CLAIMED
     assert row["claimed_by"] == "node-y"
+    # the deferred submit stamped completed_at; the re-offer clears it —
+    # a claimed row is by definition not completed
+    assert row["completed_at"] is None
 
 
 def test_claim_does_not_rearm_a_deferred_item_before_lease_elapses(db):
@@ -455,12 +459,14 @@ def test_release_deferred_reverts_to_claimable_and_clears_claim_fields(db):
     assert core_db.release_deferred(db, item_id) == "ok"
     row = db.execute(
         "SELECT state, claim_id, claimed_by, claimed_at, lease_expires, "
-        "heartbeat_at, methodology_version FROM work_items WHERE id=?",
+        "heartbeat_at, methodology_version, completed_at "
+        "FROM work_items WHERE id=?",
         (item_id,)).fetchone()
     assert row["state"] == core_db.WORK_ITEM_STATE_CLAIMABLE
     assert row["claim_id"] is None and row["claimed_by"] is None
     assert row["claimed_at"] is None and row["lease_expires"] is None
     assert row["heartbeat_at"] is None and row["methodology_version"] is None
+    assert row["completed_at"] is None      # the superseded verdict's stamp
 
 
 def test_release_deferred_is_a_no_op_for_a_non_deferred_item(db):
@@ -501,12 +507,14 @@ def test_retry_unappliable_reverts_to_claimable_and_clears_claim_fields(db):
     assert core_db.retry_unappliable(db, item_id) == "ok"
     row = db.execute(
         "SELECT state, claim_id, claimed_by, claimed_at, lease_expires, "
-        "heartbeat_at, methodology_version FROM work_items WHERE id=?",
+        "heartbeat_at, methodology_version, completed_at "
+        "FROM work_items WHERE id=?",
         (item_id,)).fetchone()
     assert row["state"] == core_db.WORK_ITEM_STATE_CLAIMABLE
     assert row["claim_id"] is None and row["claimed_by"] is None
     assert row["claimed_at"] is None and row["lease_expires"] is None
     assert row["heartbeat_at"] is None and row["methodology_version"] is None
+    assert row["completed_at"] is None      # the superseded verdict's stamp
 
 
 def test_retry_unappliable_is_a_no_op_for_a_non_unappliable_item(db):

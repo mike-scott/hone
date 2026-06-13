@@ -333,6 +333,22 @@ def test_post_retry_unappliable_unknown_id_404s(ctx):
     assert r.status_code == 404
 
 
+def test_rearmed_item_labels_the_record_as_previous_attempt(ctx):
+    """A re-arm deliberately keeps the old completion record (the only
+       surviving evidence of why the attempt failed) until the re-run
+       overwrites it — but the page must say so, not present the
+       superseded record as a current result."""
+    item_id = _unappliable_review(ctx.db)
+    body = ctx.client.get(f"/work-items/{item_id}").text
+    assert "previous attempt" not in body          # terminal: current record
+    ctx.client.post(f"/work-items/{item_id}/retry-unappliable",
+                    follow_redirects=False)
+    body = ctx.client.get(f"/work-items/{item_id}").text
+    assert "previous attempt" in body
+    assert "will be\n  overwritten when the re-run submits" in body
+    assert "<code>unappliable</code>" in body      # the record itself stays
+
+
 # --- admin cancel of unheld (claimable / deferred) items --------------------
 
 def test_cancel_deletes_a_claimable_review_and_rearms_the_button(ctx):
