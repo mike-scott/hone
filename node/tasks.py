@@ -453,6 +453,53 @@ def _resolve_schema_refs(node, defs, seen=()):
     return node
 
 
+def _norm_msgid(m):
+    """Mirrors core_db.norm_msgid — strip wrapping <>, whitespace, case —
+       so node-side citation checks match how hone-core's UI anchors
+       concerns to patches."""
+    m = (m or "").strip()
+    if m.startswith("<") and m.endswith(">"):
+        m = m[1:-1]
+    return m.strip().lower()
+
+
+def _claim_patch_ids(claim):
+    """The normalised Message-Ids of THIS claim's patches — the only
+       values a concern's patch_scope.patches may cite."""
+    return {_norm_msgid(p.get("message_id"))
+            for p in (claim.get("patches") or [])
+            if p.get("type") == "patch" and p.get("message_id")}
+
+
+def _citation_errors(record, valid_ids):
+    """Patch-citation errors the schema cannot police: every
+       patch_scope.patches entry must be a Message-Id of a patch in this
+       claim. The 2026-06-12 rejection: a reviewer that never saw the
+       series' Message-Ids invented `<patch-...>` placeholders — schema-
+       valid, but hone-core anchors concerns to patches by these ids, so
+       every per-patch finding would render in the series-wide bucket —
+       and emitted [] for series scope, which hone-core 422s."""
+    out = []
+    for i, c in enumerate(record.get("concerns") or []):
+        cited = (c.get("patch_scope") or {}).get("patches") or []
+        for j, mid in enumerate(cited):
+            if _norm_msgid(mid) not in valid_ids:
+                out.append(f"at concerns/{i}/patch_scope/patches/{j}: "
+                           f"{str(mid)[:80]!r} is not the Message-Id of "
+                           "any patch in this series")
+    return out
+
+
+def _series_patch_listing(claim):
+    """One line per patch — part index, Message-Id, subject — the
+       authoritative citation table for a repair turn."""
+    patches = sorted((p for p in (claim.get("patches") or [])
+                      if p.get("type") == "patch"),
+                     key=lambda p: (p.get("part_index") or 0))
+    return "\n".join(f"part {p.get('part_index')}: {p.get('message_id')}"
+                     f" — {p.get('subject', '')}" for p in patches)
+
+
 # The record keys a repair turn may rewrite — the model-emitted body.
 # Errors anywhere else (header fields, meta) are node-built and a node
 # bug; a model turn can't fix those.
@@ -464,24 +511,31 @@ _REPAIR_SYSTEM = (
     "schema, the current JSON, and the validator's error list. Fix "
     "EXACTLY what the errors require — renaming mis-named fields, "
     "supplying required fields, mapping off-enum values to the nearest "
-    "enum value — while preserving every finding and every piece of "
-    "prose verbatim. Never drop, add, reorder or rewrite review "
-    "content. Respond with ONE JSON object and nothing else: "
+    "enum value, replacing patch_scope.patches entries with the correct "
+    "Message-Ids from the SERIES PATCHES table (match by the concern's "
+    "files and the patch subjects; series scope cites the full set) — "
+    "while preserving every finding and every piece of prose verbatim. "
+    "Never drop, add, reorder or rewrite review content. Respond with "
+    "ONE JSON object and nothing else: "
     '{"concerns": [...], "self_review_record": {...}}')
 
 
-def _attempt_record_repair(cfg, record, errors):
+def _attempt_record_repair(cfg, record, formatted_errors, claim):
     """One no-tools repair turn for an off-contract review record:
        hand the model its own concerns[] + self_review_record, the
-       validator's errors, and the binding schema; get back a corrected
-       body. Returns (body_or_None, usage) — usage accrues to the
-       record either way (the turn was spent)."""
+       validator's errors, the series' patch Message-Ids (the only
+       valid patch_scope.patches values), and the binding schema; get
+       back a corrected body. Returns (body_or_None, usage) — usage
+       accrues to the record either way (the turn was spent)."""
     defs = _RECORD_SCHEMA.get("$defs", {})
     branch = _resolve_schema_refs(
         defs.get("review_record", {}), defs)
     user_text = (
         "=== VALIDATOR ERRORS ===\n"
-        + "\n".join(_format_schema_errors(errors))
+        + "\n".join(formatted_errors)
+        + "\n\n=== SERIES PATCHES (the ONLY valid "
+          "patch_scope.patches values) ===\n"
+        + _series_patch_listing(claim)
         + "\n\n=== CURRENT JSON (to repair) ===\n"
         + json.dumps({k: record.get(k) for k in _REVIEW_REPAIRABLE_KEYS},
                      indent=2)
@@ -597,12 +651,15 @@ def _build_review_user_text(claim: dict) -> str:
         "post-apply (series-tip) code. Build the call graph and read whole "
         "functions from that tree. The diffs below are exactly what the "
         f"series changed; the base commit is {patchset.get('base_commit')}."
+        " Each diff header below carries the patch's Message-Id — cite "
+        "patches in `patch_scope.patches` by those Message-Ids exactly."
         "\n\n=== PATCHSET (context) ===\n",
         json.dumps({"patchset": patchset,
                     "patchset_metadata": meta_block}, indent=2),
         "\n\n=== PATCH DIFFS (the change under review) ===\n"]
     for p in diffs:
-        parts.append(f"\n--- patch {p.get('part_index')}: "
+        parts.append(f"\n--- patch {p.get('part_index')} "
+                     f"(Message-Id: {p.get('message_id')}): "
                      f"{p.get('subject', '')} ---\n{p.get('body', '')}\n")
     parts.append("\n\n=== RETURN CONTRACT ===\n")
     parts.append(return_contract)
@@ -779,15 +836,19 @@ def handle_review_task(cfg: Config, client: HoneCoreClient,
                   "self_review_record": body.get("self_review_record"),
                   "meta": meta}
         # Validate against the schema hone-core will enforce, BEFORE
-        # submitting. Submitting off-contract loses the whole review
-        # (422 → the runner's terminal fallback); a single no-tools
-        # repair turn usually recovers it for a few thousand tokens.
+        # submitting, plus the citation contract the schema can't express
+        # (patch_scope.patches ⊆ this claim's patch Message-Ids).
+        # Submitting off-contract loses the whole review (422 → the
+        # runner's terminal fallback); a single no-tools repair turn
+        # usually recovers it for a few thousand tokens.
+        valid_ids = _claim_patch_ids(claim)
         errors = _record_schema_errors(record)
-        if not errors:
+        formatted = (_format_schema_errors(errors)
+                     + _citation_errors(record, valid_ids))
+        if not formatted:
             return record
-        formatted = _format_schema_errors(errors)
-        log.warning("review: record fails schema (%d error(s)) — first: %s",
-                    len(errors), formatted[0])
+        log.warning("review: record fails contract (%d error(s)) — "
+                    "first: %s", len(formatted), formatted[0])
         if any(e.absolute_path
                and e.absolute_path[0] not in _REVIEW_REPAIRABLE_KEYS
                for e in errors):
@@ -799,7 +860,8 @@ def handle_review_task(cfg: Config, client: HoneCoreClient,
                               + formatted[0],
                     "meta": {**meta, "schema_errors": formatted}}
         log.info("review: attempting record repair turn")
-        fixed, repair_usage = _attempt_record_repair(cfg, record, errors)
+        fixed, repair_usage = _attempt_record_repair(
+            cfg, record, formatted, claim)
         if fixed is not None:
             repaired = {**header,
                         "usage": _sum_usage(header["usage"], repair_usage),
@@ -810,15 +872,16 @@ def handle_review_task(cfg: Config, client: HoneCoreClient,
                         "meta": {**meta,
                                  "schema_repair": {"errors": formatted,
                                                    "attempts": 1}}}
-            if not _record_schema_errors(repaired):
+            if not (_record_schema_errors(repaired)
+                    or _citation_errors(repaired, valid_ids)):
                 log.info("review: record repaired — submitting")
                 return repaired
-            log.warning("review: repaired record STILL fails schema")
+            log.warning("review: repaired record STILL fails contract")
         return {**header,
                 "usage": _sum_usage(header["usage"], repair_usage),
                 "outcome": "deferred",
-                "reason": "review record failed completion-record schema "
-                          "validation; repair turn did not converge: "
+                "reason": "review record failed its completion-record "
+                          "contract; repair turn did not converge: "
                           + formatted[0],
                 "meta": {**meta, "schema_errors": formatted}}
     finally:

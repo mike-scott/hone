@@ -587,6 +587,9 @@ def test_review_handler_emits_schema_valid_reviewed_record(monkeypatch,
     # the methodology rode in the system prompt; the diffs in the user msg
     assert "Concurrency / locking" in calls[0]["system"]
     assert "diff --git" in calls[0]["user_text"]
+    # each diff header carries the patch's Message-Id — the value the
+    # model must cite in patch_scope.patches (it appears nowhere else)
+    assert "Message-Id: p2@x" in calls[0]["user_text"]
     assert cleaned == [calls[0]["cwd"]]          # worktree torn down
 
 
@@ -673,6 +676,71 @@ def test_review_handler_repairs_off_contract_record(monkeypatch, tmp_path):
     assert "'patches' is a required property" in calls[1]["user_text"]
     assert "self_review_challenge" not in calls[1]["user_text"]  # resolved
     assert '"upheld"' in calls[1]["user_text"]               # schema inlined
+    # the authoritative citation table rode along, so the repair turn can
+    # fill patch_scope.patches with real Message-Ids
+    assert "SERIES PATCHES" in calls[1]["user_text"]
+    assert "part 1: p2@x" in calls[1]["user_text"]
+
+
+def test_review_handler_repairs_placeholder_patch_citations(monkeypatch,
+                                                             tmp_path):
+    """The 2026-06-12 rejection's other half: a reviewer that never saw
+       the series' Message-Ids cites `<patch-...>` placeholders. Those
+       PASS the schema (any non-empty string) but hone-core's UI anchors
+       concerns to patches by Message-Id, so they silently dump every
+       per-patch finding into the series-wide bucket. The node must
+       treat an off-claim citation as repairable and only submit once
+       the citation resolves to a real patch."""
+    _stub_refrepo(monkeypatch)
+    monkeypatch.setattr("node.tasks._apply_series",
+                        lambda wt, patches: (True, None))
+    placeholder_body = {
+        **_STUB_REVIEW_BODY,
+        "concerns": [{**_STUB_REVIEW_BODY["concerns"][0],
+                      "patch_scope": {"kind": "patch",
+                                       "patches": ["<patch-drm-locking>"],
+                                       "spans_lines_in_diff": [1, 1]}}]}
+    stub, calls = _sequenced_call_claude(
+        [json.dumps(placeholder_body), json.dumps(_STUB_REVIEW_BODY)])
+    monkeypatch.setattr("node.ai.call_claude", stub)
+
+    record = tasks.handle_review_task(_review_cfg(tmp_path), None,
+                                      _REVIEW_CLAIM)
+
+    _validate_record(record)
+    assert record["outcome"] == "reviewed"
+    assert record["concerns"][0]["patch_scope"]["patches"] == ["p2@x"]
+    assert len(calls) == 2                                   # repair ran
+    assert "not the Message-Id of any patch" in \
+        record["meta"]["schema_repair"]["errors"][0]
+    # the repair prompt named the offending value and the valid table
+    assert "<patch-drm-locking>" in calls[1]["user_text"]
+    assert "part 1: p2@x" in calls[1]["user_text"]
+
+
+def test_review_handler_accepts_bracketed_citations(monkeypatch, tmp_path):
+    """Lore renders Message-Ids both bare and <wrapped>; hone-core's UI
+       normalises before anchoring (core_db.norm_msgid). A citation that
+       differs only by wrapping <> or case is the SAME patch — no repair
+       turn, submit as-is."""
+    _stub_refrepo(monkeypatch)
+    monkeypatch.setattr("node.tasks._apply_series",
+                        lambda wt, patches: (True, None))
+    bracketed_body = {
+        **_STUB_REVIEW_BODY,
+        "concerns": [{**_STUB_REVIEW_BODY["concerns"][0],
+                      "patch_scope": {"kind": "patch",
+                                       "patches": ["<P2@x>"],
+                                       "spans_lines_in_diff": [1, 1]}}]}
+    stub, calls = _fake_call_claude(json.dumps(bracketed_body))
+    monkeypatch.setattr("node.ai.call_claude", stub)
+
+    record = tasks.handle_review_task(_review_cfg(tmp_path), None,
+                                      _REVIEW_CLAIM)
+
+    _validate_record(record)
+    assert record["outcome"] == "reviewed"
+    assert len(calls) == 1                                   # no repair
 
 
 def test_review_handler_defers_when_repair_does_not_converge(monkeypatch,
@@ -694,7 +762,7 @@ def test_review_handler_defers_when_repair_does_not_converge(monkeypatch,
 
     _validate_record(record)
     assert record["outcome"] == "deferred"
-    assert "schema" in record["reason"]
+    assert "contract" in record["reason"]
     assert record["meta"]["schema_errors"]
     assert len(calls) == 2
     assert record["usage"]["input_tokens"] == 2000          # both turns
