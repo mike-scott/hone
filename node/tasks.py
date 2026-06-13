@@ -453,6 +453,68 @@ def _resolve_schema_refs(node, defs, seen=()):
     return node
 
 
+_RESOLVED_BRANCHES = {}
+
+
+def _resolved_branch(task_type):
+    """The task type's record schema with $refs inlined — walkable
+       without a resolver. Cached (the schema is static)."""
+    b = _RESOLVED_BRANCHES.get(task_type)
+    if b is None:
+        defs = _RECORD_SCHEMA.get("$defs", {})
+        b = _resolve_schema_refs(defs.get(f"{task_type}_record", {}), defs)
+        _RESOLVED_BRANCHES[task_type] = b
+    return b
+
+
+def _allows_null(prop):
+    """Whether a (ref-resolved) property schema admits JSON null."""
+    if not isinstance(prop, dict):
+        return True                      # unknown shape — keep the key
+    t = prop.get("type")
+    if t == "null" or (isinstance(t, list) and "null" in t):
+        return True
+    if None in (prop.get("enum") or []) or prop.get("const", "") is None:
+        return True
+    return any(_allows_null(s)
+               for k in ("oneOf", "anyOf", "allOf")
+               for s in prop.get(k) or [])
+
+
+def _strip_null_optionals(value, schema):
+    """Delete None-valued OPTIONAL keys whose schema has no null branch
+       — in place, recursively, guided by the (ref-resolved) schema. A
+       model writes `"field": null` to mean "absent" (the 2026-06-13
+       rejection: `contributing_check_ids: null` against an optional
+       array); jsonschema reads it as a type violation and hone-core
+       422s. Omitting the key states the same thing validly, without
+       spending a repair turn. Keys required at this level — including
+       by any oneOf/anyOf branch, since outcome discrimination lives
+       there — are left for the validator: null there is a real
+       contract breach the repair turn must see."""
+    if not isinstance(schema, dict):
+        return
+    if isinstance(value, dict):
+        props = schema.get("properties") or {}
+        required = set(schema.get("required") or [])
+        for branch in ((schema.get("oneOf") or [])
+                       + (schema.get("anyOf") or [])):
+            if isinstance(branch, dict):
+                required.update(branch.get("required") or [])
+        for k in list(value):
+            prop = props.get(k)
+            if prop is None:
+                continue
+            if (value[k] is None and k not in required
+                    and not _allows_null(prop)):
+                del value[k]
+            else:
+                _strip_null_optionals(value[k], prop)
+    elif isinstance(value, list):
+        for v in value:
+            _strip_null_optionals(v, schema.get("items"))
+
+
 def _norm_msgid(m):
     """Mirrors core_db.norm_msgid — strip wrapping <>, whitespace, case —
        so node-side citation checks match how hone-core's UI anchors
@@ -527,9 +589,7 @@ def _attempt_record_repair(cfg, record, formatted_errors, claim):
        valid patch_scope.patches values), and the binding schema; get
        back a corrected body. Returns (body_or_None, usage) — usage
        accrues to the record either way (the turn was spent)."""
-    defs = _RECORD_SCHEMA.get("$defs", {})
-    branch = _resolve_schema_refs(
-        defs.get("review_record", {}), defs)
+    branch = _resolved_branch("review")
     user_text = (
         "=== VALIDATOR ERRORS ===\n"
         + "\n".join(formatted_errors)
@@ -835,6 +895,10 @@ def handle_review_task(cfg: Config, client: HoneCoreClient,
                   "concerns": body.get("concerns") or [],
                   "self_review_record": body.get("self_review_record"),
                   "meta": meta}
+        # Deterministic normalisation first: null-valued optional fields
+        # mean "absent" — drop the keys instead of spending a repair
+        # turn on the type errors.
+        _strip_null_optionals(record, _resolved_branch("review"))
         # Validate against the schema hone-core will enforce, BEFORE
         # submitting, plus the citation contract the schema can't express
         # (patch_scope.patches ⊆ this claim's patch Message-Ids).
@@ -872,6 +936,7 @@ def handle_review_task(cfg: Config, client: HoneCoreClient,
                         "meta": {**meta,
                                  "schema_repair": {"errors": formatted,
                                                    "attempts": 1}}}
+            _strip_null_optionals(repaired, _resolved_branch("review"))
             if not (_record_schema_errors(repaired)
                     or _citation_errors(repaired, valid_ids)):
                 log.info("review: record repaired — submitting")

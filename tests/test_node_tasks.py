@@ -718,6 +718,36 @@ def test_review_handler_repairs_placeholder_patch_citations(monkeypatch,
     assert "part 1: p2@x" in calls[1]["user_text"]
 
 
+def test_review_handler_strips_null_optional_fields(monkeypatch, tmp_path):
+    """The 2026-06-13 rejection: the model wrote `"contributing_check_ids":
+       null` for "absent" on an optional array field — a type violation
+       hone-core 422s. Null-valued optional keys are dropped
+       deterministically before validation (no repair turn spent);
+       schema-nullable fields like spans_lines_in_diff keep their null."""
+    _stub_refrepo(monkeypatch)
+    monkeypatch.setattr("node.tasks._apply_series",
+                        lambda wt, patches: (True, None))
+    null_body = {
+        **_STUB_REVIEW_BODY,
+        "concerns": [{**_STUB_REVIEW_BODY["concerns"][0],
+                      "contributing_check_ids": None,
+                      "patch_scope": {"kind": "patch",
+                                       "patches": ["p2@x"],
+                                       "spans_lines_in_diff": None}}]}
+    stub, calls = _fake_call_claude(json.dumps(null_body))
+    monkeypatch.setattr("node.ai.call_claude", stub)
+
+    record = tasks.handle_review_task(_review_cfg(tmp_path), None,
+                                      _REVIEW_CLAIM)
+
+    _validate_record(record)
+    assert record["outcome"] == "reviewed"
+    assert len(calls) == 1                                   # no repair turn
+    concern = record["concerns"][0]
+    assert "contributing_check_ids" not in concern           # null → absent
+    assert concern["patch_scope"]["spans_lines_in_diff"] is None  # kept
+
+
 def test_review_handler_accepts_bracketed_citations(monkeypatch, tmp_path):
     """Lore renders Message-Ids both bare and <wrapped>; hone-core's UI
        normalises before anchoring (core_db.norm_msgid). A citation that
