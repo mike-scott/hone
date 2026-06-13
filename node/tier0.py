@@ -175,10 +175,19 @@ def bucket_maintainer_entries(entries, *, recipients=None):
             list_coverage = sum(1 for x in lists
                                 if x["address"].lower() in recips) / len(lists)
 
-    subsystem = {"primary": ordered[0] if ordered else None,
-                 "primary_status": None, "primary_tree": None,
-                 "secondary": ordered[1:], "cross_cutting": len(counts) >= 3,
-                 "uncertain_paths": [], "source": "tree"}
+    # Authoritative ("tree") only when get_maintainer actually mapped the
+    # patch to a MAINTAINERS section. A run that returned only mailing lists
+    # (no M:/section) hasn't characterised the subsystem — leave it heuristic
+    # so the LLM's path-derived guess survives _merge_deterministic instead of
+    # being overwritten with a null primary, which the schema (primary must be
+    # a non-empty string) then rejects with a 422.
+    if ordered:
+        subsystem = {"primary": ordered[0],
+                     "primary_status": None, "primary_tree": None,
+                     "secondary": ordered[1:], "cross_cutting": len(counts) >= 3,
+                     "uncertain_paths": [], "source": "tree"}
+    else:
+        subsystem = _heuristic_subsystem()
     maintainer = {"primary": maint[0]["email"] if maint else None,
                   "primary_role": "maintainer" if maint else None,
                   "authoritative_set": maint,

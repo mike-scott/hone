@@ -126,6 +126,20 @@ def test_bucket_cross_cutting_when_three_plus_sections():
     assert sub["cross_cutting"] is True
 
 
+def test_bucket_subsystem_stays_heuristic_when_no_section_resolved():
+    # get_maintainer returned only a mailing list (no M:/section) — the
+    # subsystem isn't characterised, so the block must stay heuristic (null
+    # primary, source thread) rather than claim authoritative tree source with
+    # a null primary, which would overwrite the LLM guess and fail the schema.
+    entries = [MaintainerEntry(None, "lkml@vger", "open list", None)]
+    sub, maint = tier0.bucket_maintainer_entries(entries)
+    assert sub["primary"] is None
+    assert sub["source"] == "thread"
+    # the maintainer block keeps its authoritative list data
+    assert [x["address"] for x in maint["mailing_lists"]] == ["lkml@vger"]
+    assert maint["source"] == "tree"
+
+
 def test_bucket_coverage_and_was_cc_d_with_recipients():
     recips = {"dave@x", "netdev@vger"}       # dave Cc'd, jake not; netdev Cc'd
     _sub, maint = tier0.bucket_maintainer_entries(_entries(),
