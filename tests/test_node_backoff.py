@@ -556,11 +556,12 @@ class _MaintCfg:                  # only the fields _maybe_maintain reads
 
 
 def _maint_state():
-    return {"tasks_since_gc": 0, "last_gc_check": 0.0}
+    return {"last_gc_check": 0.0}
 
 
-def _stub_refrepo(monkeypatch, *, swept=0, size_mb=100, gc_ok=True):
-    """Stub refrepo's three maintenance hooks; return a calls recorder."""
+def _stub_refrepo(monkeypatch, *, swept=0, size_mb=100, fetches=0, gc_ok=True):
+    """Stub refrepo's maintenance hooks; return a calls recorder. `fetches`
+       is what fetches_since_gc() reports — the count trigger gates on it."""
     calls = {"sweep": 0, "size": 0, "gc": 0}
     monkeypatch.setattr(runner.refrepo, "sweep_worktrees",
                         lambda d: calls.__setitem__("sweep", calls["sweep"] + 1)
@@ -568,6 +569,7 @@ def _stub_refrepo(monkeypatch, *, swept=0, size_mb=100, gc_ok=True):
     monkeypatch.setattr(runner.refrepo, "size_mb",
                         lambda: calls.__setitem__("size", calls["size"] + 1)
                         or size_mb)
+    monkeypatch.setattr(runner.refrepo, "fetches_since_gc", lambda: fetches)
     monkeypatch.setattr(runner.refrepo, "gc",
                         lambda: calls.__setitem__("gc", calls["gc"] + 1)
                         or gc_ok)
@@ -575,33 +577,37 @@ def _stub_refrepo(monkeypatch, *, swept=0, size_mb=100, gc_ok=True):
 
 
 def test_maintain_sweeps_but_skips_gc_when_not_due(monkeypatch):
-    """Repo below threshold and no task backlog → sweep runs, gc does not,
-       the counter is left intact."""
-    calls = _stub_refrepo(monkeypatch, swept=3, size_mb=100)
-    state = _maint_state()
-    runner._maybe_maintain(_MaintCfg(), state)
+    """Repo below threshold and no fetches since gc → sweep runs, gc does not."""
+    calls = _stub_refrepo(monkeypatch, swept=3, size_mb=100, fetches=0)
+    runner._maybe_maintain(_MaintCfg(), _maint_state())
     assert calls["sweep"] == 1
     assert calls["gc"] == 0
-    assert state["tasks_since_gc"] == 0
+
+
+def test_maintain_skips_gc_when_no_fetches_since_gc(monkeypatch):
+    """The fetch-gated trigger: a node that fetched nothing since the last gc
+       (e.g. ran only prepare tasks, which never touch the local repo) does
+       NOT gc, no matter how many tasks completed — it would reclaim zero
+       churn for a multi-minute repack. Size below threshold, fetches=0."""
+    calls = _stub_refrepo(monkeypatch, size_mb=100, fetches=0)
+    runner._maybe_maintain(_MaintCfg(), _maint_state())
+    assert calls["gc"] == 0
 
 
 def test_maintain_gcs_when_repo_exceeds_threshold(monkeypatch):
-    """Size high-water mark crossed → gc fires even with no task backlog."""
-    calls = _stub_refrepo(monkeypatch, size_mb=25000)        # > 20000
-    state = _maint_state()
-    runner._maybe_maintain(_MaintCfg(), state)
+    """Size high-water mark crossed → gc fires even with zero fetches (the
+       size trigger is the disk-bounding safety net, fetch-independent)."""
+    calls = _stub_refrepo(monkeypatch, size_mb=25000, fetches=0)  # > 20000
+    runner._maybe_maintain(_MaintCfg(), _maint_state())
     assert calls["gc"] == 1
 
 
-def test_maintain_gcs_every_n_tasks_and_resets_counter(monkeypatch):
-    """Enough tasks since the last gc → gc fires (size below threshold) and
-       the counter resets so the cadence restarts."""
-    calls = _stub_refrepo(monkeypatch, size_mb=100)          # below threshold
-    state = _maint_state()
-    state["tasks_since_gc"] = 25                              # == repo_gc_every
-    runner._maybe_maintain(_MaintCfg(), state)
+def test_maintain_gcs_every_n_fetches(monkeypatch):
+    """Enough fetches since the last gc → gc fires (size below threshold).
+       The counter reset lives in refrepo.gc(), covered in test_node_refrepo."""
+    calls = _stub_refrepo(monkeypatch, size_mb=100, fetches=25)   # == repo_gc_every
+    runner._maybe_maintain(_MaintCfg(), _maint_state())
     assert calls["gc"] == 1
-    assert state["tasks_since_gc"] == 0
 
 
 def test_maintain_throttles_the_gc_check(monkeypatch):

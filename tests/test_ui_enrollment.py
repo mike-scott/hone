@@ -203,12 +203,17 @@ def test_node_detail_renders_refrepo_churn_signals(ctx):
         "refrepo_tracking_refs": 7,
         "refrepo_fetch": {"commit": "deadbeefcafe", "remote": "stable",
                           "objects_added": 4231, "ms": 1200},
+        "refrepo_resolve": {"tree": "linux-next", "objects_added": 902000,
+                            "ms": 41000},
         "refrepo_gc": {"size_mb_before": 8300, "size_mb_after": 1200,
-                       "tracking_refs": 7, "ms": 3400, "ok": True}})
+                       "tracking_refs": 7, "fetches": 12, "ms": 3400,
+                       "ok": True}})
     body = ctx.client.get(f"/nodes/{node_id}").text
     assert "Ancestry anchors" in body
     assert "Last base fetch" in body and "4,231 objs from stable" in body
+    assert "Last tree fetch" in body and "902,000 objs from linux-next" in body
     assert "Last gc" in body and "8.1 GB" in body and "3.4 s" in body
+    assert "12 fetches" in body                        # churn the gc reclaimed for
     assert "failed" not in body                       # ok=True → no failure mark
 
 
@@ -223,6 +228,7 @@ def test_node_detail_omits_refrepo_rows_for_old_snapshot(ctx):
     body = ctx.client.get(f"/nodes/{node_id}").text
     assert "Ancestry anchors" not in body
     assert "Last base fetch" not in body and "Last gc" not in body
+    assert "Last tree fetch" not in body
 
 
 def test_refrepo_health_display_partials_and_failure():
@@ -248,6 +254,20 @@ def test_refrepo_health_display_partials_and_failure():
     d3 = ui._refrepo_health_display({
         "refrepo_fetch": {"remote": "net", "objects_added": None, "ms": 5}})
     assert "—" in d3["fetch"]
+    # a resolve-only snapshot (no-base review's full tree fetch) renders the
+    # tree line, and gc.fetches appends only when present
+    d4 = ui._refrepo_health_display({
+        "refrepo_resolve": {"tree": "linux-next", "objects_added": 900000,
+                            "ms": 41000},
+        "refrepo_gc": {"size_mb_before": 5, "size_mb_after": 5,
+                       "tracking_refs": 7, "fetches": 3, "ms": 10, "ok": True}})
+    assert "900,000 objs from linux-next" in d4["resolve"] and "fetch" not in d4
+    assert "3 fetches" in d4["gc"]
+    # an older gc snapshot without `fetches` omits that segment cleanly
+    d5 = ui._refrepo_health_display({
+        "refrepo_gc": {"size_mb_before": 5, "size_mb_after": 5,
+                       "tracking_refs": 7, "ms": 10, "ok": True}})
+    assert "fetches" not in d5["gc"]
 
 
 def test_node_detail_404_for_unknown_id(ctx):

@@ -450,12 +450,17 @@ def _maybe_maintain(cfg: Config, state: dict) -> None:
             ~1.5 GB checkout (graceful paths clean up via refrepo.cleanup).
             Cheap, so every pass.
          2. gc the reference repo once it crosses cfg.repo_gc_threshold_mb, or
-            cfg.repo_gc_every tasks have run since the last gc — discarding the
-            unreachable churn arbitrary base fetches accrete (left unchecked
-            the repo reached 116 GB). The du + gc is throttled to
+            cfg.repo_gc_every *fetches* have happened since the last gc —
+            discarding the unreachable churn arbitrary base fetches accrete
+            (left unchecked the repo reached 116 GB). The count trigger gates
+            on fetches, not completed tasks: a node that only ran prepare
+            tasks fetched nothing (Tier-0 goes through cgit/HTTP, not the
+            local git), so a task-count trigger made it pay a multi-minute
+            repack to reclaim zero churn. refrepo owns the fetch counter and
+            resets it inside gc(). The du + gc is throttled to
             _GC_CHECK_INTERVAL_SECONDS.
 
-       `state` carries the cross-tick counters {tasks_since_gc, last_gc_check}.
+       `state` carries the cross-tick counter {last_gc_check}.
        Best-effort: any failure is logged, never fatal to the claim loop."""
     try:
         swept = refrepo.sweep_worktrees(cfg.scratch_dir)
@@ -466,22 +471,22 @@ def _maybe_maintain(cfg: Config, state: dict) -> None:
         if now - state["last_gc_check"] < _GC_CHECK_INTERVAL_SECONDS:
             return
         state["last_gc_check"] = now
+        fetches = refrepo.fetches_since_gc()
         due_by_count = (cfg.repo_gc_every > 0
-                        and state["tasks_since_gc"] >= cfg.repo_gc_every)
+                        and fetches >= cfg.repo_gc_every)
         size_mb = refrepo.size_mb()
         due_by_size = (cfg.repo_gc_threshold_mb > 0
                        and size_mb >= cfg.repo_gc_threshold_mb)
         if not (due_by_count or due_by_size):
             return
-        log.info("disk: gc reference repo — %.1f GB, %d task(s) since gc "
-                 "(trigger=%s)", size_mb / 1024, state["tasks_since_gc"],
+        log.info("disk: gc reference repo — %.1f GB, %d fetch(es) since gc "
+                 "(trigger=%s)", size_mb / 1024, fetches,
                  "size" if due_by_size else "count")
-        if refrepo.gc():
+        if refrepo.gc():                 # resets refrepo's fetch counter
             log.info("disk: gc complete — %.1f GB -> %.1f GB",
                      size_mb / 1024, refrepo.size_mb() / 1024)
         else:
             log.warning("disk: gc failed (will retry next cycle)")
-        state["tasks_since_gc"] = 0
     except Exception:
         log.warning("disk maintenance failed (non-fatal)", exc_info=True)
 
@@ -524,12 +529,12 @@ def main() -> None:
         # retried with backoff inside the calls above.
         # TODO: persist an in-flight result to cfg.scratch_dir so a completed
         # review survives a node restart instead of being re-claimed.
-        # Cross-tick disk-maintenance counters (see _maybe_maintain).
-        maint = {"tasks_since_gc": 0, "last_gc_check": 0.0}
+        # Cross-tick disk-maintenance state (see _maybe_maintain). The gc
+        # fetch counter lives in refrepo, not here — the trigger gates on
+        # fetches, not completed tasks.
+        maint = {"last_gc_check": 0.0}
         while True:
             did_work = run_once(cfg, client)
-            if did_work:
-                maint["tasks_since_gc"] += 1
             # Per-tick health report: fires after a successful task
             # submit (did_work=True) and after an empty-queue 204
             # (did_work=False). The abort path inside run_once posts

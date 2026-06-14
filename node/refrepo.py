@@ -23,7 +23,7 @@ CLI:
 
 Importable: prepare(), cleanup(), sweep_worktrees(), gc(), size_mb(),
 base_of(), have(), tracking_ref_count(), last_fetch_stats(),
-last_gc_stats().
+last_resolve_stats(), last_gc_stats(), fetches_since_gc().
 """
 import os
 import re
@@ -56,11 +56,22 @@ BASE_RE = re.compile(r'^base-commit:\s*([0-9a-f]{12,40})\b', re.I | re.M)
 # the next gc prunes it; only full `git fetch <tree>` (resolve_tip)
 # leaves a durable anchor. If anchors survive, later base fetches add a
 # few thousand objects (a delta); if not, they re-pull the whole kernel
-# (millions). These two process-local snapshots — the most recent fetch
-# and the most recent gc — let us tell the two regimes apart from fleet
-# data. Best-effort, reset on restart; read by health.collect().
+# (millions). These process-local snapshots — the most recent by-SHA base
+# fetch, the most recent full tree fetch (resolve_tip), and the most
+# recent gc — let us tell the two regimes apart from fleet data, and
+# distinguish the cheap delta from the heavy full-tree pull that drives
+# churn. Best-effort, reset on restart; read by health.collect().
 _last_fetch_stats = None
+_last_resolve_stats = None
 _last_gc_stats = None
+
+# Fetches (either kind) since the last gc. The gc trigger gates on this
+# rather than on raw completed-task count: a node doing only prepare tasks
+# never touches the reference repo (Tier-0 goes through cgit/HTTP, not the
+# local git), so counting all tasks made it pay a full ~minutes-long repack
+# for zero churn to reclaim. Bumped by every successful fetch, reset by
+# gc(). Process-local, lost on restart — the size trigger still bounds disk.
+_fetches_since_gc = 0
 
 
 def _git(*args):
@@ -111,15 +122,32 @@ def tracking_ref_count():
 
 
 def last_fetch_stats():
-    """The most recent base fetch's transfer stats this process, or None when
-       no fetch has happened yet (an already-present base needs none)."""
+    """The most recent by-SHA base fetch's transfer stats this process
+       (prepare()), or None when no such fetch has happened yet (an
+       already-present base needs none)."""
     return _last_fetch_stats
+
+
+def last_resolve_stats():
+    """The most recent full tree fetch's transfer stats this process
+       (resolve_tip's `git fetch <tree>`), or None when none has happened.
+       This is the heavy, churn-driving fetch — a no-base review pulls a
+       whole daily-rebased tree — so it's tracked apart from the by-SHA
+       delta fetch."""
+    return _last_resolve_stats
 
 
 def last_gc_stats():
     """The most recent gc's before/after size, anchor count and duration this
        process, or None when no gc has run yet."""
     return _last_gc_stats
+
+
+def fetches_since_gc():
+    """Successful fetches (by-SHA base + full tree) since the last gc — the
+       churn signal the gc trigger gates on, so a node that fetched nothing
+       (e.g. only ran prepare tasks) never pays a no-op repack."""
+    return _fetches_since_gc
 
 
 def is_initialized():
@@ -186,7 +214,7 @@ def prepare(commit, wt_dir, *, base_tree=None):
        is fetched first, falling back to the full serial scan."""
     status = "present"
     if not have(commit):
-        global _last_fetch_stats
+        global _last_fetch_stats, _fetches_since_gc
         before = _object_count()
         t0 = time.monotonic()
         hit = None
@@ -199,6 +227,7 @@ def prepare(commit, wt_dir, *, base_tree=None):
                 break
         if status == "fetched":
             after = _object_count()
+            _fetches_since_gc += 1
             _last_fetch_stats = {
                 "commit": commit[:12],
                 "remote": hit,
@@ -237,8 +266,20 @@ def resolve_tip(tree, as_of):
     if tree not in REMOTES or as_of is None:
         return None
     _ensure_remote(tree)
+    global _last_resolve_stats, _fetches_since_gc
+    before = _object_count()
+    t0 = time.monotonic()
     if _git("fetch", "--quiet", tree).returncode != 0:
         return None
+    after = _object_count()
+    _fetches_since_gc += 1
+    _last_resolve_stats = {
+        "tree": tree,
+        "objects_added": (after - before
+                          if before is not None and after is not None
+                          else None),
+        "ms": round((time.monotonic() - t0) * 1000),
+    }
     # --remotes=<tree> seeds rev-list with that remote's tracking branches;
     # --before + -n1 then yields the newest commit at or before submission.
     r = _git("rev-list", "-n", "1", f"--before=@{int(as_of)}",
@@ -285,7 +326,7 @@ def gc():
        before/after size, surviving anchor count and duration into
        _last_gc_stats for the health snapshot — the post-gc tracking-ref
        count is what tells us whether shared ancestry survives the prune."""
-    global _last_gc_stats
+    global _last_gc_stats, _fetches_since_gc
     before = size_mb()
     t0 = time.monotonic()
     ok = _git("gc", "--prune=now").returncode == 0
@@ -293,9 +334,11 @@ def gc():
         "size_mb_before": before,
         "size_mb_after": size_mb(),
         "tracking_refs": tracking_ref_count(),
+        "fetches": _fetches_since_gc,
         "ms": round((time.monotonic() - t0) * 1000),
         "ok": ok,
     }
+    _fetches_since_gc = 0
     return ok
 
 

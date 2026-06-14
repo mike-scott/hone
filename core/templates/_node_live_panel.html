@@ -89,6 +89,10 @@
           <dt class="col-sm-5">Last base fetch</dt>
           <dd class="col-sm-7"><code>{{ node.health_display.refrepo.fetch }}</code></dd>
           {% endif %}
+          {% if node.health_display.refrepo.resolve %}
+          <dt class="col-sm-5">Last tree fetch</dt>
+          <dd class="col-sm-7"><code>{{ node.health_display.refrepo.resolve }}</code></dd>
+          {% endif %}
           {% if node.health_display.refrepo.gc %}
           <dt class="col-sm-5">Last gc</dt>
           <dd class="col-sm-7">

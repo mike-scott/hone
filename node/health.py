@@ -86,13 +86,19 @@ def collect(cfg):
            reference repo right now — the durable history anchors that
            survive gc --prune=now. A by-SHA base fetch writes none, so
            this tells whether shared ancestry persists between gcs.
-         - refrepo_fetch: the most recent base fetch's stats
+         - refrepo_fetch: the most recent by-SHA base fetch's stats
            (commit / remote / objects_added / ms), or None. A delta pull
            adds a few thousand objects; a full-ancestry re-pull adds
            millions — this is the direct signal that gc --prune=now is
            or isn't forcing re-downloads under thrash.
+         - refrepo_resolve: the most recent full tree fetch's stats
+           (tree / objects_added / ms), or None — the heavy, churn-driving
+           fetch a no-base review does (resolve_tip pulls a whole
+           daily-rebased tree), tracked apart from the delta fetch above.
          - refrepo_gc: the most recent gc's stats (size_mb_before /
-           size_mb_after / tracking_refs / ms / ok), or None.
+           size_mb_after / tracking_refs / fetches / ms / ok), or None.
+           `fetches` is how many fetches that gc was reclaiming for — 0
+           would mean a wasted repack (the trigger now prevents that).
 
        Keep this fast — it runs every tick of the claim loop
        (claude_version is cached per process in node/ai; the budget
@@ -109,5 +115,6 @@ def collect(cfg):
         "token_budget":         budget.status(cfg),
         "refrepo_tracking_refs": refrepo.tracking_ref_count(),
         "refrepo_fetch":        refrepo.last_fetch_stats(),
+        "refrepo_resolve":      refrepo.last_resolve_stats(),
         "refrepo_gc":           refrepo.last_gc_stats(),
     }

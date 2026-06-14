@@ -2242,21 +2242,24 @@ def _ms_display(ms):
 
 
 def _refrepo_health_display(health):
-    """The reference-repo churn signals — ancestry anchors, the last base
-       fetch, the last gc — surfaced so an operator can see whether
-       `gc --prune=now` keeps base fetches delta-cheap (anchors > 0, a
-       fetch adds a few thousand objects) or has collapsed the shared
-       history (anchors 0, a fetch re-pulls millions). Returns None when
-       the snapshot predates this instrumentation, so the template adds no
-       rows for an older node. Each sub-field is independently optional: a
-       node that has fetched but not yet gc'd this process (or just
-       restarted) shows what it has and omits the rest."""
+    """The reference-repo churn signals — ancestry anchors, the last by-SHA
+       base fetch, the last full tree fetch (resolve_tip), the last gc —
+       surfaced so an operator can see whether `gc --prune=now` keeps base
+       fetches delta-cheap (anchors > 0, a fetch adds a few thousand
+       objects) or has collapsed the shared history (anchors 0, a fetch
+       re-pulls millions), and how heavy the churn-driving tree fetch is.
+       Returns None when the snapshot predates this instrumentation, so the
+       template adds no rows for an older node. Each sub-field is
+       independently optional: a node that has fetched but not yet gc'd this
+       process (or just restarted) shows what it has and omits the rest."""
     if not isinstance(health, dict):
         return None
     anchors = health.get("refrepo_tracking_refs")
     fetch = health.get("refrepo_fetch")
+    resolve = health.get("refrepo_resolve")
     gc = health.get("refrepo_gc")
-    if anchors is None and fetch is None and gc is None:
+    if (anchors is None and fetch is None and resolve is None
+            and gc is None):
         return None
     out = {}
     if anchors is not None:
@@ -2265,11 +2268,22 @@ def _refrepo_health_display(health):
         remote = fetch.get("remote") or "?"
         out["fetch"] = (f"+{_count_display(fetch.get('objects_added'))} objs "
                         f"from {remote} · {_ms_display(fetch.get('ms'))}")
+    if isinstance(resolve, dict):
+        tree = resolve.get("tree") or "?"
+        out["resolve"] = (f"+{_count_display(resolve.get('objects_added'))} "
+                          f"objs from {tree} · "
+                          f"{_ms_display(resolve.get('ms'))}")
     if isinstance(gc, dict):
-        out["gc"] = (f"{_mb_display(gc.get('size_mb_before'))} → "
+        # `fetches` is absent on pre-field snapshots; only append it when
+        # present so an older node's gc row stays clean.
+        fetches = gc.get("fetches")
+        reclaimed = (f"{_mb_display(gc.get('size_mb_before'))} → "
                      f"{_mb_display(gc.get('size_mb_after'))} · "
                      f"{_ms_display(gc.get('ms'))} · "
                      f"{_count_display(gc.get('tracking_refs'))} anchors")
+        if fetches is not None:
+            reclaimed += f" · {_count_display(fetches)} fetches"
+        out["gc"] = reclaimed
         out["gc_ok"] = gc.get("ok")
     return out or None
 

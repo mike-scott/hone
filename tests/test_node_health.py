@@ -72,6 +72,7 @@ def test_collect_packages_the_snapshot_fields(monkeypatch):
     # hermetic (their own behaviour is covered in test_node_refrepo).
     monkeypatch.setattr(refrepo, "tracking_ref_count", lambda: 7)
     monkeypatch.setattr(refrepo, "last_fetch_stats", lambda: None)
+    monkeypatch.setattr(refrepo, "last_resolve_stats", lambda: None)
     monkeypatch.setattr(refrepo, "last_gc_stats", lambda: None)
     snap = health.collect(_cfg())
     assert snap == {
@@ -88,6 +89,7 @@ def test_collect_packages_the_snapshot_fields(monkeypatch):
                                  "exhausted": None},
         "refrepo_tracking_refs": 7,
         "refrepo_fetch":        None,
+        "refrepo_resolve":      None,
         "refrepo_gc":           None,
     }
 

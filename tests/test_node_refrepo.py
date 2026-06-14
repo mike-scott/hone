@@ -320,13 +320,16 @@ def test_gc_records_size_anchor_and_duration(monkeypatch):
     monkeypatch.setattr(refrepo, "_git",
                         lambda *a: SimpleNamespace(returncode=0, stdout="",
                                                    stderr=""))
+    monkeypatch.setattr(refrepo, "_fetches_since_gc", 5, raising=False)
     assert refrepo.gc() is True
     s = refrepo.last_gc_stats()
     assert s["size_mb_before"] == 5000
     assert s["size_mb_after"] == 1200
     assert s["tracking_refs"] == 9                     # anchors that survived
+    assert s["fetches"] == 5                           # churn this gc reclaimed for
     assert s["ok"] is True
     assert isinstance(s["ms"], int)
+    assert refrepo.fetches_since_gc() == 0             # counter reset for next cycle
 
 
 def test_gc_records_failure(monkeypatch):
@@ -337,3 +340,67 @@ def test_gc_records_failure(monkeypatch):
                                                    stderr="gc failed"))
     assert refrepo.gc() is False
     assert refrepo.last_gc_stats()["ok"] is False
+
+
+# --- resolve_tip full-fetch instrumentation + fetch counter ----------------
+# resolve_tip's `git fetch <tree>` is the heavy, churn-driving fetch (a whole
+# daily-rebased tree); it's tracked apart from prepare's by-SHA delta. Both
+# bump fetches_since_gc — the signal the gc trigger gates on so a node that
+# fetched nothing never pays a no-op repack.
+
+def test_resolve_tip_records_full_fetch_stats_and_bumps_counter(monkeypatch):
+    counts = iter(["count: 100\nin-pack: 0\n",          # before the full fetch
+                   "count: 50\nin-pack: 900000\n"])     # after
+    def fake_git(*args):
+        if args[0] == "count-objects":
+            return SimpleNamespace(returncode=0, stdout=next(counts), stderr="")
+        if args[0] == "fetch":
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if args[0] == "rev-list":
+            return SimpleNamespace(returncode=0, stdout="cafef00d1234\n",
+                                   stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    monkeypatch.setattr(refrepo, "_git", fake_git)
+    monkeypatch.setattr(refrepo, "_fetches_since_gc", 0, raising=False)
+    monkeypatch.setattr(refrepo, "_last_resolve_stats", None, raising=False)
+
+    sha = refrepo.resolve_tip("net-next", 1_700_000_000)
+
+    assert sha == "cafef00d1234"
+    s = refrepo.last_resolve_stats()
+    assert s["tree"] == "net-next"
+    assert s["objects_added"] == (50 + 900000) - (100 + 0)
+    assert isinstance(s["ms"], int)
+    assert refrepo.fetches_since_gc() == 1
+
+
+def test_resolve_tip_failed_fetch_records_nothing_and_no_bump(monkeypatch):
+    """A failed fetch added no churn — no stats, no counter bump."""
+    monkeypatch.setattr(refrepo, "_git", _mock_git_tip(fetch_rc=1))
+    monkeypatch.setattr(refrepo, "_fetches_since_gc", 0, raising=False)
+    monkeypatch.setattr(refrepo, "_last_resolve_stats", "sentinel",
+                        raising=False)
+    assert refrepo.resolve_tip("mainline", 1_700_000_000) is None
+    assert refrepo.fetches_since_gc() == 0
+    assert refrepo.last_resolve_stats() == "sentinel"   # untouched
+
+
+def test_prepare_fetch_bumps_counter(monkeypatch):
+    fetched = []
+    monkeypatch.setattr(refrepo, "_git", _mock_git_recording(fetched))
+    monkeypatch.setattr(refrepo, "have", lambda c: bool(fetched))
+    monkeypatch.setattr(refrepo.os.path, "lexists", lambda p: False)
+    monkeypatch.setattr(refrepo, "_fetches_since_gc", 0, raising=False)
+    refrepo.prepare("deadbeef", "/tmp/wt", base_tree="stable")
+    assert refrepo.fetches_since_gc() == 1
+
+
+def test_prepare_present_base_does_not_bump_counter(monkeypatch):
+    """An already-present base fetches nothing, so it must not count toward
+       the gc trigger."""
+    monkeypatch.setattr(refrepo, "_git", _mock_git_recording([]))
+    monkeypatch.setattr(refrepo, "have", lambda c: True)   # already present
+    monkeypatch.setattr(refrepo.os.path, "lexists", lambda p: False)
+    monkeypatch.setattr(refrepo, "_fetches_since_gc", 0, raising=False)
+    refrepo.prepare("deadbeef", "/tmp/wt")
+    assert refrepo.fetches_since_gc() == 0
