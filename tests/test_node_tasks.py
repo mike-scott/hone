@@ -261,6 +261,76 @@ def test_prepare_handler_omits_thread_messages_from_the_user_payload(
     assert "thread_messages" not in user_text
 
 
+_PATCH_WITH_DIFF = (
+    "From: alice@example.com\n"
+    "Subject: [PATCH v2 03/16] drm/msm: add PERFCNTR_CONFIG ioctl\n"
+    "\n"
+    "This adds the PERFCNTR_CONFIG ioctl so userspace can program counters.\n"
+    "\n"
+    "Signed-off-by: Alice <alice@example.com>\n"
+    "---\n"
+    " drivers/gpu/drm/msm/msm_drv.c | 42 +++++++++++\n"
+    " 1 file changed, 42 insertions(+)\n"
+    "\n"
+    "diff --git a/drivers/gpu/drm/msm/msm_drv.c b/drivers/gpu/drm/msm/msm_drv.c\n"
+    "index abc..def 100644\n"
+    "--- a/drivers/gpu/drm/msm/msm_drv.c\n"
+    "+++ b/drivers/gpu/drm/msm/msm_drv.c\n"
+    "@@ -1,3 +1,45 @@\n"
+    + "+HUNK_LINE_SHOULD_BE_DROPPED\n" * 2000)
+
+
+def test_slim_patch_body_drops_hunks_keeps_message_and_diffstat():
+    """_slim_patch_body cuts at the first `diff --git`, keeping the email
+       headers, commit message and the diffstat git format-patch puts before
+       it, and shedding the unbounded hunks."""
+    slim = tasks._slim_patch_body(_PATCH_WITH_DIFF)
+    assert "This adds the PERFCNTR_CONFIG ioctl" in slim        # message kept
+    assert "1 file changed, 42 insertions(+)" in slim           # diffstat kept
+    assert "drivers/gpu/drm/msm/msm_drv.c | 42" in slim         # diffstat line
+    assert "diff --git" not in slim                             # hunks gone
+    assert "HUNK_LINE_SHOULD_BE_DROPPED" not in slim
+    assert "[diff hunks omitted" in slim
+    assert len(slim) < len(_PATCH_WITH_DIFF)                    # actually smaller
+
+
+def test_slim_patch_body_passes_through_when_no_diff():
+    """A message-only body (cover letter, or a patch with no hunks) has no
+       `diff --git`, so it's returned unchanged."""
+    body = "From: a@x\nSubject: [PATCH 0/3] cover\n\nSeries overview, no diff.\n"
+    assert tasks._slim_patch_body(body) == body
+    assert tasks._slim_patch_body(None) is None
+
+
+def test_prepare_user_text_drops_diff_hunks(monkeypatch):
+    """End to end: the prepare prompt carries the message + diffstat but not
+       the raw hunks — the fix for the 'Prompt is too long' overflow on large
+       series (e.g. the 16-patch drm/msm PERFCNTR_CONFIG set)."""
+    claim = dict(_PREPARE_CLAIM)
+    claim["patches"] = [{"message_id": "p1@x", "type": "patch",
+                         "part_index": 1, "subject": "x",
+                         "body": _PATCH_WITH_DIFF}]
+    user_text = tasks._build_prepare_user_text(claim)
+    assert "1 file changed, 42 insertions(+)" in user_text      # diffstat kept
+    assert "HUNK_LINE_SHOULD_BE_DROPPED" not in user_text       # hunks dropped
+    assert "[diff hunks omitted" in user_text
+    assert "=== RETURN CONTRACT ===" in user_text               # contract intact
+
+
+def test_prepare_user_text_backstop_cap_preserves_contract():
+    """A pathological payload (huge commit message, no diff to shed) is
+       truncated by the backstop cap — and the truncation happens before the
+       return contract is appended, so the contract always survives."""
+    claim = dict(_PREPARE_CLAIM)
+    claim["patches"] = [{"message_id": "p1@x", "type": "patch",
+                         "part_index": 1, "subject": "x",
+                         "body": "Subject: x\n\n" + "A" * 700000}]  # > 600K cap
+    user_text = tasks._build_prepare_user_text(claim)
+    assert "[payload truncated to fit the model context]" in user_text
+    assert "=== RETURN CONTRACT ===" in user_text
+    assert "Return raw JSON only" in user_text                  # the contract body
+
+
 def test_prepare_handler_falls_back_to_uncharacterisable_on_bad_json(monkeypatch):
     """Claude is asked for raw JSON only. If it returns prose, a
        markdown-fenced incomplete blob, or otherwise un-parseable

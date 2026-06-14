@@ -80,6 +80,15 @@ _RAW_RESPONSE_CAP = 20000
 _TRACE_MAX_STEPS = 50
 _TRACE_TEXT_CAP = 2000
 
+# Backstop cap on the prepare user payload (the patchset JSON). _slim_patch_body
+# already drops the unbounded part — the raw diff hunks — so a normal series is
+# far under this; the cap only guards a pathological case (e.g. a huge series
+# diffstat or commit message) from overflowing the model context, which the CLI
+# rejects outright with "Prompt is too long" before any tokens are spent. ~150K
+# tokens of headroom under a 200K-context backend; the return contract is
+# appended after this cap so it always survives.
+_PREPARE_PAYLOAD_CHAR_CAP = 600000
+
 
 def _cap_trace(trace):
     """Bound a call's trace for storage in the completion record's meta —
@@ -194,11 +203,41 @@ def _merge_deterministic(body: dict, det: dict) -> dict:
     return merged
 
 
+def _slim_patch_body(body):
+    """Drop the raw diff hunks from a patch (or cover) body, keeping the
+       email headers, the commit message and the diffstat. git format-patch
+       puts the diffstat between the `---` line and the first `diff --git`,
+       so cutting at the first `diff --git` preserves it while shedding the
+       unbounded part.
+
+       The hunks are why a large series overflows the model context — the
+       CLI rejects it with "Prompt is too long" before any tokens are spent
+       — and the prepare LLM doesn't need them: Tier-0 already mined the
+       diffs (patch_size counts, maintainers, subsystem) deterministically,
+       leaving the LLM only judgment fields it drives from the prose. A body
+       with no diff (cover letter, message-only) passes through unchanged."""
+    if not body:
+        return body
+    lines = body.splitlines(keepends=True)
+    for i, line in enumerate(lines):
+        if line.startswith("diff --git "):
+            kept = "".join(lines[:i]).rstrip()
+            return f"{kept}\n[diff hunks omitted — diffstat above]\n"
+    return body
+
+
 def _build_prepare_user_text(claim: dict) -> str:
     """The user-message payload for a prepare claim. Hands Claude the
        patchset (root + patches + cover letter) as JSON plus the
        methodology's prepare return-contract — so the model has the
        exact output shape spelled out alongside the payload.
+
+       Each patch body is slimmed to headers + commit message + diffstat
+       (_slim_patch_body); the raw diff hunks are dropped because Tier-0
+       already mined them and a full-diff series overflows the context. A
+       backstop cap (_PREPARE_PAYLOAD_CHAR_CAP) truncates the assembled
+       payload JSON for pathological cases — applied before the return
+       contract is appended, so the contract always survives.
 
        `thread_messages` is deliberately NOT forwarded today. The
        methodology's review_intensity is therefore computed against
@@ -209,11 +248,20 @@ def _build_prepare_user_text(claim: dict) -> str:
        thread_messages in the claim payload — re-add it here when
        prepare's review-intensity classification is wired up against
        real thread data."""
+    patches = []
+    for p in (claim.get("patches") or []):
+        slim = dict(p)
+        slim["body"] = _slim_patch_body(p.get("body"))
+        patches.append(slim)
     payload = {
         "patchset":         claim.get("patchset"),
-        "patches":          claim.get("patches"),
-        "cover_letter_body": claim.get("cover_letter_body"),
+        "patches":          patches,
+        "cover_letter_body": _slim_patch_body(claim.get("cover_letter_body")),
     }
+    payload_json = json.dumps(payload, indent=2)
+    if len(payload_json) > _PREPARE_PAYLOAD_CHAR_CAP:
+        payload_json = (payload_json[:_PREPARE_PAYLOAD_CHAR_CAP]
+                        + "\n… [payload truncated to fit the model context] …")
     return_contract = (claim.get("methodology", {})
                        .get("operations", {})
                        .get("prepare", {})
@@ -223,7 +271,7 @@ def _build_prepare_user_text(claim: dict) -> str:
         "contract you must satisfy. Produce only the JSON object the "
         "contract describes.\n\n"
         "=== PATCHSET (JSON) ===\n"
-        f"{json.dumps(payload, indent=2)}\n\n"
+        f"{payload_json}\n\n"
         "=== RETURN CONTRACT ===\n"
         f"{return_contract}")
 
