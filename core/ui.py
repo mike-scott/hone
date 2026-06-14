@@ -84,6 +84,19 @@ def _safe_next(next_url: str | None) -> str:
     return "/"
 
 
+def _notify_access_request(db, new_user_id, email):
+    """Notify admins that a new account is awaiting approval. Best-effort — a
+       notification failure must never break signup."""
+    try:
+        core_db.notify_admins(
+            db, type=core_db.NOTIF_TYPE_USER_ACCESS,
+            dedup_key=f"user_access:{new_user_id}",
+            title=f"Access request: {email}", link="/users")
+    except Exception:
+        log.warning("access-request notification failed (non-fatal)",
+                    exc_info=True)
+
+
 def _google_redirect_uri(cfg) -> str:
     """The Google OAuth callback URL — derived from cfg.public_url, NOT
        request.base_url. The latter is built from the incoming Host header,
@@ -223,8 +236,9 @@ async def register_submit(request: Request):
     # endpoint can't tell whether their submission landed.
     hashed = auth.hash_password(password)
     if not core_db.get_user_by_email(db, email):
-        core_db.create_user(db, email, display_name or email, "local",
-                            password_hash=hashed)
+        new_id = core_db.create_user(db, email, display_name or email, "local",
+                                     password_hash=hashed)
+        _notify_access_request(db, new_id, email)
     return templates.TemplateResponse(request, "register.html", {
         "google_enabled": bool(cfg.google_client_id),
         "error": "", "success": True,
@@ -277,7 +291,9 @@ async def google_sso_callback(request: Request,
     user = (core_db.get_user_by_google_sub(db, google_sub)
             or core_db.get_user_by_email(db, g_email))
     if user is None:
-        core_db.create_user(db, g_email, g_name, "google", google_sub=google_sub)
+        new_id = core_db.create_user(db, g_email, g_name, "google",
+                                     google_sub=google_sub)
+        _notify_access_request(db, new_id, g_email)
         return templates.TemplateResponse(request, "login.html", {
             "next": next_url, "google_enabled": True,
             "error": "Your account has been created and is awaiting admin approval.",
@@ -408,7 +424,9 @@ def _user_settings_ctx(current_user, db, **extra):
            "is_local":       bool(row and row["auth_provider"] == "local"),
            "when":           _when,
            "profile_error":  None, "profile_saved":  False,
-           "password_error": None, "password_saved": False}
+           "password_error": None, "password_saved": False,
+           "notif_prefs":    _notification_pref_rows(current_user, db),
+           "notif_saved":    False}
     ctx.update(extra)
     return ctx
 
@@ -426,7 +444,8 @@ async def user_settings(request: Request,
         request, "user_settings.html",
         _user_settings_ctx(current_user, request.app.state.db,
                            profile_saved=saved == "profile",
-                           password_saved=saved == "password"))
+                           password_saved=saved == "password",
+                           notif_saved=saved == "notifications"))
 
 
 @router.post("/user-settings/profile", include_in_schema=False, dependencies=[Depends(auth.require_csrf)])
@@ -486,6 +505,156 @@ async def user_settings_password(request: Request,
     core_db.set_user_password_hash(db, current_user.id,
                                    auth.hash_password(new))
     return RedirectResponse("/user-settings?saved=password", status_code=303)
+
+
+# ===========================================================================
+# Notifications  (per-user in-app feed; core_db migration v13)
+# ===========================================================================
+
+_NOTIF_DROPDOWN_LIMIT = 6
+_NOTIF_PAGE_LIMIT = 100
+
+# type -> Bootstrap icon for the feed item.
+_NOTIF_ICONS = {
+    core_db.NOTIF_TYPE_REVIEW_READY:     "bi-clipboard-check",
+    core_db.NOTIF_TYPE_REVIEW_FAILED:    "bi-exclamation-triangle",
+    core_db.NOTIF_TYPE_PREPARE_FAILED:   "bi-exclamation-triangle",
+    core_db.NOTIF_TYPE_NEW_COMMENT:      "bi-chat-left-text",
+    core_db.NOTIF_TYPE_PATCHSET_SKIPPED: "bi-slash-circle",
+    core_db.NOTIF_TYPE_NODE_HEALTH:      "bi-hdd-network",
+    core_db.NOTIF_TYPE_USER_ACCESS:      "bi-person-plus",
+}
+
+# slug -> (label, help text) for the User-settings opt-in/out section.
+_NOTIF_PREF_LABELS = {
+    "review_ready":        ("Review ready", "An AI review of one of your patchsets completed."),
+    "review_failed":       ("Review failed", "A review couldn't run (the series didn't apply)."),
+    "prepare_failed":      ("Prepare failed", "A patchset couldn't be characterised."),
+    "new_comment":         ("New lore comment", "A new comment landed on a patchset you track."),
+    "patchset_skipped":    ("Patchset skipped", "A patchset you track was filtered out of the corpus."),
+    "node_health_alert":   ("Node health alerts", "A node you own raised a health alert."),
+    "user_access_request": ("Access requests (admin)", "A new account is awaiting approval."),
+}
+
+
+def _notif_view(items):
+    """Decorate notification rows for templates: icon + relative time."""
+    out = []
+    for n in items:
+        d = dict(n)
+        d["icon"] = _NOTIF_ICONS.get(n["type"], "bi-bell")
+        d["when"] = _when(n["created_at"])
+        out.append(d)
+    return out
+
+
+@router.get("/notifications/badge", response_class=HTMLResponse, include_in_schema=False)
+async def notifications_badge(request: Request,
+                             current_user: auth.SessionUser = Depends(auth.require_session)):
+    """The self-refreshing unread-count badge inside the nav bell."""
+    count = core_db.unread_notification_count(request.app.state.db,
+                                              current_user.id)
+    return templates.TemplateResponse(request, "_notifications_badge.html",
+                                      {"unread": count})
+
+
+@router.get("/notifications/dropdown", response_class=HTMLResponse, include_in_schema=False)
+async def notifications_dropdown(request: Request,
+                                current_user: auth.SessionUser = Depends(auth.require_session)):
+    """The recent-unread panel loaded under the bell on open."""
+    db = request.app.state.db
+    items = core_db.list_notifications(db, current_user.id,
+                                       limit=_NOTIF_DROPDOWN_LIMIT,
+                                       unread_only=True)
+    return templates.TemplateResponse(
+        request, "_notifications_dropdown.html",
+        {"items": _notif_view(items),
+         "unread": core_db.unread_notification_count(db, current_user.id)})
+
+
+@router.get("/notifications", response_class=HTMLResponse, include_in_schema=False)
+async def notifications_page(request: Request,
+                            current_user: auth.SessionUser = Depends(auth.require_session)):
+    """The full notifications feed (read + unread)."""
+    db = request.app.state.db
+    items = core_db.list_notifications(db, current_user.id,
+                                       limit=_NOTIF_PAGE_LIMIT)
+    return templates.TemplateResponse(
+        request, "notifications.html",
+        {"current_user": current_user, "items": _notif_view(items)})
+
+
+@router.get("/notifications/{notif_id}/click", include_in_schema=False)
+async def notification_click(request: Request, notif_id: int,
+                            current_user: auth.SessionUser = Depends(auth.require_session)):
+    """Click-through: mark the notification read, then redirect to its STORED
+       link (server-side target → no open-redirect). 404 if it isn't the
+       caller's. A plain GET so a notification is just a link."""
+    db = request.app.state.db
+    n = core_db.get_notification(db, current_user.id, notif_id)
+    if n is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no such notification")
+    core_db.mark_notification_read(db, current_user.id, notif_id)
+    return RedirectResponse(n["link"] or "/notifications", status_code=303)
+
+
+@router.post("/notifications/{notif_id}/read", include_in_schema=False,
+             dependencies=[Depends(auth.require_csrf)])
+async def notification_read(request: Request, notif_id: int,
+                           current_user: auth.SessionUser = Depends(auth.require_session)):
+    db = request.app.state.db
+    core_db.mark_notification_read(db, current_user.id, notif_id)
+    core_db.prune_read_notifications(db, current_user.id)
+    return RedirectResponse("/notifications", status_code=303)
+
+
+@router.post("/notifications/read-all", include_in_schema=False,
+             dependencies=[Depends(auth.require_csrf)])
+async def notifications_read_all(request: Request,
+                                current_user: auth.SessionUser = Depends(auth.require_session)):
+    db = request.app.state.db
+    core_db.mark_all_notifications_read(db, current_user.id)
+    core_db.prune_read_notifications(db, current_user.id)
+    return RedirectResponse("/notifications", status_code=303)
+
+
+def _notification_pref_rows(current_user, db):
+    """The notification toggles appropriate to this user's access level:
+       every developer/node type for any DB account, plus the admin-only
+       access-request type when the user is an admin. None for the
+       config-token admin (no user row)."""
+    if current_user.id is None:
+        return []
+    prefs = core_db.get_notification_prefs(db, current_user.id)
+    rows = []
+    for type_id, slug in core_db.NOTIF_TYPE_NAMES.items():
+        # is_config_admin is the admin-permission flag (token admin, or a
+        # users.is_admin grant) — the access-request feed is admin-only.
+        if slug == "user_access_request" and not current_user.is_config_admin:
+            continue
+        label, help_text = _NOTIF_PREF_LABELS.get(slug, (slug, ""))
+        rows.append({"slug": slug, "label": label, "help": help_text,
+                     "enabled": prefs.get(slug, True)})
+    return rows
+
+
+@router.post("/user-settings/notifications", include_in_schema=False,
+             dependencies=[Depends(auth.require_csrf)])
+async def user_settings_notifications(request: Request,
+                                      current_user: auth.SessionUser = Depends(auth.require_session)):
+    """Save the account's notification opt-in/out map. A checkbox present in
+       the form means ON; absent means OFF — evaluated only over the types
+       appropriate to this user's access level."""
+    if current_user.id is None:
+        raise HTTPException(status.HTTP_403_FORBIDDEN,
+                            "the config-token admin has no user account")
+    db = request.app.state.db
+    form = await request.form()
+    prefs = {row["slug"]: (form.get(f"notif_{row['slug']}") is not None)
+             for row in _notification_pref_rows(current_user, db)}
+    core_db.set_notification_prefs(db, current_user.id, prefs)
+    return RedirectResponse("/user-settings?saved=notifications",
+                            status_code=303)
 
 
 # ===========================================================================

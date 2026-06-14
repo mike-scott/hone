@@ -145,6 +145,28 @@
                 class="badge rounded-pill text-bg-secondary"
                 title="Loading fleet status…">…</span>
         </li>
+        {# Notification bell — DB-backed accounts only (the config-token
+           admin has no users row, so no per-user feed). The count badge
+           inside self-polls via htmx (outerHTML on the badge span only, so
+           the dropdown toggle stays wired); clicking the bell opens the
+           dropdown AND htmx-loads its recent-unread contents. #}
+        {% if current_user is defined and current_user and current_user.id is not none %}
+        <li class="nav-item dropdown me-2">
+          <a id="notif-bell" class="nav-link position-relative" href="/notifications"
+             role="button" data-bs-toggle="dropdown" aria-expanded="false"
+             title="Notifications"
+             hx-get="/notifications/dropdown" hx-target="#notif-menu" hx-trigger="click">
+            <i class="bi bi-bell"></i>
+            <span hx-get="/notifications/badge"
+                  hx-trigger="load, every 10s [document.visibilityState === 'visible']"
+                  hx-swap="outerHTML"></span>
+          </a>
+          <ul id="notif-menu" class="dropdown-menu dropdown-menu-end p-0"
+              style="min-width: 24rem; max-width: 92vw;">
+            <li><span class="dropdown-item-text text-muted small">Loading…</span></li>
+          </ul>
+        </li>
+        {% endif %}
         {# User menu — shows the logged-in account name. Admins get links
            to the Users and Site-settings pages (both admin-only); every
            DB-backed account gets User settings (the config-token admin

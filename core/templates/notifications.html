@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Notifications · hone-core{% endblock %}
+{% block content %}
+
+<div class="d-flex align-items-center justify-content-between mb-3">
+  <h1 class="h3 mb-0">Notifications</h1>
+  {% if items %}
+  <form method="post" action="/notifications/read-all">
+    {{ csrf_field(request) }}
+    <button type="submit" class="btn btn-sm btn-outline-secondary">Mark all read</button>
+  </form>
+  {% endif %}
+</div>
+
+{% if not items %}
+<p class="text-muted">No notifications yet — you'll be alerted here when an AI
+  review of your patchsets completes, a tracked series gets a lore comment, and
+  more (tune what you receive under
+  <a href="/user-settings">User settings</a>).</p>
+{% else %}
+<div class="list-group">
+  {% for n in items %}
+  <div class="list-group-item d-flex gap-3 align-items-start
+              {% if not n.read_at %}list-group-item-warning{% endif %}">
+    <i class="bi {{ n.icon }} fs-5 mt-1"></i>
+    <div class="flex-grow-1 min-w-0">
+      <a href="/notifications/{{ n.id }}/click"
+         class="link-body-emphasis text-decoration-none
+                fw-{% if n.read_at %}normal{% else %}semibold{% endif %}">{{ n.title }}</a>
+      <div class="text-muted small">{{ n.when }}{% if not n.read_at %} · unread{% endif %}</div>
+    </div>
+    {% if not n.read_at %}
+    <form method="post" action="/notifications/{{ n.id }}/read" class="ms-auto">
+      {{ csrf_field(request) }}
+      <button type="submit" class="btn btn-sm btn-link text-decoration-none p-0"
+              title="Mark read">Mark read</button>
+    </form>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+{% endblock %}

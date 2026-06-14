@@ -101,5 +101,33 @@
 </div>
 {% endif %}
 
+<div class="card mb-4" style="max-width: 40rem">
+  <div class="card-header fw-semibold">
+    <i class="bi bi-bell me-1"></i>Notifications
+  </div>
+  <div class="card-body">
+    {% if notif_saved %}
+    <div class="alert alert-success py-2">Notification preferences saved.</div>
+    {% endif %}
+    <p class="text-muted small mb-3">Choose which in-app notifications you
+      receive. New types default to on.</p>
+    <form method="post" action="/user-settings/notifications">
+      {{ csrf_field(request) }}
+      {% for p in notif_prefs %}
+      <div class="form-check mb-2">
+        <input class="form-check-input" type="checkbox"
+               id="notif_{{ p.slug }}" name="notif_{{ p.slug }}"
+               {% if p.enabled %}checked{% endif %}>
+        <label class="form-check-label" for="notif_{{ p.slug }}">
+          {{ p.label }}
+          <span class="d-block form-text mt-0">{{ p.help }}</span>
+        </label>
+      </div>
+      {% endfor %}
+      <button class="btn btn-sm btn-primary mt-2">Save preferences</button>
+    </form>
+  </div>
+</div>
+
 {% endif %}
 {% endblock %}
