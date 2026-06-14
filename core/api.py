@@ -24,7 +24,7 @@ from fastapi import (APIRouter, Depends, Header, HTTPException, Request,
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from core import core_db
+from core import check_gates, core_db
 
 router = APIRouter(prefix="/v1", tags=["v1"])
 
@@ -941,15 +941,27 @@ def submit_result(claim_id: str, request: Request, body: dict,
                 # node_id is the authenticated node from the bearer
                 # token — NOT parsed from record["worker_id"] (which is
                 # the node's human-readable name, not a numeric id).
+                concerns = record.get("concerns", [])
+                # Derive the per-check coverage denominator (applicable/fired)
+                # from the patch + the version's check set. Best-effort: a gate
+                # bug must never block recording the review — the column just
+                # stays NULL and can be recomputed later (it's deterministic).
+                try:
+                    coverage = check_gates.coverage_for_review(
+                        db, root, core_db.methodology_document(db, mv),
+                        concerns)
+                except Exception:
+                    coverage = None
                 core_db.upsert_ai_review(
                     db, root,
-                    concerns=record.get("concerns", []),
+                    concerns=concerns,
                     model=record.get("model"),
                     input_tokens=usage.get("input_tokens"),
                     output_tokens=usage.get("output_tokens"),
                     methodology_version=mv,
                     node_id=node["id"],
-                    meta=record.get("meta"))
+                    meta=record.get("meta"),
+                    check_coverage=coverage)
             # On a successful train, advance the candidate's pooled
             # counters and severity_witness histograms from the record's
             # candidate_outcomes — but only for `pool` role. A `holdout`

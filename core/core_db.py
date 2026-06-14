@@ -981,12 +981,22 @@ UPDATE patchsets SET
                          WHERE m.message_id = patchsets.root_message_id);
 """
 
+# Migration v12 — per-check coverage on a review. A JSON column holding the
+# denominator the "most used checks" metric needs: for each methodology check,
+# whether it was APPLICABLE to the patch (derived deterministically from the
+# diff + patch_type by core.check_gates) and whether it FIRED — not just the
+# numerator already in `concerns`. Deterministic + recomputable, so old rows
+# can be backfilled; latest-only per review, like the rest of ai_reviews.
+_SCHEMA_V12 = """
+ALTER TABLE ai_reviews ADD COLUMN check_coverage TEXT;
+"""
+
 # A migration is either a DDL script (executescript) or a Python callable
 # taking the connection — for data fixes SQL can't express (v5 needs a
 # regex). Both run under the same user_version bookkeeping.
 _MIGRATIONS = [_SCHEMA_V1, _SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4,
                _migrate_v5_series_version, _SCHEMA_V6, _SCHEMA_V7,
-               _SCHEMA_V8, _SCHEMA_V9, _SCHEMA_V10, _SCHEMA_V11]
+               _SCHEMA_V8, _SCHEMA_V9, _SCHEMA_V10, _SCHEMA_V11, _SCHEMA_V12]
 
 
 # How long a connection waits on another connection's write lock before
@@ -1766,16 +1776,18 @@ def upsert_ai_review(db, root_message_id, *, concerns,
                      source=AI_REVIEW_SOURCE_HONE_NODE,
                      model=None, input_tokens=None, output_tokens=None,
                      reviewed_at=None, methodology_version=None, node_id=None,
-                     meta=None):
+                     meta=None, check_coverage=None):
     """Insert (or replace) the structured AI review of a patchset. `concerns`
        is a dict ({"concerns": [...]}); it is JSON-encoded. One row per
-       (patchset, source). Returns the row id."""
+       (patchset, source). `check_coverage` is the per-check applicable/fired
+       denominator (core.check_gates), JSON-encoded; None leaves the column
+       NULL — recomputable later. Returns the row id."""
     root = norm_msgid(root_message_id)
     now = int(time.time())
     db.execute(
         "INSERT INTO ai_reviews (root_message_id,source,concerns,model,"
         "input_tokens,output_tokens,reviewed_at,methodology_version,node_id,"
-        "meta,recorded_at) VALUES (?,?,?,?,?,?,?,?,?,?,?) "
+        "meta,check_coverage,recorded_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?) "
         "ON CONFLICT(root_message_id,source) DO UPDATE SET "
         "concerns=excluded.concerns, model=excluded.model, "
         "input_tokens=excluded.input_tokens, "
@@ -1783,11 +1795,14 @@ def upsert_ai_review(db, root_message_id, *, concerns,
         "reviewed_at=excluded.reviewed_at, "
         "methodology_version=excluded.methodology_version, "
         "node_id=excluded.node_id, meta=excluded.meta, "
+        "check_coverage=excluded.check_coverage, "
         "recorded_at=excluded.recorded_at",
         (root, source, json.dumps(concerns), model, input_tokens,
          output_tokens, reviewed_at if reviewed_at is not None else now,
          methodology_version, node_id,
-         json.dumps(meta) if meta is not None else None, now))
+         json.dumps(meta) if meta is not None else None,
+         json.dumps(check_coverage) if check_coverage is not None else None,
+         now))
     db.commit()
     return db.execute(
         "SELECT id FROM ai_reviews WHERE root_message_id=? AND source=?",
@@ -1796,8 +1811,8 @@ def upsert_ai_review(db, root_message_id, *, concerns,
 
 def get_ai_review(db, root_message_id, *,
                   source=AI_REVIEW_SOURCE_HONE_NODE):
-    """The AI review row as a dict (with `concerns` / `meta` decoded), or
-       None."""
+    """The AI review row as a dict (with `concerns` / `meta` /
+       `check_coverage` decoded), or None."""
     row = db.execute(
         "SELECT * FROM ai_reviews WHERE root_message_id=? AND source=?",
         (norm_msgid(root_message_id), source)).fetchone()
@@ -1807,6 +1822,8 @@ def get_ai_review(db, root_message_id, *,
     r["concerns"] = json.loads(r["concerns"])
     if r["meta"] is not None:
         r["meta"] = json.loads(r["meta"])
+    if r.get("check_coverage") is not None:
+        r["check_coverage"] = json.loads(r["check_coverage"])
     return r
 
 
@@ -2913,6 +2930,18 @@ def active_methodology(db):
         "SELECT version, document FROM methodology_versions WHERE state=?",
         (METHODOLOGY_VERSION_STATE_ACTIVE,)).fetchone()
     return (row["version"], json.loads(row["document"])) if row else None
+
+
+def methodology_document(db, version):
+    """The methodology document (dict) for a specific version, or None — used
+       to derive a review's per-check coverage against the exact check set that
+       review ran under, not whatever is active now."""
+    if version is None:
+        return None
+    row = db.execute(
+        "SELECT document FROM methodology_versions WHERE version=?",
+        (version,)).fetchone()
+    return json.loads(row["document"]) if row else None
 
 
 def add_candidate(db, candidate_id, body, origin=None):

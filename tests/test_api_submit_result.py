@@ -144,6 +144,10 @@ def test_valid_review_result_writes_ai_review(client):
     # fake node is id=1), NOT an int() of the record's worker_id
     # which is the name "builder-7" and could never parse cleanly.
     assert kw["node_id"] == 1
+    # The submit path now derives per-check coverage and passes it through
+    # (None here — the stub db has no methodology document to gate against;
+    # the derivation is best-effort and degrades to NULL, recomputable later).
+    assert "check_coverage" in kw
 
 
 def test_review_unappliable_does_not_write_ai_review(client):
