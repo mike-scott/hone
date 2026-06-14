@@ -3371,6 +3371,22 @@ async def reports_page(request: Request,
     })
 
 
+@router.get("/reports/check-usage", response_class=HTMLResponse)
+async def check_usage_page(
+        request: Request,
+        current_user: auth.SessionUser = Depends(auth.require_config_admin)):
+    """Which methodology review checks fire, over the per-review coverage
+       (ai_reviews.check_coverage). Scoped to one methodology version via
+       ?mv=N (the check set differs across versions, so rates aren't pooled);
+       defaults to all versions. Admin-only, like /reports."""
+    mv_raw = request.query_params.get("mv")
+    mv = int(mv_raw) if mv_raw and mv_raw.isdigit() else None
+    stats = reports.check_usage_stats(request.app.state.db,
+                                      methodology_version=mv)
+    return templates.TemplateResponse(request, "check_usage.html", {
+        "current_user": current_user, **stats})
+
+
 _DEFAULT_SETTINGS_TAB = "gather"
 
 # Tabs that render a runtime-config form. The form_group attribute on

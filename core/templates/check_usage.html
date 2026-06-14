@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+{% block title %}Check usage · hone-core{% endblock %}
+{% block content %}
+
+<div class="d-flex align-items-center justify-content-between mb-1">
+  <h1 class="h3 mb-0">Check usage</h1>
+  <a href="/reports" class="small text-decoration-none">&larr; Reports</a>
+</div>
+<p class="text-muted small mb-3">
+  How often each methodology review check fires, over the per-review coverage
+  (applicable vs fired). Fire rate = fired / applicable, where a check that
+  fired counts as applicable regardless of its gate. Rates are shown with a
+  Wilson 95% CI — read the interval, not the point.
+</p>
+
+{% if not has_data %}
+<p class="text-muted">No review coverage recorded yet — this page fills in as
+  reviews complete (or after running
+  <code>core/scripts/backfill_check_coverage.sh</code>).</p>
+{% else %}
+
+{# Version cohort selector — the check set differs across methodology
+   versions, so rates must not be pooled. #}
+<form method="get" class="row g-2 align-items-end mb-3">
+  <div class="col-auto">
+    <label class="form-label small mb-0">Methodology version</label>
+    <select name="mv" class="form-select form-select-sm"
+            onchange="this.form.submit()">
+      <option value="">all versions</option>
+      {% for v in versions %}
+      <option value="{{ v }}"
+        {% if selected_version == v %}selected{% endif %}>v{{ v }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="col-auto">
+    <span class="text-muted small">{{ n_reviews }} review(s) with coverage
+      {%- if selected_version %} in v{{ selected_version }}{% endif %}</span>
+  </div>
+</form>
+
+{% if small_n %}
+<div class="alert alert-warning py-2 small" role="alert">
+  <i class="bi bi-exclamation-triangle me-1"></i>
+  Directional only — {{ n_reviews }} review(s), below the ~{{ small_n_floor }}
+  needed for the rates to mean much. The wide CIs say as much; treat the
+  ordering as a hint, not a ranking.
+</div>
+{% endif %}
+
+<div class="card mb-4">
+  <div class="card-header py-2"><strong>Fire rate by check (95% CI)</strong></div>
+  <div class="card-body">
+    <div class="report-chart" style="min-height: 22rem;">
+      <canvas data-report-chart="check_usage"></canvas>
+    </div>
+    <script type="application/json"
+            id="chart-cfg-check_usage">{{ chart | tojson }}</script>
+  </div>
+</div>
+
+<div class="table-responsive">
+  <table class="table table-sm align-middle">
+    <thead>
+      <tr>
+        <th>Check</th>
+        <th class="text-end">Applicable</th>
+        <th class="text-end">Fired</th>
+        <th class="text-end">Fire rate</th>
+        <th class="text-end">95% CI</th>
+        <th class="text-end">Concerns</th>
+        <th>Flags</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td><code>{{ r.id }}</code></td>
+        <td class="text-end">{{ r.applicable }}</td>
+        <td class="text-end">{{ r.fired }}</td>
+        <td class="text-end">
+          {% if r.rate_pct is not none %}{{ r.rate_pct }}%{% else %}—{% endif %}
+        </td>
+        <td class="text-end text-muted small">
+          {{ r.ci_lo_pct }}–{{ r.ci_hi_pct }}%
+        </td>
+        <td class="text-end">{{ r.concerns }}</td>
+        <td>
+          {% if r.default_gate %}
+          <span class="badge text-bg-secondary" title="reviews where this check
+            had no registry gate — add one to core/check_gates._GATES">
+            default-gate {{ r.default_gate }}</span>
+          {% endif %}
+          {% if r.mismatch %}
+          <span class="badge text-bg-warning" title="reviews where the check
+            fired but its gate said not-applicable — gate likely too narrow">
+            mismatch {{ r.mismatch }}</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+<p class="text-muted small">
+  <strong>default-gate</strong>: a check id with no entry in the gate registry
+  (a new check needs a gate). <strong>mismatch</strong>: fired-but-not-applicable
+  — the signal a gate is too narrow. Both are data-quality flags, not findings.
+</p>
+
+<script src="/static/chart.umd.min.js"></script>
+<script>
+  document.querySelectorAll("[data-report-chart]").forEach(function (el) {
+    var cfg = JSON.parse(document.getElementById(
+      "chart-cfg-" + el.dataset.reportChart).textContent);
+    new Chart(el, cfg);
+  });
+</script>
+{% endif %}
+
+{% endblock %}

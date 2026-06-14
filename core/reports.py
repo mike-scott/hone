@@ -18,6 +18,7 @@ prepare/review/train uniformly, and ai_reviews' token columns are the
 review task's usage re-recorded — summing both would double-count.
 """
 import datetime
+import math
 import time
 
 from core import core_db
@@ -298,3 +299,128 @@ def summary_totals(daily_rows, today=None):
     avg_ms = (tot["duration_ms_sum"] // tot["duration_n"]
               if tot["duration_n"] else None)
     return {"ops_total": ops, **tot, "avg_duration_ms": avg_ms}
+
+
+# ---------------------------------------------------------------------------
+# Check-usage analytics — which methodology review checks fire, over the
+# per-review coverage (ai_reviews.check_coverage, see core/check_gates.py).
+# ---------------------------------------------------------------------------
+
+# Below this many reviews in the cohort, rates are noise: the page flags them
+# "directional only" and leans on the (wide) Wilson intervals rather than the
+# point estimates. ~30 applicable observations is the rule-of-thumb floor for
+# distinguishing a 10%- from a 30%-rate check.
+_CHECK_USAGE_SMALL_N = 30
+
+
+def _wilson_ci(k, n, z=1.96):
+    """Wilson score interval for a binomial proportion k/n, as (lo, hi) in
+       0..1. Honest at small n (unlike normal-approx): a 0/12 reads as a wide
+       band near zero, not a false 0%. Returns (0, 0) for n == 0."""
+    if n <= 0:
+        return (0.0, 0.0)
+    phat = k / n
+    denom = 1 + z * z / n
+    center = (phat + z * z / (2 * n)) / denom
+    half = (z / denom) * math.sqrt(phat * (1 - phat) / n + z * z / (4 * n * n))
+    return (max(0.0, center - half), min(1.0, center + half))
+
+
+def check_usage_stats(db, *, methodology_version=None):
+    """Per-check usage over ai_reviews.check_coverage: for each methodology
+       check, how many reviews it was applicable in vs fired in, the fire rate
+       with a Wilson 95% CI, and the two data-quality flags (default-gate,
+       fired-but-not-applicable). Optionally scoped to one methodology_version
+       (cohort) — rates must not be pooled across versions whose check set
+       differs.
+
+       Denominator convention (see core/check_gates): a fired check is counted
+       applicable regardless of its gate — `effective applicable = applicable
+       OR fired` — so a rate is never > 100%.
+
+       Returns a view-model dict: rows (sorted by fired desc), n_reviews,
+       versions present, selected_version, has_data, small_n, and a Chart.js
+       config (check_usage_chart_config)."""
+    mv = methodology_version
+    agg = db.execute(
+        "SELECT json_extract(je.value,'$.id') AS check_id, "
+        "COUNT(*) AS reviews, "
+        "SUM(json_extract(je.value,'$.applicable')=1 "
+        "    OR json_extract(je.value,'$.fired')=1) AS applicable, "
+        "SUM(json_extract(je.value,'$.fired')=1) AS fired, "
+        "SUM(json_extract(je.value,'$.gate')='default') AS default_gate, "
+        "SUM(json_extract(je.value,'$.fired')=1 "
+        "    AND json_extract(je.value,'$.applicable')=0) AS mismatch, "
+        "SUM(COALESCE(json_extract(je.value,'$.n_concerns'),0)) AS concerns "
+        "FROM ai_reviews ar, json_each(ar.check_coverage) je "
+        "WHERE ar.check_coverage IS NOT NULL "
+        "  AND (? IS NULL OR ar.methodology_version = ?) "
+        "GROUP BY check_id "
+        "ORDER BY fired DESC, applicable DESC, check_id",
+        (mv, mv)).fetchall()
+
+    rows = []
+    for r in agg:
+        applicable, fired = r["applicable"], r["fired"]
+        lo, hi = _wilson_ci(fired, applicable)
+        rate = fired / applicable if applicable else None
+        rows.append({
+            "id":          r["check_id"],
+            "reviews":     r["reviews"],
+            "applicable":  applicable,
+            "fired":       fired,
+            "concerns":    r["concerns"],
+            "default_gate": r["default_gate"],
+            "mismatch":    r["mismatch"],
+            "rate":        rate,
+            "rate_pct":    round(rate * 100) if rate is not None else None,
+            "ci_lo_pct":   round(lo * 100, 1),
+            "ci_hi_pct":   round(hi * 100, 1),
+        })
+
+    n_reviews = db.execute(
+        "SELECT COUNT(*) FROM ai_reviews "
+        "WHERE check_coverage IS NOT NULL "
+        "  AND (? IS NULL OR methodology_version = ?)", (mv, mv)).fetchone()[0]
+    versions = [v[0] for v in db.execute(
+        "SELECT DISTINCT methodology_version FROM ai_reviews "
+        "WHERE check_coverage IS NOT NULL AND methodology_version IS NOT NULL "
+        "ORDER BY methodology_version DESC")]
+    return {
+        "rows":             rows,
+        "n_reviews":        n_reviews,
+        "versions":         versions,
+        "selected_version": mv,
+        "has_data":         bool(rows),
+        "small_n":          n_reviews < _CHECK_USAGE_SMALL_N,
+        "small_n_floor":    _CHECK_USAGE_SMALL_N,
+        "chart":            check_usage_chart_config(rows),
+    }
+
+
+def check_usage_chart_config(rows):
+    """A Chart.js horizontal floating-bar config: each check's bar spans its
+       fire-rate Wilson 95% CI (lo→hi %), so the bar LENGTH is the uncertainty
+       — a wide bar means "not enough data", which is the honest read at low
+       review counts. Pure data, unit-testable."""
+    return {
+        "type": "bar",
+        "data": {
+            "labels": [r["id"] for r in rows],
+            "datasets": [{
+                "label": "fire rate 95% CI (%)",
+                "data": [[r["ci_lo_pct"], r["ci_hi_pct"]] for r in rows],
+                "backgroundColor": "#4e79a7",
+            }],
+        },
+        "options": {
+            "indexAxis": "y",
+            "responsive": True,
+            "maintainAspectRatio": False,
+            "animation": False,
+            "scales": {"x": {"beginAtZero": True, "max": 100,
+                             "title": {"display": True,
+                                       "text": "fire rate % (Wilson 95% CI)"}}},
+            "plugins": {"legend": {"display": False}},
+        },
+    }
