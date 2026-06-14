@@ -260,6 +260,35 @@ def test_my_patchsets_lists_own_uploads_with_status(tmp_path):
     assert ">Owner<" not in body                  # own view: no owner column
 
 
+def test_my_patchsets_concerns_column_summarizes_findings(tmp_path):
+    """The dashboard's Concerns column shows the per-severity tally for a
+       reviewed upload that has findings."""
+    ctx = _ctx(tmp_path)
+    _confirm_upload(ctx)
+    root = ctx.db.execute("SELECT root_message_id FROM patchsets").fetchone()[0]
+    core_db.upsert_ai_review(ctx.db, root, concerns=[
+        {"severity": "major", "is_preexisting": False},
+        {"severity": "nit", "is_preexisting": True}])
+    body = ctx.client.get("/my-patchsets").text
+    assert ">Concerns<" in body                       # column header
+    assert "finding-counts" in body and "sev-major" in body
+    assert "No concerns found" not in body            # it has concerns
+
+
+def test_my_patchsets_concerns_column_no_concerns_and_blank(tmp_path):
+    """A reviewed-clean upload reads 'No concerns found'; before any review the
+       column is blank (neither the tally markup nor the clean label)."""
+    ctx = _ctx(tmp_path)
+    _confirm_upload(ctx)
+    root = ctx.db.execute("SELECT root_message_id FROM patchsets").fetchone()[0]
+    # before review: blank
+    pre = ctx.client.get("/my-patchsets").text
+    assert "No concerns found" not in pre and "finding-counts" not in pre
+    # reviewed, no concerns
+    core_db.upsert_ai_review(ctx.db, root, concerns=[])
+    assert "No concerns found" in ctx.client.get("/my-patchsets").text
+
+
 def test_my_patchsets_scopes_to_the_viewer(tmp_path):
     """Another regular user sees an empty dashboard; the admin sees the
        upload with an Owner column."""

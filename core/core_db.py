@@ -1827,6 +1827,29 @@ def get_ai_review(db, root_message_id, *,
     return r
 
 
+def ai_review_concerns_for_roots(db, roots, *,
+                                 source=AI_REVIEW_SOURCE_HONE_NODE):
+    """Map root_message_id -> decoded concerns list, for the given roots that
+       carry an AI review — the listing 'concerns' column, fetched for one page
+       of roots in a single indexed query (idx_ai_reviews_root). A root ABSENT
+       from the map has no review (the listing leaves the column blank); a root
+       mapping to [] was reviewed with no concerns ('No concerns found')."""
+    norm = [norm_msgid(r) for r in roots]
+    if not norm:
+        return {}
+    marks = ",".join("?" * len(norm))
+    out = {}
+    for r in db.execute(
+            f"SELECT root_message_id, concerns FROM ai_reviews "
+            f"WHERE source=? AND root_message_id IN ({marks})",
+            (source, *norm)):
+        try:
+            out[r["root_message_id"]] = json.loads(r["concerns"])
+        except (ValueError, TypeError):
+            out[r["root_message_id"]] = []
+    return out
+
+
 def delete_review(db, root_message_id):
     """Operator-triggered removal of a patchset's AI review together with
        the review work-item(s) that produced it — so the operator can wipe

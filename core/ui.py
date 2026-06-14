@@ -555,6 +555,7 @@ async def my_patchsets(request: Request,
         label, badge = _upload_status(
             r, base_label="gathered" if from_lore else "uploaded")
         items.append({
+            "root":             r["root_message_id"],
             "subject":          r["subject"] or r["root_message_id"],
             "detail_url":       f"/patchsets/{quote(r['root_message_id'])}",
             "n_patches":        r["n_patches"],
@@ -568,6 +569,7 @@ async def my_patchsets(request: Request,
                                     r["uploaded_by_user_id"]
                                     or r["first_claimant_user_id"]),
         })
+    _attach_concerns(db, items)
     # The seam-remover: gathered series whose submitter address matches
     # this account, one click from being theirs. Suggested only on the
     # personal view — the admin everyone-view has no "yours".
@@ -1028,7 +1030,8 @@ _PATCHSET_COLUMNS = (("subject",  "Patchset", True),
                      ("date",     "Date",     True),
                      ("state",    "State",    False),
                      ("parts",    "Parts",    True),
-                     ("comments", "Comments", True))
+                     ("comments", "Comments", True),
+                     ("concerns", "Concerns", False))
 
 
 # Page-size options for the queue paginator (small dropdown). 25 is
@@ -1302,6 +1305,7 @@ def _patchsets_view(db, q, state, comments, list_tag, patch_type,
                                           sort=sort, direction=direction,
                                           limit=size, offset=offset):
         items.append({
+            "root":         p["root_message_id"],
             "subject":      p["subject"] or p["root_message_id"],
             "author":       p["author"] or "—",
             "sent_display": _when(p["sent"]),
@@ -1313,6 +1317,8 @@ def _patchsets_view(db, q, state, comments, list_tag, patch_type,
             "n_comments":   p["n_comments"],
             "detail_url":   f"/patchsets/{quote(p['root_message_id'])}{back_qs}",
         })
+    # The AI-review concerns summary for just this page of roots (one query).
+    _attach_concerns(db, items)
 
     # Two independent filter rows. A chip change resets to page 1 (url()
     # omits page) but preserves the other axis, search, sort, and size.
@@ -1508,6 +1514,27 @@ def _severity_counts(concerns):
             counts[sev]["pre" if c.get("is_preexisting") else "new"] += 1
     return [{"severity": s, "new": counts[s]["new"], "pre": counts[s]["pre"]}
             for s in _SEVERITY_ORDER]
+
+
+def _concerns_cell(concerns):
+    """The listing 'concerns' column model for a patchset, from its AI-review
+       concerns list (concerns_map.get(root), so None == no review). Three
+       states, matching the patchset page:
+         None  -> the patchset isn't reviewed: a blank column;
+         []    -> reviewed, no concerns in any patch: 'No concerns found';
+         [...] -> reviewed: the critical/major/moderate/minor/nit tally
+                  (_severity_counts) summed across every patch in the series."""
+    if concerns is None:
+        return None
+    return {"any": bool(concerns), "counts": _severity_counts(concerns)}
+
+
+def _attach_concerns(db, items):
+    """Stamp each list item's `concerns` cell (_concerns_cell) from one batched
+       lookup over the page's roots. Each item must carry `root`."""
+    cmap = core_db.ai_review_concerns_for_roots(db, [it["root"] for it in items])
+    for it in items:
+        it["concerns"] = _concerns_cell(cmap.get(it["root"]))
 
 
 def _annotate_patch(body, concerns):

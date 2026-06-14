@@ -1,0 +1,15 @@
+{# Reusable AI-review concerns cell for the patchset listings.
+   `c` is the item's concerns model (ui._concerns_cell):
+     None        -> the patchset has no AI review: render nothing (blank cell)
+     {any:false} -> reviewed, no concerns: "No concerns found"
+     {any:true}  -> the per-severity tally, same critical/major/moderate/minor/
+                    nit format as the patchset page (app.css .finding-counts). #}
+{% macro cell(c) -%}
+{%- if c -%}
+{%- if c.any -%}
+<span class="finding-counts">{% for x in c.counts %}<span class="sev-{{ x.severity }}">{{ x.severity }} <span class="sev-count">{{ x.new }}</span>{% if x.pre %} (<span class="sev-count">{{ x.pre }}</span>){% endif %}</span>{% endfor %}</span>
+{%- else -%}
+<span class="text-success fw-semibold small">No concerns found</span>
+{%- endif -%}
+{%- endif -%}
+{%- endmacro %}

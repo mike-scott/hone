@@ -445,3 +445,41 @@ def test_corpus_renders_for_a_maintainer(tmp_path):
     body = TestClient(app).get("/").text
     assert "Corpus" in body
     assert "Search by subject or author name" in body
+
+
+# --- concerns column (AI-review severity summary) -------------------------
+
+def test_ai_review_concerns_for_roots_distinguishes_states(ctx):
+    """The batch helper backing the listing column: unreviewed roots are
+       ABSENT (blank cell), a reviewed-clean root maps to [], a reviewed root
+       maps to its concerns list."""
+    _plant(ctx.db, "<a@x>", subject="s", author="A", sent=1)            # unreviewed
+    _plant(ctx.db, "<b@x>", subject="s", author="B", sent=2, reviewed=True)  # clean
+    _plant(ctx.db, "<c@x>", subject="s", author="C", sent=3)
+    core_db.upsert_ai_review(ctx.db, "<c@x>",
+                             concerns=[{"severity": "major"}])
+    m = core_db.ai_review_concerns_for_roots(
+        ctx.db, ["<a@x>", "<b@x>", "<c@x>"])
+    assert core_db.norm_msgid("<a@x>") not in m            # blank column
+    assert m[core_db.norm_msgid("<b@x>")] == []            # No concerns found
+    assert m[core_db.norm_msgid("<c@x>")][0]["severity"] == "major"
+    assert core_db.ai_review_concerns_for_roots(ctx.db, []) == {}
+
+
+def test_corpus_concerns_column_renders_all_states(ctx):
+    """The Concerns column shows the header, 'No concerns found' for a
+       reviewed-clean series, and the per-severity tally (same format as the
+       patchset page) for one with findings."""
+    _plant(ctx.db, "<u@x>", subject="net: unreviewed", author="A", sent=3000)
+    _plant(ctx.db, "<c@x>", subject="net: clean", author="B", sent=2000,
+           reviewed=True)
+    _plant(ctx.db, "<f@x>", subject="net: findings", author="C", sent=1000)
+    core_db.upsert_ai_review(ctx.db, "<f@x>", concerns=[
+        {"severity": "critical", "is_preexisting": False},
+        {"severity": "major", "is_preexisting": False},
+        {"severity": "nit", "is_preexisting": True}])
+    body = ctx.client.get("/").text
+    assert "Concerns" in body                           # column header
+    assert "No concerns found" in body                 # the clean series
+    assert "finding-counts" in body                    # the tally markup
+    assert "sev-critical" in body and "sev-major" in body

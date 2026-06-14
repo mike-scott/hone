@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% from "_paginator.html" import paging_bar %}
+{% from "_concerns.html" import cell as concerns_cell %}
 {% block title %}Corpus · hone-core{% endblock %}
 {% block content %}
 <h1 class="h3 mb-3">Corpus</h1>
@@ -107,6 +108,7 @@
         </td>
         <td class="text-end">{{ row.n_parts }}</td>
         <td class="text-end">{{ row.n_comments }}</td>
+        <td>{{ concerns_cell(row.concerns) }}</td>
       </tr>
       {% else %}
       <tr>
