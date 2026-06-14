@@ -556,6 +556,20 @@ def test_cli_backend_strips_fences_in_the_result(monkeypatch):
     assert out["text"] == body            # fence removed
 
 
+def test_cli_backend_raises_on_empty_result(monkeypatch):
+    """A 'successful' result whose text is blank — or strips to empty, e.g. an
+       empty ```json``` fence the model opened and closed — is a transient empty
+       completion, not a valid answer: call_claude raises CallClaudeError (so a
+       caller like prepare defers and re-arms) rather than returning text=''."""
+    _patch_popen(monkeypatch, events=[_envelope(text="```json\n```")])
+    with pytest.raises(ai.CallClaudeError) as ei:
+        ai.call_claude(_CliCfg(), "s", "u")
+    assert "empty" in str(ei.value).lower()
+    _patch_popen(monkeypatch, events=[_envelope(text="   \n")])   # whitespace
+    with pytest.raises(ai.CallClaudeError):
+        ai.call_claude(_CliCfg(), "s", "u")
+
+
 def test_cli_backend_captures_assistant_and_tool_trace(monkeypatch):
     """The streamed assistant text + tool_use/tool_result events are
        captured into `trace` — the ordered record hone-core persists and

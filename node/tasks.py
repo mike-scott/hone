@@ -304,10 +304,13 @@ def handle_prepare_task(cfg: Config, client: HoneCoreClient,
     Composes the system prompt (principles + the prepare operation
     guidance) and the user payload (the patchset JSON + the
     operation's return contract), calls Claude, and shapes the
-    response into a prepare completion record. On a JSON parse
-    failure returns an `uncharacterisable` record carrying the
-    reason — surfacing the failure to hone-core's corpus rather than
-    crashing the node.
+    response into a prepare completion record. A transient failure — the
+    Claude call erroring, an empty completion, or off-contract/unparseable
+    JSON — returns a `deferred` record so hone-core re-arms the task (backoff,
+    then park after the defer cap) rather than burning the patchset as
+    `uncharacterisable` on a hiccup; the failure context still rides in `meta`
+    for debugging. `uncharacterisable` remains the terminal fallback hone-core
+    stamps when it rejects a record's shape.
 
     The deterministic Tier-0 fields (base resolution, subsystem +
     maintainer sets via get_maintainer.pl, patch_size counts) are
@@ -327,20 +330,20 @@ def handle_prepare_task(cfg: Config, client: HoneCoreClient,
         response = ai.call_claude(cfg, system, user_text, tools=[])
     except ai.CallClaudeError as exc:
         # The Claude call ran but yielded no usable answer (CLI non-auth
-        # exit / timeout / stream with no success result). Rather than let
-        # it crash the claim loop, submit an uncharacterisable record that
-        # carries the partial agent trace + the CLI's failure context — the
-        # attempt lands in the corpus (and the Agent-messages UI) as
-        # debuggable data instead of a restart loop. Auth failures take a
-        # different, configuration-fatal path (ai.CallClaudeAuthError).
-        log.warning("prepare: Claude call failed (%s) — submitting "
-                    "uncharacterisable: %s", exc.category, exc)
+        # exit / timeout / empty completion / stream with no success result).
+        # Defer (re-arm) rather than terminally burn the patchset — the failure
+        # is transient; hone-core re-offers with backoff and parks after the
+        # cap. The partial trace + CLI failure context ride in `meta` so the
+        # attempt stays debuggable. Auth failures take a different,
+        # configuration-fatal path (ai.CallClaudeAuthError).
+        log.warning("prepare: Claude call failed (%s) — deferring: %s",
+                    exc.category, exc)
         return {"task_type": "prepare",
                 "worker_id": _worker_id(cfg),
                 "model":     exc.model or cfg.anthropic_model or "",
                 "usage":     {"input_tokens":  0, "output_tokens": 0,
                               "duration_ms":   exc.duration_ms},
-                "outcome":   "uncharacterisable",
+                "outcome":   "deferred",
                 "reason":    str(exc),
                 "meta":      {"deterministic_resolver_version":
                                   det["resolver_version"],
@@ -354,23 +357,23 @@ def handle_prepare_task(cfg: Config, client: HoneCoreClient,
               "worker_id": _worker_id(cfg),
               "model":     response["model"],
               "usage":     response["usage"]}
-    # resolver_meta rides on both the prepared and the uncharacterisable
-    # record (the trace is just as useful — more so — when the JSON didn't
-    # parse, since it shows what Claude actually did).
+    # resolver_meta rides on both the prepared and the deferred record (the
+    # trace is just as useful — more so — when the JSON didn't parse, since it
+    # shows what Claude actually did).
     resolver_meta = {"deterministic_resolver_version": det["resolver_version"],
                      "trace": _cap_trace(response.get("trace"))}
     try:
         body = ai.parse_json_response(response["text"])
     except ValueError as exc:
-        log.warning("prepare: Claude returned malformed JSON — %s", exc)
-        # Stash Claude's raw response on the record's `meta` field so a
-        # future debugging pass can see WHAT the model produced rather
-        # than just the parser's reason. Truncated to keep work_items.
-        # record from ballooning; the original length is recorded
-        # separately so the truncation is obvious.
+        log.warning("prepare: Claude returned malformed JSON — deferring: %s",
+                    exc)
+        # Off-contract / unparseable output is treated as transient (same as
+        # review): defer so the task re-arms rather than terminally marking the
+        # patchset. Claude's raw response rides on `meta` (truncated, with the
+        # original length) so a debugging pass can see WHAT the model produced.
         raw = response.get("text") or ""
         return {**header,
-                "outcome": "uncharacterisable",
+                "outcome": "deferred",
                 "reason":  str(exc),
                 "meta":    {**resolver_meta,
                             "raw_response":        raw[:_RAW_RESPONSE_CAP],

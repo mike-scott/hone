@@ -331,21 +331,21 @@ def test_prepare_user_text_backstop_cap_preserves_contract():
     assert "Return raw JSON only" in user_text                  # the contract body
 
 
-def test_prepare_handler_falls_back_to_uncharacterisable_on_bad_json(monkeypatch):
+def test_prepare_handler_defers_on_bad_json(monkeypatch):
     """Claude is asked for raw JSON only. If it returns prose, a
-       markdown-fenced incomplete blob, or otherwise un-parseable
-       output, the handler returns an `uncharacterisable` record
-       carrying the parser's reason AND Claude's raw response on
-       `meta` so the next debugging pass can inspect WHAT the model
+       markdown-fenced incomplete blob, or otherwise un-parseable output, the
+       handler returns a `deferred` record (off-contract output is transient —
+       hone-core re-arms it) carrying the parser's reason AND Claude's raw
+       response on `meta` so the next debugging pass can inspect WHAT the model
        actually produced rather than guessing from just the reason."""
     raw = "Sorry, I couldn't characterise this."
     stub, _calls = _fake_call_claude(raw)
     monkeypatch.setattr("node.ai.call_claude", stub)
     record = tasks.handle_prepare_task(_cfg(), None, _PREPARE_CLAIM)
     assert record["task_type"] == "prepare"
-    assert record["outcome"]   == "uncharacterisable"
+    assert record["outcome"]   == "deferred"
     assert "JSON" in record["reason"]
-    # The uncharacterisable shape must not carry the success-path keys.
+    # The failure shape must not carry the success-path keys.
     assert "subsystem" not in record
     assert "self_review_record" not in record
     # Raw response stashed on meta so the next failure is debuggable
@@ -353,8 +353,8 @@ def test_prepare_handler_falls_back_to_uncharacterisable_on_bad_json(monkeypatch
     assert record["meta"]["raw_response"] == raw
     assert record["meta"]["raw_response_length"] == len(raw)
     assert record["meta"]["raw_response_truncated"] is False
-    # the trace rides on the uncharacterisable record too (here empty —
-    # the stub returned no trace)
+    # the trace rides on the deferred record too (here empty — the stub
+    # returned no trace)
     assert record["meta"]["trace"] == []
     _validate_record(record)
 
@@ -369,7 +369,7 @@ def test_prepare_handler_truncates_runaway_raw_responses(monkeypatch):
     stub, _calls = _fake_call_claude(raw)
     monkeypatch.setattr("node.ai.call_claude", stub)
     record = tasks.handle_prepare_task(_cfg(), None, _PREPARE_CLAIM)
-    assert record["outcome"] == "uncharacterisable"
+    assert record["outcome"] == "deferred"
     assert record["meta"]["raw_response_length"] == 50000
     assert record["meta"]["raw_response_truncated"] is True
     assert len(record["meta"]["raw_response"]) < 50000
@@ -378,11 +378,11 @@ def test_prepare_handler_truncates_runaway_raw_responses(monkeypatch):
 
 def test_prepare_handler_submits_record_when_claude_call_fails(monkeypatch):
     """A CallClaudeError (the CLI ran but produced no usable answer —
-       a non-auth exit / timeout / a stream with no result event) does NOT
-       crash the claim loop. The handler returns a schema-valid
-       `uncharacterisable` record carrying the partial agent trace + the
-       CLI's failure context, so the attempt lands in the corpus (and the
-       Agent-messages UI) as debuggable data."""
+       a non-auth exit / timeout / empty completion / a stream with no result
+       event) does NOT crash the claim loop. The handler returns a schema-valid
+       `deferred` record (the failure is transient — hone-core re-arms) carrying
+       the partial agent trace + the CLI's failure context, so the attempt
+       stays debuggable in the corpus and the Agent-messages UI."""
     partial_trace = [
         {"step": "assistant_text", "text": "Looking at the patch."},
         {"step": "tool_use", "name": "Bash",
@@ -400,7 +400,7 @@ def test_prepare_handler_submits_record_when_claude_call_fails(monkeypatch):
     monkeypatch.setattr("node.ai.call_claude", _boom)
     record = tasks.handle_prepare_task(_cfg(), None, _PREPARE_CLAIM)
     assert record["task_type"] == "prepare"
-    assert record["outcome"]   == "uncharacterisable"
+    assert record["outcome"]   == "deferred"
     assert "kaboom" in record["reason"]
     assert record["model"] == "claude-opus-4-7"
     assert record["usage"]["duration_ms"] == 4200

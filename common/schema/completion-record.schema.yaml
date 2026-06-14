@@ -1534,16 +1534,18 @@ $defs:
     additionalProperties: false
     required: [task_type, worker_id, outcome, model, usage]
     description: >-
-      A node's report on a prepare task. Carries structured metadata
-      for stratification when outcome = "prepared"; carries only a
-      reason when outcome = "uncharacterisable".
+      A node's report on a prepare task. Carries structured metadata for
+      stratification when outcome = "prepared"; carries only a reason when
+      "uncharacterisable" (terminal) or "deferred" (transient — an empty /
+      off-contract completion or a CLI/API blip; hone-core re-arms it with
+      backoff, then parks after the defer cap).
     properties:
       task_type:
         const: prepare
       worker_id:           { $ref: "#/$defs/worker_id" }
       outcome:
         type: string
-        enum: [prepared, uncharacterisable]
+        enum: [prepared, uncharacterisable, deferred]
       model:               { $ref: "#/$defs/model" }
       usage:               { $ref: "#/$defs/usage" }
       meta:                { $ref: "#/$defs/meta" }
@@ -1567,7 +1569,7 @@ $defs:
                    maintainer, patch_type, review_intensity,
                    preparation_notes, self_review_record]
         not: { required: [reason] }
-      - properties: { outcome: { const: uncharacterisable } }
+      - properties: { outcome: { enum: [uncharacterisable, deferred] } }
         required: [reason]
         not: { anyOf: [ { required: [patchset_id] },
                         { required: [tree_state] },

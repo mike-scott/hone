@@ -247,6 +247,13 @@ def _call_claude_sdk(cfg, system, user_text, *, model, max_tokens):
     # text turn there's exactly one block of type "text".
     text = "".join(block.text for block in resp.content
                     if getattr(block, "type", None) == "text")
+    # An empty completion is a transient hiccup, not an empty success — raise
+    # so the caller defers (see the CLI path for the rationale).
+    if not text.strip():
+        _record_outcome("other")
+        raise CallClaudeError(
+            "model returned an empty response (successful call, no text)",
+            category="other", duration_ms=duration_ms, model=chosen)
     # Same cache-aware summation as the CLI path: SDK's input_tokens
     # is the uncached portion only when prompt-caching is in play.
     cache_read     = getattr(resp.usage, "cache_read_input_tokens",     None) or 0
@@ -736,6 +743,18 @@ def _call_claude_cli(cfg, system, user_text, *, model, tools=None, cwd=None):
             category=category, returncode=rc, stderr=stderr,
             trace=trace, duration_ms=duration_ms, model=model_used)
 
+    # A successful result with no text is a transient empty completion (the
+    # model billed a few tokens but produced nothing parseable — e.g. an empty
+    # ```json``` fence). Treat it as a deferrable error, not an empty success:
+    # otherwise the caller parses "" into a confusing failure and, for prepare,
+    # can't tell it apart from a real refusal.
+    if not result_text.strip():
+        _record_outcome("other")
+        raise CallClaudeError(
+            "`claude` returned an empty response — a successful result with no "
+            "text (transient; defer and retry)",
+            category="other", returncode=rc, stderr=stderr,
+            trace=trace, duration_ms=duration_ms, model=model_used)
     _record_outcome(None)
     usage = result_event.get("usage") or {}
     # The CLI's `input_tokens` is the *non-cached* portion only; cached
