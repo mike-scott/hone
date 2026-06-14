@@ -54,14 +54,43 @@ def test_coverage_gates_applicability_per_check():
     cov = {c["id"]: c for c in CF.compute_coverage(
         ["concurrency", "lock-storage-lifetime", "subsystem-checklists",
          "function-contract", "efficacy-and-root-cause"],
-        ["+++ b/x.c\n+ int a;\n"],                 # plain C, no rcu/lock/fn/fix
+        ["+++ b/x.c\n+ int a;\n"],                 # plain C, no rcu/lock/fn
         patch_type_primary="feature")}
     assert cov["concurrency"]["applicable"] is True            # any C
     assert cov["lock-storage-lifetime"]["applicable"] is False  # no locks
     assert cov["subsystem-checklists"]["applicable"] is False   # no rcu
     assert cov["function-contract"]["applicable"] is False      # no new fn
-    assert cov["efficacy-and-root-cause"]["applicable"] is False  # not bugfix
+    # efficacy gate is touches_c (tuned): it asks "does the change work", which
+    # applies to any C patch, not just bugfix-typed ones.
+    assert cov["efficacy-and-root-cause"]["applicable"] is True
     assert all(c["gate"] == "specific" for c in cov.values())
+
+
+def test_gate_tuning_efficacy_any_c_and_doc_contract_by_content():
+    """The two gates tuned against the first real reviews (both had
+       fired-but-not-applicable rows):
+         - efficacy-and-root-cause: any C patch, regardless of patch_type;
+         - documented-contract: matched by diff CONTENT (ioctl/uAPI/sysfs),
+           not only by a uapi/ or Documentation/ path."""
+    # efficacy applies to a non-bugfix C patch
+    eff = CF.compute_coverage(["efficacy-and-root-cause"],
+                              ["+++ b/drivers/x.c\n+ int a;\n"],
+                              patch_type_primary="refactor")[0]
+    assert eff["applicable"] is True
+    # documented-contract via content marker in driver C, no doc path
+    by_content = CF.compute_coverage(
+        ["documented-contract"],
+        ["+++ b/drivers/gpu/msm.c\n+ case DRM_IOCTL_MSM_PERFCNTR:\n"])[0]
+    assert by_content["applicable"] is True
+    # ...and still via a documented path with no content marker
+    by_path = CF.compute_coverage(
+        ["documented-contract"],
+        ["+++ b/Documentation/gpu/msm.rst\n+ describe the thing\n"])[0]
+    assert by_path["applicable"] is True
+    # plain C with neither path nor contract markers → not applicable
+    neither = CF.compute_coverage(
+        ["documented-contract"], ["+++ b/drivers/x.c\n+ int a = 1;\n"])[0]
+    assert neither["applicable"] is False
 
 
 def test_coverage_unknown_check_falls_back_to_default_gate():

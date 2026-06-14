@@ -25,7 +25,18 @@ data instead of being silently mis-bucketed.
 `applicable` and `fired` are computed INDEPENDENTLY: a concern can fire under a
 check our gate marked not-applicable (the model applied it anyway, or the gate
 is too narrow). That `applicable=false, fired=true` mismatch is signal — it
-tells you to widen a gate — so it is deliberately not papered over.
+tells you to widen a gate — so it is deliberately not papered over here.
+
+DOWNSTREAM CONVENTION — `effective_applicable = applicable OR fired`. A
+denominator must never be smaller than its numerator, so any rate computed over
+this data (fire rate = fired / applicable) should treat a fired check as
+applicable regardless of the gate. This neutralizes the residual mismatch
+without touching the gate or losing the raw fields. It matters most for
+`documented-contract`, which has a known fuzzy tail: its applicability is a
+semantic judgment (does the change alter code whose effect is fixed by a
+documented contract — kerneldoc, a Rust `# Safety` invariant, an internal API
+contract) that keyword markers can't fully capture without broadening the gate
+to near-everything, so a few fired-but-not-gated rows are expected and fine.
 """
 import json
 import re
@@ -55,10 +66,20 @@ _RE_LOCK = re.compile(
 _RE_EXPORT = re.compile(r'\bEXPORT_SYMBOL(?:_GPL|_NS|_NS_GPL)?\b')
 # A function-definition opener on an added line — identifier-led signature
 # ending in `)` with an optional `{`. Heuristic: the function-contract gate is
-# the fuzzy one (it may over/0r under-count "introduced or generalised"); the
+# a fuzzy one (it may over- or under-count "introduced or generalised"); the
 # mismatch signal above is how we'll learn to tune it.
 _RE_FUNC_DEF = re.compile(
     r'^[A-Za-z_][\w\s\*]*\b[A-Za-z_]\w*\s*\([^;]*\)\s*\{?\s*$')
+# Documented-contract markers in the diff text. Driver code can implement a
+# documented contract (ioctl / uAPI / syscall / sysfs) without the patch
+# touching a uapi/ or Documentation/ *path*, so the doc-contract gate is path
+# OR these — the path-only form under-counted on real reviews (hpd-refactor,
+# io_projection fired documented-contract from driver C with no doc path).
+# No word boundaries: these tokens are distinctive and often live inside
+# macros (DRM_IOCTL_*, SYSCALL_DEFINE3, DEVICE_ATTR_RW) where `_` — a \w char —
+# would defeat \b. Substring match is intended.
+_RE_DOC_CONTRACT = re.compile(
+    r'(?:ioctl|uapi|prctl|sysfs|syscall_define|device_attr)', re.I)
 
 
 def extract_features(patch_texts, *, patch_type_primary=None):
@@ -77,8 +98,9 @@ def extract_features(patch_texts, *, patch_type_primary=None):
         FEATURE_USES_LOCKS: bool(_RE_LOCK.search(blob)),
         FEATURE_ADDS_FUNCTION: adds_function,
         FEATURE_IS_BUGFIX: patch_type_primary == "bugfix",
-        FEATURE_TOUCHES_DOC_CONTRACT: any(
-            m in f.lower() for f in files for m in _DOC_PATH_MARKERS),
+        FEATURE_TOUCHES_DOC_CONTRACT: (
+            any(m in f.lower() for f in files for m in _DOC_PATH_MARKERS)
+            or bool(_RE_DOC_CONTRACT.search(blob))),
     }
 
 
@@ -93,13 +115,19 @@ _GATES = {
     "lock-storage-lifetime":   FEATURE_USES_LOCKS,         # only if it locks
     "integer-safety":          FEATURE_TOUCHES_C,          # any C: arithmetic
     "error-teardown":          FEATURE_TOUCHES_C,          # any C: error paths
-    "efficacy-and-root-cause": FEATURE_IS_BUGFIX,          # does the fix work
+    "efficacy-and-root-cause": FEATURE_TOUCHES_C,          # any C: does it work?
     "function-contract":       FEATURE_ADDS_FUNCTION,      # new/generalised fn
     "preexisting-issues":      FEATURE_TOUCHES_C,          # any C nearby
-    "documented-contract":     FEATURE_TOUCHES_DOC_CONTRACT,  # uapi/ABI/docs
+    "documented-contract":     FEATURE_TOUCHES_DOC_CONTRACT,  # uapi/ABI/ioctl/docs
     "subsystem-checklists":    FEATURE_USES_RCU,           # only RCU checklist
 }
 _DEFAULT_GATE = FEATURE_TOUCHES_C
+# Tuned against the first real reviews: efficacy-and-root-cause widened from
+# is_bugfix to touches_c (it asks "does the change work / root cause vs
+# symptom", which is any patch, not just bugfix-typed ones), and
+# touches_doc_contract widened from path-only to path-or-content (above) —
+# both had fired-but-not-applicable rows. FEATURE_IS_BUGFIX is retained in the
+# vocabulary but no gate currently uses it.
 
 
 def _fired_index(concerns):
