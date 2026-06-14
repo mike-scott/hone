@@ -1,0 +1,538 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>hone — product brief</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0a0c0f;
+    --panel:#12161c;
+    --panel-2:#161b22;
+    --ink:#eceae3;
+    --muted:#878d98;
+    --faint:#5b626d;
+    --line:rgba(236,234,227,.10);
+    --line-soft:rgba(236,234,227,.06);
+    --amber:#ffb000;
+    --amber-dim:rgba(255,176,0,.13);
+    --teal:#5bbcb2;
+    --teal-dim:rgba(91,188,178,.12);
+    --mono:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+    --sans:'IBM Plex Sans',system-ui,sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    background:var(--bg);
+    color:var(--ink);
+    font-family:var(--sans);
+    font-weight:300;
+    overflow:hidden;
+    -webkit-font-smoothing:antialiased;
+  }
+  /* schematic grid + atmosphere */
+  body::before{
+    content:"";position:fixed;inset:0;z-index:0;pointer-events:none;
+    background-image:
+      linear-gradient(var(--line-soft) 1px,transparent 1px),
+      linear-gradient(90deg,var(--line-soft) 1px,transparent 1px);
+    background-size:46px 46px;
+    mask-image:radial-gradient(120% 90% at 70% 10%,#000 30%,transparent 95%);
+  }
+  body::after{
+    content:"";position:fixed;inset:0;z-index:0;pointer-events:none;
+    background:
+      radial-gradient(80% 60% at 85% -10%,rgba(255,176,0,.10),transparent 60%),
+      radial-gradient(70% 60% at -10% 110%,rgba(91,188,178,.08),transparent 60%),
+      radial-gradient(100% 100% at 50% 50%,transparent 55%,rgba(0,0,0,.55));
+  }
+
+  /* ---- deck chrome ---- */
+  .stage{position:relative;z-index:1;height:100%;width:100%}
+  .topbar{
+    position:fixed;top:0;left:0;right:0;z-index:5;
+    display:flex;justify-content:space-between;align-items:center;
+    padding:26px 40px;font-family:var(--mono);font-size:12px;
+    letter-spacing:.18em;text-transform:uppercase;color:var(--faint);
+  }
+  .brand{color:var(--ink);font-weight:600;letter-spacing:.1em}
+  .brand b{color:var(--amber);font-weight:600}
+  .progress{position:fixed;top:0;left:0;height:2px;background:var(--amber);
+    z-index:6;transition:width .5s cubic-bezier(.16,.84,.3,1);
+    box-shadow:0 0 12px var(--amber)}
+
+  .slide{
+    position:absolute;inset:0;display:none;
+    flex-direction:column;justify-content:center;
+    padding:clamp(40px,7vw,120px);padding-top:96px;padding-bottom:84px;
+  }
+  .slide.active{display:flex}
+  .wrap{width:100%;max-width:1180px;margin:0 auto}
+
+  /* reveal animation, re-runs each activation (display toggles) */
+  .reveal{opacity:0}
+  .slide.active .reveal{animation:rise .72s cubic-bezier(.16,.84,.3,1) both;
+    animation-delay:calc(var(--i,0)*85ms)}
+  @keyframes rise{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:none}}
+
+  .kicker{font-family:var(--mono);font-size:12.5px;letter-spacing:.32em;
+    text-transform:uppercase;color:var(--amber);margin-bottom:26px;
+    display:flex;align-items:center;gap:12px}
+  .kicker::before{content:"";width:30px;height:1px;background:var(--amber);
+    box-shadow:0 0 10px var(--amber)}
+
+  h1{font-family:var(--mono);font-weight:700;line-height:.96;letter-spacing:-.02em}
+  h2{font-family:var(--mono);font-weight:600;line-height:1.02;
+    font-size:clamp(30px,5vw,62px);letter-spacing:-.015em;margin-bottom:30px}
+  h2 .hl{color:var(--amber)}
+  .lede{font-size:clamp(17px,1.7vw,22px);font-weight:300;color:#cfd3da;
+    line-height:1.55;max-width:62ch}
+  .lede .em{color:var(--ink);font-weight:500}
+  .lede .am{color:var(--amber);font-weight:500}
+
+  /* cover */
+  .cover h1{font-size:clamp(80px,17vw,230px)}
+  .cur{display:inline-block;width:.10em;height:.84em;background:var(--amber);
+    margin-left:.06em;transform:translateY(.06em);
+    animation:blink 1.15s steps(1) infinite;box-shadow:0 0 18px var(--amber)}
+  @keyframes blink{50%{opacity:0}}
+  .cover .tag{font-family:var(--mono);font-size:clamp(15px,2.1vw,26px);
+    color:var(--ink);font-weight:400;margin-top:30px;letter-spacing:-.01em}
+  .cover .tag .am{color:var(--amber)}
+  .cover .sub{color:var(--muted);margin-top:16px;font-size:clamp(14px,1.4vw,18px)}
+
+  /* generic columns / lists */
+  .cols{display:grid;gap:22px;margin-top:46px}
+  .cols.three{grid-template-columns:repeat(3,1fr)}
+  .cols.two{grid-template-columns:1.05fr .95fr;align-items:center}
+  .card{background:linear-gradient(180deg,var(--panel),var(--panel-2));
+    border:1px solid var(--line);border-radius:14px;padding:26px 24px;
+    position:relative;overflow:hidden}
+  .card::before{content:"";position:absolute;left:0;top:0;bottom:0;width:2px;
+    background:var(--amber);opacity:.0;transition:opacity .3s}
+  .card .n{font-family:var(--mono);font-size:12px;color:var(--amber);
+    letter-spacing:.2em;margin-bottom:14px}
+  .card h3{font-family:var(--mono);font-weight:600;font-size:19px;
+    margin-bottom:10px;letter-spacing:-.01em;color:var(--ink)}
+  .card p{color:var(--muted);font-size:15px;line-height:1.6}
+
+  /* problem list */
+  .plist{margin-top:42px;display:grid;gap:0;border-top:1px solid var(--line)}
+  .prow{display:grid;grid-template-columns:64px 1fr;gap:24px;
+    padding:24px 6px;border-bottom:1px solid var(--line);align-items:baseline}
+  .prow .pn{font-family:var(--mono);color:var(--amber);font-size:14px;
+    letter-spacing:.1em}
+  .prow .pt{font-size:clamp(17px,1.9vw,23px);color:#d7dae0;font-weight:300;line-height:1.4}
+  .prow .pt b{color:var(--ink);font-weight:600}
+
+  /* pillars row (chips) */
+  .pillars{display:flex;flex-wrap:wrap;gap:14px;margin-top:40px}
+  .pill{font-family:var(--mono);font-size:13px;letter-spacing:.04em;
+    border:1px solid var(--line);border-radius:999px;padding:11px 18px;
+    color:var(--ink);background:var(--panel)}
+  .pill .dot{display:inline-block;width:7px;height:7px;border-radius:50%;
+    background:var(--amber);margin-right:9px;vertical-align:middle;
+    box-shadow:0 0 8px var(--amber)}
+  .pill.teal .dot{background:var(--teal);box-shadow:0 0 8px var(--teal)}
+
+  /* check chips */
+  .checks{display:flex;flex-wrap:wrap;gap:11px;margin-top:34px;max-width:62ch}
+  .chk{font-family:var(--mono);font-size:13px;color:#cdd1d8;
+    border:1px dashed var(--line);border-radius:8px;padding:9px 13px;
+    background:rgba(255,176,0,.03)}
+  .chk span{color:var(--faint)}
+
+  /* node fleet visual */
+  .fleet{display:flex;gap:12px;margin-top:40px;align-items:flex-end;flex-wrap:wrap}
+  .node{flex:1 1 130px;min-width:120px;border:1px solid var(--teal-dim);
+    border-radius:12px;background:linear-gradient(180deg,#10161a,#0d1216);
+    padding:18px 16px}
+  .node .h{font-family:var(--mono);font-size:12px;color:var(--teal);
+    letter-spacing:.12em;margin-bottom:14px}
+  .node .bars{display:flex;flex-direction:column;gap:7px}
+  .node .bar{height:6px;border-radius:3px;background:rgba(91,188,178,.16);overflow:hidden}
+  .node .bar i{display:block;height:100%;background:var(--teal);width:0;
+    box-shadow:0 0 10px rgba(91,188,178,.5)}
+  .slide.active .node .bar i{animation:fill 1.1s cubic-bezier(.16,.84,.3,1) forwards}
+  .node.more{border-style:dashed;display:flex;align-items:center;
+    justify-content:center;color:var(--faint);font-family:var(--mono);
+    font-size:26px;background:transparent}
+  @keyframes fill{to{width:var(--w,70%)}}
+
+  /* stats bar chart */
+  .chart{margin-top:38px;display:grid;gap:16px;max-width:680px}
+  .crow{display:grid;grid-template-columns:200px 1fr 52px;align-items:center;gap:16px}
+  .crow .cl{font-family:var(--mono);font-size:13px;color:#cdd1d8;text-align:right}
+  .crow .ct{height:14px;border-radius:7px;background:var(--panel);
+    border:1px solid var(--line);overflow:hidden}
+  .crow .ct i{display:block;height:100%;width:0;border-radius:7px;
+    background:linear-gradient(90deg,#a8741f,var(--amber));
+    box-shadow:0 0 12px var(--amber-dim)}
+  .slide.active .crow .ct i{animation:fill 1.2s cubic-bezier(.16,.84,.3,1) forwards}
+  .crow .cv{font-family:var(--mono);font-size:13px;color:var(--amber)}
+  .chart-note{font-family:var(--mono);font-size:12px;color:var(--faint);
+    margin-top:22px;letter-spacing:.04em}
+
+  /* emphasis callout */
+  .note{margin-top:28px;max-width:66ch;border-left:3px solid var(--amber);
+    background:linear-gradient(90deg,var(--amber-dim),transparent);
+    border-radius:0 12px 12px 0;padding:18px 24px}
+  .note .nl{font-family:var(--mono);font-size:11px;letter-spacing:.22em;
+    text-transform:uppercase;color:var(--amber);margin-bottom:9px}
+  .note p{color:#d4d7dd;font-size:clamp(15px,1.5vw,18px);line-height:1.55;
+    font-weight:300}
+  .note p b{color:var(--ink);font-weight:500}
+
+  /* my-patchsets faux rows */
+  .rows{margin-top:28px;border:1px solid var(--line);border-radius:12px;
+    overflow:hidden;max-width:760px;font-family:var(--mono);font-size:13.5px}
+  .rows .r{display:grid;grid-template-columns:1fr 92px 120px;gap:14px;
+    padding:15px 20px;border-bottom:1px solid var(--line-soft);align-items:center}
+  .rows .r:last-child{border-bottom:0}
+  .rows .r.head{background:var(--panel);color:var(--faint);font-size:11px;
+    letter-spacing:.18em;text-transform:uppercase}
+  .rows .subj{color:#d7dae0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .badge{justify-self:start;padding:4px 10px;border-radius:6px;font-size:11px;
+    letter-spacing:.06em}
+  .badge.ok{background:var(--teal-dim);color:var(--teal)}
+  .badge.run{background:var(--amber-dim);color:var(--amber)}
+  .badge.wait{background:rgba(135,141,152,.14);color:var(--muted)}
+  .ct2{color:var(--amber)}
+
+  /* architecture diagram */
+  .diagram{margin-top:30px;width:100%}
+  .diagram svg{width:100%;height:auto;display:block}
+  text{font-family:var(--mono)}
+  .d-title{fill:var(--ink);font-size:14px;font-weight:600;letter-spacing:1.5px}
+  .d-cap{fill:var(--faint);font-size:11px;letter-spacing:1.5px}
+  .d-lab{fill:var(--ink);font-size:13px;font-weight:500}
+  .d-sub{fill:var(--muted);font-size:11px}
+  .d-tealt{fill:var(--teal);font-size:13px;font-weight:600;letter-spacing:1px}
+  .d-flowlab{fill:var(--amber);font-size:10.5px;letter-spacing:1px}
+
+  /* closing */
+  .close h2{font-size:clamp(34px,5.6vw,72px);max-width:18ch}
+  .cta{margin-top:40px;display:flex;gap:16px;align-items:center;flex-wrap:wrap}
+  .btn{font-family:var(--mono);font-size:14px;letter-spacing:.04em;
+    padding:15px 26px;border-radius:10px;background:var(--amber);color:#1a1304;
+    font-weight:600;border:1px solid var(--amber)}
+  .btn.ghost{background:transparent;color:var(--ink);border-color:var(--line)}
+
+  /* nav */
+  .nav{position:fixed;bottom:0;left:0;right:0;z-index:5;
+    display:flex;justify-content:space-between;align-items:center;
+    padding:22px 40px;font-family:var(--mono);font-size:12px;color:var(--faint);
+    letter-spacing:.12em}
+  .dots{display:flex;gap:9px}
+  .dots b{width:8px;height:8px;border-radius:50%;background:rgba(236,234,227,.16);
+    cursor:pointer;transition:all .3s;border:0;padding:0}
+  .dots b.on{background:var(--amber);box-shadow:0 0 10px var(--amber);transform:scale(1.15)}
+  .arrows{display:flex;gap:10px}
+  .arrows button{font-family:var(--mono);background:var(--panel);
+    border:1px solid var(--line);color:var(--ink);width:38px;height:34px;
+    border-radius:8px;cursor:pointer;font-size:15px;transition:.2s}
+  .arrows button:hover{border-color:var(--amber);color:var(--amber)}
+  .counter b{color:var(--ink)}
+  .hint{color:var(--faint)}
+
+  @media(max-width:820px){
+    .cols.three,.cols.two{grid-template-columns:1fr}
+    .crow{grid-template-columns:130px 1fr 44px}
+    .topbar,.nav{padding-left:22px;padding-right:22px}
+    .hint{display:none}
+  }
+</style>
+</head>
+<body>
+
+<div class="progress" id="progress"></div>
+<div class="topbar">
+  <span class="brand"><b>hone</b> // product brief</span>
+  <span id="topcount">01 — 09</span>
+</div>
+
+<div class="stage">
+
+  <!-- 1 — COVER -->
+  <section class="slide cover active">
+    <div class="wrap">
+      <div class="kicker reveal" style="--i:0">Autonomous kernel patch review</div>
+      <h1 class="reveal" style="--i:1">hone<span class="cur"></span></h1>
+      <div class="tag reveal" style="--i:2">Code-aware patch review — <span class="am">autonomous</span>, fleet-scale, and better over time.</div>
+      <div class="sub reveal" style="--i:3">For kernel teams who already live in lore, git, and email.</div>
+    </div>
+  </section>
+
+  <!-- 2 — PROBLEM -->
+  <section class="slide">
+    <div class="wrap">
+      <div class="kicker reveal" style="--i:0">The problem</div>
+      <h2 class="reveal" style="--i:1">Review is the <span class="hl">bottleneck</span>.</h2>
+      <div class="plist">
+        <div class="prow reveal" style="--i:2"><div class="pn">01</div>
+          <div class="pt">New contributors wait <b>days to weeks</b> for first feedback — and many quietly give up.</div></div>
+        <div class="prow reveal" style="--i:3"><div class="pn">02</div>
+          <div class="pt">Maintainers are <b>buried</b>. Deep, whole-function review doesn't scale with patch volume.</div></div>
+        <div class="prow reveal" style="--i:4"><div class="pn">03</div>
+          <div class="pt">Quality is <b>uneven</b> — the same bug class slips through on a busy week.</div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 3 — WHAT IT IS -->
+  <section class="slide">
+    <div class="wrap">
+      <div class="kicker reveal" style="--i:0">What hone is</div>
+      <h2 class="reveal" style="--i:1">It reads your <span class="hl">code</span>, not just your diff.</h2>
+      <p class="lede reveal" style="--i:2">hone stages each series at its <span class="em">exact base-commit</span> in a real kernel worktree and runs an <span class="em">agentic</span> review that walks the call graph and reads whole functions — surfacing concrete, code-level concerns. It won't catch everything today, but it follows a versioned, revisable methodology and <span class="am">gets sharper over time</span>.</p>
+      <div class="pillars reveal" style="--i:3">
+        <span class="pill"><span class="dot"></span>Reads the tree</span>
+        <span class="pill"><span class="dot"></span>Follows a methodology</span>
+        <span class="pill teal"><span class="dot"></span>Learns over time</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- 4 — ARCHITECTURE -->
+  <section class="slide">
+    <div class="wrap">
+      <div class="kicker reveal" style="--i:0">Architecture</div>
+      <h2 class="reveal" style="--i:1;margin-bottom:14px">A pipeline that fits your <span class="hl">workflow</span>.</h2>
+      <div class="diagram reveal" style="--i:2">
+        <svg viewBox="0 0 1240 600" role="img" aria-label="hone architecture diagram">
+          <defs>
+            <marker id="ah" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+              <path d="M0,0 L9,4.5 L0,9 z" fill="#ffb000"/>
+            </marker>
+            <marker id="aht" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+              <path d="M0,0 L9,4.5 L0,9 z" fill="#5bbcb2"/>
+            </marker>
+          </defs>
+
+          <!-- SOURCES -->
+          <text x="40" y="40" class="d-cap">SOURCES</text>
+          <g>
+            <rect x="36" y="120" width="216" height="78" rx="11" fill="#12161c" stroke="rgba(236,234,227,.12)"/>
+            <text x="58" y="153" class="d-lab">lore.kernel.org</text>
+            <text x="58" y="174" class="d-sub">mailing-list patch series</text>
+          </g>
+          <g>
+            <rect x="36" y="360" width="216" height="78" rx="11" fill="#12161c" stroke="rgba(236,234,227,.12)"/>
+            <text x="58" y="393" class="d-lab">developer uploads</text>
+            <text x="58" y="414" class="d-sub">your series, pre-send</text>
+          </g>
+
+          <!-- CORE -->
+          <rect x="312" y="78" width="372" height="452" rx="16" fill="rgba(255,176,0,.045)" stroke="#ffb000" stroke-opacity=".55"/>
+          <text x="336" y="112" class="d-title">HONE-CORE</text>
+          <text x="664" y="112" class="d-cap" text-anchor="end">orchestrator</text>
+          <g>
+            <rect x="344" y="138" width="308" height="50" rx="9" fill="#161b22" stroke="rgba(236,234,227,.12)"/>
+            <text x="362" y="168" class="d-lab">gather</text>
+            <text x="636" y="168" class="d-sub" text-anchor="end">ingest + normalize</text>
+          </g>
+          <g>
+            <rect x="344" y="200" width="308" height="50" rx="9" fill="#161b22" stroke="rgba(236,234,227,.12)"/>
+            <text x="362" y="230" class="d-lab">prepare</text>
+            <text x="636" y="230" class="d-sub" text-anchor="end">Tier-0 + LLM</text>
+          </g>
+          <g>
+            <rect x="344" y="262" width="308" height="50" rx="9" fill="#161b22" stroke="rgba(236,234,227,.12)"/>
+            <text x="362" y="292" class="d-lab">work queue</text>
+            <text x="636" y="292" class="d-sub" text-anchor="end">claimable tasks</text>
+          </g>
+          <!-- corpus cylinder -->
+          <g>
+            <rect x="344" y="350" width="308" height="150" rx="10" fill="#0f1318" stroke="rgba(255,176,0,.35)"/>
+            <ellipse cx="498" cy="350" rx="154" ry="14" fill="#0f1318" stroke="rgba(255,176,0,.35)"/>
+            <text x="362" y="402" class="d-lab">corpus &amp; methodology</text>
+            <text x="362" y="424" class="d-sub">patchsets · reviews · concerns</text>
+            <text x="362" y="444" class="d-sub">versioned checks · statistics</text>
+          </g>
+
+          <!-- NODE FLEET -->
+          <text x="1204" y="40" class="d-cap" text-anchor="end">HORIZONTAL FLEET ×N</text>
+          <rect x="836" y="150" width="330" height="186" rx="13" fill="#0d1216" stroke="rgba(91,188,178,.22)"/>
+          <rect x="824" y="138" width="330" height="186" rx="13" fill="#0e1419" stroke="rgba(91,188,178,.3)"/>
+          <rect x="812" y="126" width="330" height="186" rx="13" fill="#10171c" stroke="#5bbcb2" stroke-opacity=".55"/>
+          <text x="834" y="158" class="d-tealt">HONE-NODE</text>
+          <text x="1130" y="158" class="d-cap" text-anchor="end">worker</text>
+          <line x1="834" y1="172" x2="1120" y2="172" stroke="rgba(91,188,178,.18)"/>
+          <text x="834" y="200" class="d-sub">› claim a task</text>
+          <text x="834" y="226" class="d-sub">› stage kernel worktree @ base-commit</text>
+          <text x="834" y="252" class="d-sub">› agentic Claude review (reads the tree)</text>
+          <text x="834" y="284" class="d-lab" fill="#5bbcb2">→ concerns</text>
+
+          <!-- WEB UI -->
+          <rect x="812" y="404" width="330" height="118" rx="13" fill="#12161c" stroke="rgba(236,234,227,.12)"/>
+          <text x="834" y="438" class="d-title" style="font-size:13px">WEB UI</text>
+          <text x="834" y="464" class="d-sub">developers · My Patchsets</text>
+          <text x="834" y="486" class="d-sub">reports · statistics over time</text>
+          <text x="834" y="508" class="d-sub">methodology editor</text>
+
+          <!-- FLOWS -->
+          <!-- sources -> core -->
+          <path d="M252,158 H300 V160 H308" fill="none" stroke="#ffb000" stroke-width="1.6" marker-end="url(#ah)"/>
+          <path d="M252,392 H280 V288 H308" fill="none" stroke="#ffb000" stroke-width="1.6" marker-end="url(#ah)"/>
+          <!-- core queue <-> fleet -->
+          <path d="M684,278 H748 V200 H806" fill="none" stroke="#ffb000" stroke-width="1.8" marker-end="url(#ah)"/>
+          <text x="700" y="232" class="d-flowlab">claim</text>
+          <path d="M806,250 H744 V300 H684" fill="none" stroke="#5bbcb2" stroke-width="1.8" marker-end="url(#aht)"/>
+          <text x="690" y="324" class="d-flowlab" fill="#5bbcb2">submit</text>
+          <!-- core -> webui (stats/results) -->
+          <path d="M684,430 H760 V440 H806" fill="none" stroke="#ffb000" stroke-width="1.6" marker-end="url(#ah)"/>
+          <!-- feedback loop: webui -> core (revise checks) -->
+          <path d="M812,500 H700 Q560,500 560,540 H372 Q336,540 336,500 V470" fill="none"
+                stroke="#ffb000" stroke-width="1.5" stroke-dasharray="5 5" marker-end="url(#ah)" opacity=".8"/>
+          <text x="540" y="565" class="d-flowlab" text-anchor="middle">revise methodology &amp; checks → re-review</text>
+        </svg>
+      </div>
+    </div>
+  </section>
+
+  <!-- 5 — DEV WORKFLOW -->
+  <section class="slide">
+    <div class="wrap">
+      <div class="kicker reveal" style="--i:0">Benefit 01 — new developer workflow</div>
+      <h2 class="reveal" style="--i:1">Feedback <span class="hl">before</span> you hit send.</h2>
+      <p class="lede reveal" style="--i:2">Upload a series — or let hone pull yours straight from lore — and get a full, code-aware review in <span class="am">minutes, not days</span>. Triage the concerns, iterate, send a cleaner v2. It won't catch everything — but every contributor gets a fast, consistent first pass, and it <span class="am">improves with every revision</span>.</p>
+      <div class="note reveal" style="--i:3">
+        <div class="nl">The first-patch problem</div>
+        <p>The bar to a first kernel contribution is high, and early mistakes play out <b>in public</b> — on the lists, under your company's domain, permanently archived. hone is the private dry-run: catch the obvious problems <b>before a developer's first patch ever reaches the mailing list</b>.</p>
+      </div>
+      <div class="rows reveal" style="--i:4">
+        <div class="r head"><span>My Patchsets</span><span>state</span><span>concerns</span></div>
+        <div class="r"><span class="subj">drm/msm: Add PERFCNTR_CONFIG ioctl</span><span class="badge ok">reviewed</span><span class="ct2">7 concerns</span></div>
+        <div class="r"><span class="subj">net: fix race in rx teardown</span><span class="badge run">reviewing</span><span class="ct2">—</span></div>
+        <div class="r"><span class="subj">pci: refactor perst gpio handling</span><span class="badge wait">queued</span><span class="ct2">—</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 6 — SCALABILITY -->
+  <section class="slide">
+    <div class="wrap">
+      <div class="kicker reveal" style="--i:0">Benefit 02 — scale</div>
+      <h2 class="reveal" style="--i:1">Throughput is just <span class="hl">node count</span>.</h2>
+      <p class="lede reveal" style="--i:2">A <span class="em">hone-node</span> claims a task, stages its own kernel worktree, reviews, and submits — then claims the next. Each is token-budgeted, self-healing, and reports its health. Add nodes and review capacity scales <span class="am">horizontally</span>. One node or fifty, same pipeline.</p>
+      <div class="fleet reveal" style="--i:3">
+        <div class="node"><div class="h">node-01</div><div class="bars">
+          <div class="bar"><i style="--w:82%"></i></div><div class="bar"><i style="--w:64%"></i></div><div class="bar"><i style="--w:90%"></i></div></div></div>
+        <div class="node"><div class="h">node-02</div><div class="bars">
+          <div class="bar"><i style="--w:70%"></i></div><div class="bar"><i style="--w:88%"></i></div><div class="bar"><i style="--w:55%"></i></div></div></div>
+        <div class="node"><div class="h">node-03</div><div class="bars">
+          <div class="bar"><i style="--w:60%"></i></div><div class="bar"><i style="--w:75%"></i></div><div class="bar"><i style="--w:84%"></i></div></div></div>
+        <div class="node more">+</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 7 — STATISTICS -->
+  <section class="slide">
+    <div class="wrap">
+      <div class="kicker reveal" style="--i:0">Benefit 03 — statistics over time</div>
+      <h2 class="reveal" style="--i:1">Every review <span class="hl">compounds</span> into data.</h2>
+      <p class="lede reveal" style="--i:2">Corpus-wide analytics: which checks fire, by subsystem and patch type; reviewer trends; cost per review — all tracked across methodology versions with honest confidence intervals. Spot regressions in <span class="am">your own process</span>, not just the code.</p>
+      <div class="chart reveal" style="--i:3">
+        <div class="crow"><div class="cl">concurrency</div><div class="ct"><i style="--w:50%"></i></div><div class="cv">50%</div></div>
+        <div class="crow"><div class="cl">efficacy / root-cause</div><div class="ct"><i style="--w:50%"></i></div><div class="cv">50%</div></div>
+        <div class="crow"><div class="cl">documented-contract</div><div class="ct"><i style="--w:40%"></i></div><div class="cv">40%</div></div>
+        <div class="crow"><div class="cl">function-contract</div><div class="ct"><i style="--w:40%"></i></div><div class="cv">40%</div></div>
+        <div class="crow"><div class="cl">error-teardown</div><div class="ct"><i style="--w:36%"></i></div><div class="cv">36%</div></div>
+      </div>
+      <div class="chart-note reveal" style="--i:4">// fire rate per check — the data that tells you which checks earn their keep</div>
+    </div>
+  </section>
+
+  <!-- 8 — REVISABLE CHECKS -->
+  <section class="slide">
+    <div class="wrap">
+      <div class="kicker reveal" style="--i:0">Benefit 04 — revise the checks</div>
+      <h2 class="reveal" style="--i:1">Your methodology, <span class="hl">versioned</span>.</h2>
+      <p class="lede reveal" style="--i:2">The review methodology is a living document — principles, stages, and a set of bug-class <span class="em">checks you can add, tune, or retire</span>. Every version is tracked, coverage is measured, and hone learns from real maintainer comments to <span class="am">propose new checks</span>. Tighten review the same way you tighten code.</p>
+      <div class="checks reveal" style="--i:3">
+        <div class="chk">object-lifetime</div>
+        <div class="chk">concurrency</div>
+        <div class="chk">lock-storage-lifetime</div>
+        <div class="chk">integer-safety</div>
+        <div class="chk">error-teardown</div>
+        <div class="chk">function-contract</div>
+        <div class="chk">documented-contract</div>
+        <div class="chk">subsystem-checklists</div>
+        <div class="chk"><span>+ your own…</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 9 — CLOSE -->
+  <section class="slide close">
+    <div class="wrap">
+      <div class="kicker reveal" style="--i:0">Let's talk</div>
+      <h2 class="reveal" style="--i:1">Review every patch — and <span class="hl">improve every week</span>.</h2>
+      <p class="lede reveal" style="--i:2">It won't catch everything today — but it runs on <span class="em">your</span> infrastructure, against <span class="em">your</span> trees, under <span class="em">your</span> methodology, and the checks, the data, and the results <span class="am">compound over time</span>. Self-hosted, fleet-scaled, fully auditable.</p>
+      <div class="cta reveal" style="--i:3">
+        <span class="btn">Pilot it on one subsystem</span>
+        <span class="btn ghost">hone // a kernel-review system</span>
+      </div>
+    </div>
+  </section>
+
+</div>
+
+<div class="nav">
+  <span class="counter">› <b id="cur">01</b> / 09</span>
+  <div class="dots" id="dots"></div>
+  <div class="arrows">
+    <button id="prev" aria-label="previous">←</button>
+    <button id="next" aria-label="next">→</button>
+  </div>
+</div>
+<div class="nav" style="bottom:auto;top:auto;position:fixed;left:0;right:0;bottom:0;justify-content:center;pointer-events:none;padding-bottom:54px">
+  <span class="hint">← → arrows · space · or click the dots</span>
+</div>
+
+<script>
+  const slides = Array.from(document.querySelectorAll('.slide'));
+  const total = slides.length;
+  const dotsWrap = document.getElementById('dots');
+  const pad = n => String(n).padStart(2,'0');
+  let idx = 0;
+
+  slides.forEach((_,i)=>{
+    const b=document.createElement('button');
+    b.addEventListener('click',()=>go(i));
+    dotsWrap.appendChild(b);
+  });
+  const dots = Array.from(dotsWrap.children);
+
+  function go(n){
+    idx = Math.max(0, Math.min(total-1, n));
+    slides.forEach((s,i)=>s.classList.toggle('active', i===idx));
+    dots.forEach((d,i)=>d.classList.toggle('on', i===idx));
+    document.getElementById('progress').style.width = ((idx+1)/total*100)+'%';
+    document.getElementById('cur').textContent = pad(idx+1);
+    document.getElementById('topcount').textContent = pad(idx+1)+' — '+pad(total);
+  }
+  function next(){ go(idx+1); }
+  function prev(){ go(idx-1); }
+
+  document.getElementById('next').addEventListener('click',next);
+  document.getElementById('prev').addEventListener('click',prev);
+  window.addEventListener('keydown',e=>{
+    if(['ArrowRight','ArrowDown',' ','PageDown'].includes(e.key)){e.preventDefault();next();}
+    else if(['ArrowLeft','ArrowUp','PageUp'].includes(e.key)){e.preventDefault();prev();}
+    else if(e.key==='Home'){go(0);} else if(e.key==='End'){go(total-1);}
+  });
+  // advance on click of the stage (not on nav/dots/buttons)
+  document.querySelector('.stage').addEventListener('click',e=>{
+    if(e.target.closest('.nav')) return;
+    if(e.clientX < window.innerWidth*0.32) prev(); else next();
+  });
+  go(0);
+</script>
+</body>
+</html>
