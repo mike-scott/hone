@@ -874,6 +874,32 @@ _PREPARE_METADATA_FIELDS = ("tree_state", "subsystem", "patch_size",
                             "preparation_notes")
 
 
+def _notify_submit_outcome(db, task_type, outcome, root, claim_id, node_owner):
+    """Fan a terminal prepare/review outcome out to the patchset's tracking
+       users (uploader + claimants), excluding the node owner who produced it.
+       review_ready keys on the (stable) ai_review id so a re-review doesn't
+       re-notify; the failure events key on the claim so each terminal attempt
+       notifies once. Transient `deferred` outcomes auto-retry and are skipped."""
+    ps = core_db.get_patchset(db, root)
+    subj = (ps["subject"] if ps and ps["subject"] else root)
+    if task_type == "review" and outcome == "reviewed":
+        rid = core_db.get_ai_review(db, root)
+        core_db.notify_patchset_users(
+            db, root, type=core_db.NOTIF_TYPE_REVIEW_READY,
+            dedup_key=f"review_ready:{root}:{rid['id'] if rid else claim_id}",
+            title=f"Review ready: {subj}", exclude_user_id=node_owner)
+    elif task_type == "review" and outcome == "unappliable":
+        core_db.notify_patchset_users(
+            db, root, type=core_db.NOTIF_TYPE_REVIEW_FAILED,
+            dedup_key=f"review_failed:{root}:{claim_id}",
+            title=f"Review couldn't run: {subj}", exclude_user_id=node_owner)
+    elif task_type == "prepare" and outcome == "uncharacterisable":
+        core_db.notify_patchset_users(
+            db, root, type=core_db.NOTIF_TYPE_PREPARE_FAILED,
+            dedup_key=f"prepare_failed:{root}:{claim_id}",
+            title=f"Couldn't prepare: {subj}", exclude_user_id=node_owner)
+
+
 @router.post("/claims/{claim_id}/result")
 def submit_result(claim_id: str, request: Request, body: dict,
                   node: dict = Depends(require_node)):
@@ -976,6 +1002,13 @@ def submit_result(claim_id: str, request: Request, body: dict,
                 # each concern_id's severity + is_preexisting from the
                 # prior ai_review; deferred until the train task handler
                 # is implemented (see ARCHITECTURE.md → Today vs. target).
+                pass
+            # User notifications for terminal outcomes — best-effort: a
+            # notification failure must never fail the node's submit.
+            try:
+                _notify_submit_outcome(db, task_type, outcome, root, claim_id,
+                                       node.get("owner_user_id"))
+            except Exception:
                 pass
         return {"status": result}
 

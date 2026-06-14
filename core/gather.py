@@ -115,6 +115,14 @@ def _ingest_ref(db, module, ref):
         core_db.maybe_enqueue_prepare(db, ref.root_message_id)
         return "patchsets"
     if isinstance(ref, gather_api.MessageRef):
+        # Detect a genuinely-new comment BEFORE the upsert: upsert_message is
+        # ON CONFLICT DO UPDATE, so it can't tell new from re-seen, and gather
+        # re-runs the whole stream. Only new comments fan out a notification.
+        is_new_comment = (
+            ref.type == core_db.MSG_TYPE_COMMENT
+            and db.execute("SELECT 1 FROM messages WHERE message_id=?",
+                           (core_db.norm_msgid(ref.message_id),)).fetchone()
+                is None)
         core_db.upsert_message(
             db, ref.message_id,
             root_message_id=ref.root_message_id,
@@ -125,9 +133,17 @@ def _ingest_ref(db, module, ref):
             author_email=ref.author_email or None,
             subject=ref.subject or None, sent=ref.sent)
         # A landing patch message may complete the patchset, but review is
-        # operator-triggered, not auto-enqueued — nothing fires here.
-        # Comments are inert at gather time too; they're the corpus a
-        # future training session will draw from.
+        # operator-triggered, not auto-enqueued — nothing fires here. A new
+        # comment notifies anyone tracking the series (no-op when unowned —
+        # the common case). The (user, dedup_key) UNIQUE is the real re-run
+        # guard; the pre-check just skips the work for re-seen comments.
+        if is_new_comment:
+            who = ref.author_name or ref.author_email or "someone"
+            core_db.notify_patchset_users(
+                db, ref.root_message_id,
+                type=core_db.NOTIF_TYPE_NEW_COMMENT,
+                dedup_key=f"comment:{core_db.norm_msgid(ref.message_id)}",
+                title=f"New comment from {who}")
         return "messages"
     raise TypeError(f"{module.name}: unknown ref type {type(ref).__name__}")
 

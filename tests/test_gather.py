@@ -342,3 +342,38 @@ def test_supervisor_cancels_a_stalled_task():
     _, to_cancel = gather._plan_tick(
         reg, now=1000.0, enabled=["a"], interval=600, stall_after=900)
     assert to_cancel == ["a"]
+
+
+# --- new-comment notifications --------------------------------------------
+
+def test_gather_new_comment_notifies_trackers_once(db):
+    """A new comment on a TRACKED patchset notifies its owner; re-running the
+       same stream (idempotent gather) does not duplicate the notification;
+       and patches/cover don't notify."""
+    uid = core_db.create_user(db, "u@x", "U", "local")
+    core_db.set_user_state(db, uid, "approved")
+    # An uploaded series this user tracks.
+    core_db.upsert_patchset(db, "<p1@x>", subject="s", n_patches=1,
+                            origin=core_db.PATCHSET_ORIGIN_UPLOADED,
+                            uploaded_by_user_id=uid)
+    refs = [
+        _msg_ref("<m1@x>", root="<p1@x>", cursor="1"),          # a patch — no notif
+        _msg_ref("<c1@x>", root="<p1@x>", type=core_db.MSG_TYPE_COMMENT,
+                 parent="<m1@x>", body="LGTM", cursor="2"),     # a comment — notif
+    ]
+    gather._gather_source(db, _FakeModule(refs))
+    notes = core_db.list_notifications(db, uid)
+    assert len(notes) == 1
+    assert notes[0]["type"] == core_db.NOTIF_TYPE_NEW_COMMENT
+    # Re-run the whole stream — re-upserts the comment, must NOT re-notify.
+    gather._gather_source(db, _FakeModule(refs))
+    assert len(core_db.list_notifications(db, uid)) == 1
+
+
+def test_gather_comment_on_unowned_patchset_no_notification(db):
+    core_db.upsert_patchset(db, "<p1@x>", subject="s", n_patches=1)   # unowned
+    gather._gather_source(db, _FakeModule([
+        _msg_ref("<c1@x>", root="<p1@x>", type=core_db.MSG_TYPE_COMMENT,
+                 body="hi", cursor="1"),
+    ]))
+    assert db.execute("SELECT count(*) FROM notifications").fetchone()[0] == 0
