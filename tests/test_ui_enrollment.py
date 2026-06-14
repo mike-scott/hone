@@ -191,6 +191,65 @@ def test_node_detail_renders_header_health_claims_and_reviews(ctx):
     assert 'href="/nodes"' in body
 
 
+def test_node_detail_renders_refrepo_churn_signals(ctx):
+    """The reference-repo instrumentation (anchors / last fetch / last gc)
+       renders on the detail Health card in operator-friendly units, so the
+       delta-vs-full-refetch signal is visible without a DB query."""
+    enr = core_db.create_enrollment(ctx.db, node_name="builder-7")
+    node_id = core_db.approve_enrollment(ctx.db, enr["user_code"])
+    core_db.update_node_health(ctx.db, node_id, {
+        "free_disk_mb": 2048, "refrepo_size_mb": 800,
+        "last_anthropic_error": None,
+        "refrepo_tracking_refs": 7,
+        "refrepo_fetch": {"commit": "deadbeefcafe", "remote": "stable",
+                          "objects_added": 4231, "ms": 1200},
+        "refrepo_gc": {"size_mb_before": 8300, "size_mb_after": 1200,
+                       "tracking_refs": 7, "ms": 3400, "ok": True}})
+    body = ctx.client.get(f"/nodes/{node_id}").text
+    assert "Ancestry anchors" in body
+    assert "Last base fetch" in body and "4,231 objs from stable" in body
+    assert "Last gc" in body and "8.1 GB" in body and "3.4 s" in body
+    assert "failed" not in body                       # ok=True → no failure mark
+
+
+def test_node_detail_omits_refrepo_rows_for_old_snapshot(ctx):
+    """A snapshot predating the instrumentation (no refrepo_* fields) adds
+       no churn rows — the card degrades to the original four."""
+    enr = core_db.create_enrollment(ctx.db, node_name="builder-7")
+    node_id = core_db.approve_enrollment(ctx.db, enr["user_code"])
+    core_db.update_node_health(ctx.db, node_id, {
+        "free_disk_mb": 2048, "refrepo_size_mb": 800,
+        "last_anthropic_error": None})
+    body = ctx.client.get(f"/nodes/{node_id}").text
+    assert "Ancestry anchors" not in body
+    assert "Last base fetch" not in body and "Last gc" not in body
+
+
+def test_refrepo_health_display_partials_and_failure():
+    """Unit-level: each sub-field is independent (a fetched-but-not-gc'd
+       node shows the fetch, omits gc), and a failed gc carries ok=False
+       for the template's failure mark. A pre-instrumentation snapshot
+       returns None so no rows render."""
+    from core import ui
+    assert ui._refrepo_health_display({"free_disk_mb": 1}) is None
+    # anchors + fetch present, no gc yet (just restarted, one fetch done)
+    d = ui._refrepo_health_display({
+        "refrepo_tracking_refs": 3,
+        "refrepo_fetch": {"remote": "mainline", "objects_added": 50, "ms": 90}})
+    assert d["anchors"] == "3" and "from mainline" in d["fetch"]
+    assert "90 ms" in d["fetch"] and "gc" not in d
+    # failed gc surfaces ok=False
+    d2 = ui._refrepo_health_display({
+        "refrepo_tracking_refs": 0,
+        "refrepo_gc": {"size_mb_before": 5, "size_mb_after": 5,
+                       "tracking_refs": 0, "ms": 10, "ok": False}})
+    assert d2["gc_ok"] is False and d2["anchors"] == "0"
+    # a None objects_added (count-objects failed) degrades to em-dash
+    d3 = ui._refrepo_health_display({
+        "refrepo_fetch": {"remote": "net", "objects_added": None, "ms": 5}})
+    assert "—" in d3["fetch"]
+
+
 def test_node_detail_404_for_unknown_id(ctx):
     r = ctx.client.get("/nodes/99999")
     assert r.status_code == 404

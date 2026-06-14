@@ -2222,6 +2222,58 @@ def _token_budget_display(tb):
     return {"text": " · ".join(parts), "exhausted": tb.get("exhausted")}
 
 
+def _count_display(n):
+    """Render an integer count (objects, refs) with thousands separators,
+       or `—` when it's missing or non-numeric (a None objects_added when
+       the node's count-objects call failed, a pre-field snapshot)."""
+    if not isinstance(n, (int, float)) or isinstance(n, bool):
+        return "—"
+    return f"{int(n):,}"
+
+
+def _ms_display(ms):
+    """Render a millisecond duration as `820 ms` or `3.4 s`, or `—` when
+       missing."""
+    if not isinstance(ms, (int, float)) or isinstance(ms, bool):
+        return "—"
+    if ms >= 1000:
+        return f"{ms / 1000:.1f} s"
+    return f"{int(ms)} ms"
+
+
+def _refrepo_health_display(health):
+    """The reference-repo churn signals — ancestry anchors, the last base
+       fetch, the last gc — surfaced so an operator can see whether
+       `gc --prune=now` keeps base fetches delta-cheap (anchors > 0, a
+       fetch adds a few thousand objects) or has collapsed the shared
+       history (anchors 0, a fetch re-pulls millions). Returns None when
+       the snapshot predates this instrumentation, so the template adds no
+       rows for an older node. Each sub-field is independently optional: a
+       node that has fetched but not yet gc'd this process (or just
+       restarted) shows what it has and omits the rest."""
+    if not isinstance(health, dict):
+        return None
+    anchors = health.get("refrepo_tracking_refs")
+    fetch = health.get("refrepo_fetch")
+    gc = health.get("refrepo_gc")
+    if anchors is None and fetch is None and gc is None:
+        return None
+    out = {}
+    if anchors is not None:
+        out["anchors"] = _count_display(anchors)
+    if isinstance(fetch, dict):
+        remote = fetch.get("remote") or "?"
+        out["fetch"] = (f"+{_count_display(fetch.get('objects_added'))} objs "
+                        f"from {remote} · {_ms_display(fetch.get('ms'))}")
+    if isinstance(gc, dict):
+        out["gc"] = (f"{_mb_display(gc.get('size_mb_before'))} → "
+                     f"{_mb_display(gc.get('size_mb_after'))} · "
+                     f"{_ms_display(gc.get('ms'))} · "
+                     f"{_count_display(gc.get('tracking_refs'))} anchors")
+        out["gc_ok"] = gc.get("ok")
+    return out or None
+
+
 def _health_display(health):
     """Turn a stored node-health JSON snapshot into the small dict the
        template renders. Returns None when the node hasn't reported
@@ -2242,6 +2294,9 @@ def _health_display(health):
         # %-of-cap spent per enabled budget window — None when the node
         # has no token budget configured (it's opt-in).
         "token_budget":   _token_budget_display(health.get("token_budget")),
+        # Reference-repo churn signals (anchors / last fetch / last gc) —
+        # None for snapshots predating the refrepo instrumentation.
+        "refrepo":        _refrepo_health_display(health),
     }
 
 
