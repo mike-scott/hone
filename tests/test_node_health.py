@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from node import ai, health
+from node import ai, health, refrepo
 
 
 def _cfg(data_dir="/data", repo_dir="/data/linux", min_free_disk_mb=0):
@@ -67,6 +67,12 @@ def test_collect_packages_the_snapshot_fields(monkeypatch):
     monkeypatch.setattr(health, "_refrepo_size_mb", lambda p: 4500)
     monkeypatch.setattr(ai, "_LAST_ERROR", "rate_limit")
     monkeypatch.setattr(ai, "get_cli_version", lambda: "2.1.161 (Claude Code)")
+    # The refrepo instrumentation getters read process-global state other
+    # tests mutate; patch them to fixed values so this exact-match stays
+    # hermetic (their own behaviour is covered in test_node_refrepo).
+    monkeypatch.setattr(refrepo, "tracking_ref_count", lambda: 7)
+    monkeypatch.setattr(refrepo, "last_fetch_stats", lambda: None)
+    monkeypatch.setattr(refrepo, "last_gc_stats", lambda: None)
     snap = health.collect(_cfg())
     assert snap == {
         "free_disk_mb":         1024,
@@ -80,6 +86,9 @@ def test_collect_packages_the_snapshot_fields(monkeypatch):
         "token_budget":         {"day_tokens": 0, "day_limit": 0,
                                  "week_tokens": 0, "week_limit": 0,
                                  "exhausted": None},
+        "refrepo_tracking_refs": 7,
+        "refrepo_fetch":        None,
+        "refrepo_gc":           None,
     }
 
 

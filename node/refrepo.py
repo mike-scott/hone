@@ -22,13 +22,15 @@ CLI:
   refrepo.py status                     repo size + live worktrees
 
 Importable: prepare(), cleanup(), sweep_worktrees(), gc(), size_mb(),
-base_of(), have().
+base_of(), have(), tracking_ref_count(), last_fetch_stats(),
+last_gc_stats().
 """
 import os
 import re
 import shutil
 import subprocess
 import sys
+import time
 
 from node import cgit
 
@@ -47,6 +49,19 @@ REMOTES = {t.name: t.git_url for t in cgit.DEFAULT_TREES}
 
 BASE_RE = re.compile(r'^base-commit:\s*([0-9a-f]{12,40})\b', re.I | re.M)
 
+# Instrumentation surfaced in the health snapshot to confirm whether
+# `gc --prune=now` forces full-ancestry re-fetches under thrash. The
+# question: by-SHA prepare() fetches write no refs/remotes/* tracking
+# branch, so once a worktree is cleaned up its base is unreachable and
+# the next gc prunes it; only full `git fetch <tree>` (resolve_tip)
+# leaves a durable anchor. If anchors survive, later base fetches add a
+# few thousand objects (a delta); if not, they re-pull the whole kernel
+# (millions). These two process-local snapshots — the most recent fetch
+# and the most recent gc — let us tell the two regimes apart from fleet
+# data. Best-effort, reset on restart; read by health.collect().
+_last_fetch_stats = None
+_last_gc_stats = None
+
 
 def _git(*args):
     return subprocess.run(["git", "-C", REPO, *args],
@@ -61,6 +76,50 @@ def have(commit):
 def _ensure_remote(name):
     if name in REMOTES and _git("remote", "get-url", name).returncode != 0:
         _git("remote", "add", name, REMOTES[name])
+
+
+def _object_count():
+    """Total objects in the ODB (loose + packed), via `count-objects -v`,
+       or None if it can't be read. Cheap — reads the objects-dir summary,
+       never walks history — so the object delta across a fetch is a free
+       proxy for delta-pull (a few thousand) vs full-ancestry pull (millions)."""
+    r = _git("count-objects", "-v")
+    if r.returncode != 0:
+        return None
+    counts = {}
+    for line in r.stdout.splitlines():
+        k, _, v = line.partition(": ")
+        try:
+            counts[k] = int(v)
+        except ValueError:
+            pass
+    if "count" not in counts and "in-pack" not in counts:
+        return None
+    return counts.get("count", 0) + counts.get("in-pack", 0)
+
+
+def tracking_ref_count():
+    """How many refs/remotes/* tracking branches exist — the durable anchors
+       that survive `gc --prune=now` and let later base fetches negotiate a
+       delta instead of re-pulling full ancestry. Only full `git fetch <tree>`
+       (resolve_tip) writes these; by-SHA prepare() fetches don't. None if the
+       repo isn't there or the call fails."""
+    r = _git("for-each-ref", "--format=%(refname)", "refs/remotes")
+    if r.returncode != 0:
+        return None
+    return sum(1 for line in r.stdout.splitlines() if line.strip())
+
+
+def last_fetch_stats():
+    """The most recent base fetch's transfer stats this process, or None when
+       no fetch has happened yet (an already-present base needs none)."""
+    return _last_fetch_stats
+
+
+def last_gc_stats():
+    """The most recent gc's before/after size, anchor count and duration this
+       process, or None when no gc has run yet."""
+    return _last_gc_stats
 
 
 def is_initialized():
@@ -127,12 +186,27 @@ def prepare(commit, wt_dir, *, base_tree=None):
        is fetched first, falling back to the full serial scan."""
     status = "present"
     if not have(commit):
+        global _last_fetch_stats
+        before = _object_count()
+        t0 = time.monotonic()
+        hit = None
         for name in _fetch_order(base_tree):
             _ensure_remote(name)
             _git("fetch", "--quiet", name, commit)
             if have(commit):
                 status = "fetched"
+                hit = name
                 break
+        if status == "fetched":
+            after = _object_count()
+            _last_fetch_stats = {
+                "commit": commit[:12],
+                "remote": hit,
+                "objects_added": (after - before
+                                  if before is not None and after is not None
+                                  else None),
+                "ms": round((time.monotonic() - t0) * 1000),
+            }
     if not have(commit):
         raise RuntimeError(
             f"base {commit} not found in {', '.join(REMOTES)} — "
@@ -207,8 +281,22 @@ def sweep_worktrees(scratch_dir):
 
 def gc():
     """Bound the repo — discard the unreachable churn that arbitrary base
-       fetches (especially daily-rebased linux-next) leave behind."""
-    return _git("gc", "--prune=now").returncode == 0
+       fetches (especially daily-rebased linux-next) leave behind. Records
+       before/after size, surviving anchor count and duration into
+       _last_gc_stats for the health snapshot — the post-gc tracking-ref
+       count is what tells us whether shared ancestry survives the prune."""
+    global _last_gc_stats
+    before = size_mb()
+    t0 = time.monotonic()
+    ok = _git("gc", "--prune=now").returncode == 0
+    _last_gc_stats = {
+        "size_mb_before": before,
+        "size_mb_after": size_mb(),
+        "tracking_refs": tracking_ref_count(),
+        "ms": round((time.monotonic() - t0) * 1000),
+        "ok": ok,
+    }
+    return ok
 
 
 def size_mb():

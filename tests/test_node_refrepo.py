@@ -233,3 +233,107 @@ def test_size_mb_zero_when_du_fails(monkeypatch):
                         lambda *a, **k: SimpleNamespace(
                             returncode=1, stdout="", stderr="du: error"))
     assert refrepo.size_mb() == 0
+
+
+# --- instrumentation: object count, anchors, fetch & gc stats --------------
+# These surface in the health snapshot to tell a cheap delta fetch (a few
+# thousand objects, anchors intact) from a full-ancestry re-pull that
+# gc --prune=now forced (millions, no surviving anchor).
+
+def test_object_count_sums_loose_and_packed(monkeypatch):
+    out = ("count: 12\nsize: 48\nin-pack: 9000\n"
+           "packs: 1\nsize-pack: 50000\nprune-packable: 0\n")
+    monkeypatch.setattr(refrepo, "_git",
+                        lambda *a: SimpleNamespace(returncode=0, stdout=out,
+                                                   stderr=""))
+    assert refrepo._object_count() == 9012            # loose + in-pack
+
+
+def test_object_count_none_when_call_fails(monkeypatch):
+    monkeypatch.setattr(refrepo, "_git",
+                        lambda *a: SimpleNamespace(returncode=1, stdout="",
+                                                   stderr="not a git repo"))
+    assert refrepo._object_count() is None
+
+
+def test_tracking_ref_count_counts_remote_refs(monkeypatch):
+    out = "refs/remotes/mainline/master\nrefs/remotes/stable/linux-6.6.y\n\n"
+    monkeypatch.setattr(refrepo, "_git",
+                        lambda *a: SimpleNamespace(returncode=0, stdout=out,
+                                                   stderr=""))
+    assert refrepo.tracking_ref_count() == 2          # blank line ignored
+
+
+def test_tracking_ref_count_none_when_call_fails(monkeypatch):
+    monkeypatch.setattr(refrepo, "_git",
+                        lambda *a: SimpleNamespace(returncode=128, stdout="",
+                                                   stderr="error"))
+    assert refrepo.tracking_ref_count() is None
+
+
+def test_prepare_records_fetch_object_delta(monkeypatch):
+    """A fetch stamps last_fetch_stats with the hit remote, the short commit
+       and the object delta across the fetch — the delta-vs-full signal."""
+    fetched = []
+    counts = iter(["count: 10\nin-pack: 0\n",         # before the fetch
+                   "count: 5\nin-pack: 4000\n"])      # after the fetch
+    def fake_git(*args):
+        if args[0] == "count-objects":
+            return SimpleNamespace(returncode=0, stdout=next(counts), stderr="")
+        if args[0] == "fetch":
+            fetched.append(args[2])
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    monkeypatch.setattr(refrepo, "_git", fake_git)
+    monkeypatch.setattr(refrepo, "have", lambda c: bool(fetched))
+    monkeypatch.setattr(refrepo.os.path, "lexists", lambda p: False)
+    monkeypatch.setattr(refrepo, "_last_fetch_stats", None, raising=False)
+
+    refrepo.prepare("deadbeefcafe99", "/tmp/wt", base_tree="stable")
+
+    s = refrepo.last_fetch_stats()
+    assert s["remote"] == "stable"
+    assert s["commit"] == "deadbeefcafe"               # 12-char prefix
+    assert s["objects_added"] == (5 + 4000) - (10 + 0)
+    assert isinstance(s["ms"], int)
+
+
+def test_prepare_present_base_leaves_fetch_stats_untouched(monkeypatch):
+    """An already-present base does no fetch, so it must not overwrite the
+       last recorded fetch (the health snapshot keeps showing the real one)."""
+    monkeypatch.setattr(refrepo, "_git",
+                        lambda *a: SimpleNamespace(returncode=0, stdout="",
+                                                   stderr=""))
+    monkeypatch.setattr(refrepo, "have", lambda c: True)   # already present
+    monkeypatch.setattr(refrepo.os.path, "lexists", lambda p: False)
+    sentinel = {"sentinel": True}
+    monkeypatch.setattr(refrepo, "_last_fetch_stats", sentinel, raising=False)
+
+    refrepo.prepare("deadbeef", "/tmp/wt")
+
+    assert refrepo.last_fetch_stats() is sentinel
+
+
+def test_gc_records_size_anchor_and_duration(monkeypatch):
+    sizes = iter([5000, 1200])                         # before, after
+    monkeypatch.setattr(refrepo, "size_mb", lambda: next(sizes))
+    monkeypatch.setattr(refrepo, "tracking_ref_count", lambda: 9)
+    monkeypatch.setattr(refrepo, "_git",
+                        lambda *a: SimpleNamespace(returncode=0, stdout="",
+                                                   stderr=""))
+    assert refrepo.gc() is True
+    s = refrepo.last_gc_stats()
+    assert s["size_mb_before"] == 5000
+    assert s["size_mb_after"] == 1200
+    assert s["tracking_refs"] == 9                     # anchors that survived
+    assert s["ok"] is True
+    assert isinstance(s["ms"], int)
+
+
+def test_gc_records_failure(monkeypatch):
+    monkeypatch.setattr(refrepo, "size_mb", lambda: 0)
+    monkeypatch.setattr(refrepo, "tracking_ref_count", lambda: 0)
+    monkeypatch.setattr(refrepo, "_git",
+                        lambda *a: SimpleNamespace(returncode=1, stdout="",
+                                                   stderr="gc failed"))
+    assert refrepo.gc() is False
+    assert refrepo.last_gc_stats()["ok"] is False

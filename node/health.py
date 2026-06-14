@@ -19,7 +19,7 @@ import os
 import shutil
 import subprocess
 
-from node import ai, budget
+from node import ai, budget, refrepo
 
 log = logging.getLogger("hone.node.health")
 
@@ -82,6 +82,17 @@ def collect(cfg):
            week_tokens / week_limit / exhausted ("daily" | "weekly" |
            None). When exhausted is set, the node has paused claiming
            until the window rolls over at UTC midnight.
+         - refrepo_tracking_refs: count of refs/remotes/* anchors in the
+           reference repo right now — the durable history anchors that
+           survive gc --prune=now. A by-SHA base fetch writes none, so
+           this tells whether shared ancestry persists between gcs.
+         - refrepo_fetch: the most recent base fetch's stats
+           (commit / remote / objects_added / ms), or None. A delta pull
+           adds a few thousand objects; a full-ancestry re-pull adds
+           millions — this is the direct signal that gc --prune=now is
+           or isn't forcing re-downloads under thrash.
+         - refrepo_gc: the most recent gc's stats (size_mb_before /
+           size_mb_after / tracking_refs / ms / ok), or None.
 
        Keep this fast — it runs every tick of the claim loop
        (claude_version is cached per process in node/ai; the budget
@@ -96,4 +107,7 @@ def collect(cfg):
                                      and free < floor),
         "claude_version":       ai.get_cli_version(),
         "token_budget":         budget.status(cfg),
+        "refrepo_tracking_refs": refrepo.tracking_ref_count(),
+        "refrepo_fetch":        refrepo.last_fetch_stats(),
+        "refrepo_gc":           refrepo.last_gc_stats(),
     }
