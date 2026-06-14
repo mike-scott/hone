@@ -38,6 +38,7 @@ import sys
 import threading
 import time
 import uuid
+from urllib.parse import quote as _urlquote
 
 log = logging.getLogger("hone.core_db")
 
@@ -73,6 +74,25 @@ MSG_TYPE_NAMES   = {MSG_TYPE_COVER:   "cover",
 # ---- ai_reviews.source ----
 AI_REVIEW_SOURCE_HONE_NODE = 1
 AI_REVIEW_SOURCE_NAMES     = {AI_REVIEW_SOURCE_HONE_NODE: "hone-node"}
+
+# ---- notifications.type ----
+# In-app user notifications. The `_NAMES` slugs double as the per-user
+# preference keys in users.notification_prefs (a JSON {slug: bool} map;
+# a missing key defaults ON).
+NOTIF_TYPE_REVIEW_READY     = 1
+NOTIF_TYPE_REVIEW_FAILED    = 2
+NOTIF_TYPE_PREPARE_FAILED   = 3
+NOTIF_TYPE_NEW_COMMENT      = 4
+NOTIF_TYPE_PATCHSET_SKIPPED = 5
+NOTIF_TYPE_NODE_HEALTH      = 6
+NOTIF_TYPE_USER_ACCESS      = 7
+NOTIF_TYPE_NAMES = {NOTIF_TYPE_REVIEW_READY:     "review_ready",
+                    NOTIF_TYPE_REVIEW_FAILED:    "review_failed",
+                    NOTIF_TYPE_PREPARE_FAILED:   "prepare_failed",
+                    NOTIF_TYPE_NEW_COMMENT:      "new_comment",
+                    NOTIF_TYPE_PATCHSET_SKIPPED: "patchset_skipped",
+                    NOTIF_TYPE_NODE_HEALTH:      "node_health_alert",
+                    NOTIF_TYPE_USER_ACCESS:      "user_access_request"}
 
 # ---- list_tags.origin ----
 LIST_TAG_ORIGIN_MANIFEST = 1
@@ -991,12 +1011,43 @@ _SCHEMA_V12 = """
 ALTER TABLE ai_reviews ADD COLUMN check_coverage TEXT;
 """
 
+# Migration v13 — in-app user notifications. A generic per-user feed: events
+# (review ready/failed, prepare failed, new comment, patchset skipped, node
+# health alert, user access request) fan out one row per interested user.
+# Generic shape (title + link, nullable root_message_id) so patchset, node, and
+# admin events share one table. UNIQUE(user_id, dedup_key) makes fan-out
+# idempotent (a re-running gather is a no-op). Email-ready: payload JSON +
+# emailed_at for a future delivery worker. users.notification_prefs is a JSON
+# {type-slug: bool} opt-in/out map (missing key = ON).
+_SCHEMA_V13 = """
+CREATE TABLE notifications (
+    id              INTEGER PRIMARY KEY,
+    user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    type            INTEGER NOT NULL,
+    title           TEXT NOT NULL,
+    link            TEXT,
+    root_message_id TEXT REFERENCES patchsets(root_message_id) ON DELETE CASCADE,
+    dedup_key       TEXT NOT NULL,
+    payload         TEXT,
+    created_at      INTEGER NOT NULL,
+    read_at         INTEGER,
+    emailed_at      INTEGER,
+    UNIQUE (user_id, dedup_key)
+);
+CREATE INDEX idx_notifications_unread
+    ON notifications(user_id, created_at DESC) WHERE read_at IS NULL;
+CREATE INDEX idx_notifications_user
+    ON notifications(user_id, created_at DESC);
+ALTER TABLE users ADD COLUMN notification_prefs TEXT;
+"""
+
 # A migration is either a DDL script (executescript) or a Python callable
 # taking the connection — for data fixes SQL can't express (v5 needs a
 # regex). Both run under the same user_version bookkeeping.
 _MIGRATIONS = [_SCHEMA_V1, _SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4,
                _migrate_v5_series_version, _SCHEMA_V6, _SCHEMA_V7,
-               _SCHEMA_V8, _SCHEMA_V9, _SCHEMA_V10, _SCHEMA_V11, _SCHEMA_V12]
+               _SCHEMA_V8, _SCHEMA_V9, _SCHEMA_V10, _SCHEMA_V11, _SCHEMA_V12,
+               _SCHEMA_V13]
 
 
 # How long a connection waits on another connection's write lock before
@@ -1282,6 +1333,14 @@ def mark_skipped(db, root_message_id, reason, *, subject=None):
                (PATCHSET_STATE_SKIPPED, reason, root))
     _refresh_patchset_fts(db, root)   # the INSERT path may carry a subject
     db.commit()
+    # Notify anyone tracking this series (no-op for the usual unowned skip).
+    try:
+        notify_patchset_users(
+            db, root, type=NOTIF_TYPE_PATCHSET_SKIPPED,
+            dedup_key=f"skipped:{root}",
+            title=f"Patchset skipped: {reason}")
+    except Exception:
+        log.warning("skip notification failed (non-fatal)", exc_info=True)
 
 
 def list_patchsets(db, *, state=None, limit=200):
@@ -1460,6 +1519,173 @@ def list_user_patchsets(db, *, user_id=None):
         r["iterations"] = n
         heads.append(r)
     return heads
+
+
+# ===========================================================================
+# Notifications  (per-user in-app feed; migration v13)
+# ===========================================================================
+
+def _notification_prefs(db, user_id):
+    """A user's notification_prefs as a {type-slug: bool} dict, or {} when
+       unset / unparseable. A missing slug means that type is ON (default)."""
+    row = db.execute("SELECT notification_prefs FROM users WHERE id=?",
+                     (user_id,)).fetchone()
+    if row is None or row["notification_prefs"] is None:
+        return {}
+    try:
+        prefs = json.loads(row["notification_prefs"])
+        return prefs if isinstance(prefs, dict) else {}
+    except (ValueError, TypeError):
+        return {}
+
+
+def get_notification_prefs(db, user_id):
+    """Public read of a user's notification preference map (slug -> bool)."""
+    return _notification_prefs(db, user_id)
+
+
+def set_notification_prefs(db, user_id, prefs):
+    """Persist a user's preference map. Only known type slugs are kept."""
+    known = set(NOTIF_TYPE_NAMES.values())
+    clean = {k: bool(v) for k, v in (prefs or {}).items() if k in known}
+    db.execute("UPDATE users SET notification_prefs=? WHERE id=?",
+               (json.dumps(clean), user_id))
+    db.commit()
+
+
+def _wants_notification(db, user_id, type):
+    """True unless the user has explicitly opted out of `type`."""
+    return _notification_prefs(db, user_id).get(NOTIF_TYPE_NAMES[type], True)
+
+
+def insert_notification(db, user_id, *, type, dedup_key, title, link=None,
+                        root_message_id=None, payload=None, commit=True):
+    """Insert one notification for `user_id`, deduped on (user_id, dedup_key)
+       and gated by the user's preferences. No-op (0) when user_id is None, the
+       user opted out of `type`, or the (user, key) already exists. Returns the
+       rows inserted (0 or 1). `commit=False` lets a fan-out batch then commit."""
+    if user_id is None or not _wants_notification(db, user_id, type):
+        return 0
+    cur = db.execute(
+        "INSERT OR IGNORE INTO notifications "
+        "(user_id,type,title,link,root_message_id,dedup_key,payload,created_at) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        (user_id, type, title, link,
+         norm_msgid(root_message_id) if root_message_id else None,
+         dedup_key, json.dumps(payload) if payload is not None else None,
+         int(time.time())))
+    if commit:
+        db.commit()
+    return cur.rowcount
+
+
+def _patchset_user_ids(db, root):
+    """The user_ids tracking a patchset: its uploader (origin=UPLOADED) ∪
+       everyone who claimed it — the /my-patchsets blend."""
+    rows = db.execute(
+        "SELECT uploaded_by_user_id AS uid FROM patchsets "
+        "  WHERE root_message_id=? AND origin=? AND uploaded_by_user_id IS NOT NULL "
+        "UNION "
+        "SELECT user_id AS uid FROM patchset_claims WHERE root_message_id=?",
+        (root, PATCHSET_ORIGIN_UPLOADED, root)).fetchall()
+    return {r["uid"] for r in rows if r["uid"] is not None}
+
+
+def notify_patchset_users(db, root_message_id, *, type, dedup_key, title,
+                          link=None, exclude_user_id=None):
+    """Fan a patchset event out to its tracking users (uploader ∪ claimants),
+       minus `exclude_user_id` (the actor). Deduped + pref-gated per user.
+       No-op for an unowned patchset (the common case): one indexed UNION
+       query, no inserts. Returns the count inserted."""
+    root = norm_msgid(root_message_id)
+    link = link or f"/patchsets/{_urlquote(root)}"   # patchset detail page
+    n = 0
+    for uid in _patchset_user_ids(db, root) - {exclude_user_id}:
+        n += insert_notification(db, uid, type=type, dedup_key=dedup_key,
+                                 title=title, link=link, root_message_id=root,
+                                 commit=False)
+    db.commit()
+    return n
+
+
+def notify_admins(db, *, type, dedup_key, title, link=None):
+    """Fan an event out to every approved admin user. Deduped + pref-gated."""
+    n = 0
+    for r in db.execute("SELECT id FROM users WHERE is_admin=1 AND state=?",
+                        ("approved",)).fetchall():
+        n += insert_notification(db, r["id"], type=type, dedup_key=dedup_key,
+                                 title=title, link=link, commit=False)
+    db.commit()
+    return n
+
+
+def unread_notification_count(db, user_id):
+    if user_id is None:
+        return 0
+    return db.execute(
+        "SELECT count(*) FROM notifications WHERE user_id=? AND read_at IS NULL",
+        (user_id,)).fetchone()[0]
+
+
+def list_notifications(db, user_id, *, limit=50, unread_only=False):
+    """A user's notifications, newest first (type kept as int; payload decoded)."""
+    if user_id is None:
+        return []
+    where = "WHERE user_id=?" + (" AND read_at IS NULL" if unread_only else "")
+    out = []
+    for row in db.execute(
+            f"SELECT * FROM notifications {where} "
+            f"ORDER BY created_at DESC, id DESC LIMIT ?",
+            (user_id, limit)).fetchall():
+        d = dict(row)
+        if d.get("payload") is not None:
+            try:
+                d["payload"] = json.loads(d["payload"])
+            except (ValueError, TypeError):
+                d["payload"] = None
+        out.append(d)
+    return out
+
+
+def get_notification(db, user_id, notif_id):
+    """One notification row (dict) scoped to its owner, or None."""
+    if user_id is None:
+        return None
+    row = db.execute("SELECT * FROM notifications WHERE id=? AND user_id=?",
+                     (notif_id, user_id)).fetchone()
+    return dict(row) if row else None
+
+
+def mark_notification_read(db, user_id, notif_id):
+    """Mark one notification read — user-scoped so a user can't touch another's.
+       Idempotent. Returns True when a row moved to read."""
+    cur = db.execute(
+        "UPDATE notifications SET read_at=? "
+        "WHERE id=? AND user_id=? AND read_at IS NULL",
+        (int(time.time()), notif_id, user_id))
+    db.commit()
+    return cur.rowcount > 0
+
+
+def mark_all_notifications_read(db, user_id):
+    cur = db.execute(
+        "UPDATE notifications SET read_at=? WHERE user_id=? AND read_at IS NULL",
+        (int(time.time()), user_id))
+    db.commit()
+    return cur.rowcount
+
+
+def prune_read_notifications(db, user_id, *, keep=200):
+    """Delete a user's READ notifications beyond the newest `keep`; unread are
+       always retained. Keeps the feed bounded — called from the mark-read
+       paths."""
+    db.execute(
+        "DELETE FROM notifications WHERE user_id=? AND read_at IS NOT NULL "
+        "AND id NOT IN (SELECT id FROM notifications "
+        "  WHERE user_id=? AND read_at IS NOT NULL "
+        "  ORDER BY created_at DESC, id DESC LIMIT ?)",
+        (user_id, user_id, keep))
+    db.commit()
 
 
 def claim_patchset(db, root_message_id, user_id, *, supersedes=None):
@@ -3879,6 +4105,51 @@ def fleet_throughput(db, *, window_seconds=3600, bin_seconds=60):
     return bins
 
 
+_HEALTH_ALERT_TITLES = {"disk_low":         "low free disk",
+                        "api_error":        "Anthropic API errors",
+                        "budget_exhausted": "token budget exhausted"}
+
+
+def _health_alert_kinds(snap):
+    """The set of alert-kind strings a health snapshot trips."""
+    kinds = set()
+    if not isinstance(snap, dict):
+        return kinds
+    if snap.get("disk_low"):
+        kinds.add("disk_low")
+    if snap.get("last_anthropic_error"):
+        kinds.add("api_error")
+    tb = snap.get("token_budget")
+    if isinstance(tb, dict) and tb.get("exhausted"):
+        kinds.add("budget_exhausted")
+    return kinds
+
+
+def _notify_node_health(db, node_id, prior_row, snapshot):
+    """Edge-triggered node-health notification to the node's owner: fire only
+       for alert kinds newly present vs the prior snapshot, so a steady-state
+       repeat (health posts every tick) doesn't spam."""
+    owner = prior_row["owner_user_id"]
+    if owner is None:
+        return                              # system node — no owner to notify
+    try:
+        prior_snap = (json.loads(prior_row["health"])
+                      if prior_row["health"] else {})
+    except (ValueError, TypeError):
+        prior_snap = {}
+    new_kinds = _health_alert_kinds(snapshot) - _health_alert_kinds(prior_snap)
+    if not new_kinds:
+        return
+    name = prior_row["name"] or f"node {node_id}"
+    day = time.strftime("%Y-%m-%d", time.gmtime())
+    for kind in new_kinds:
+        insert_notification(
+            db, owner, type=NOTIF_TYPE_NODE_HEALTH,
+            dedup_key=f"node_health:{node_id}:{kind}:{day}",
+            title=f"Node {name}: {_HEALTH_ALERT_TITLES.get(kind, kind)}",
+            link=f"/nodes/{node_id}")
+
+
 def update_node_health(db, node_id, snapshot):
     """Stamp the latest health snapshot on a node row. `snapshot` is a
        JSON-serializable dict — the node's choice of fields; today
@@ -3887,11 +4158,23 @@ def update_node_health(db, node_id, snapshot):
        fields later doesn't need a migration. Returns True when a
        row was updated, False when the node_id was unknown
        (revoked / deleted between request and write — best treated
-       as a silent no-op)."""
+       as a silent no-op).
+
+       Edge-triggers a node-health notification to the node's owner when the
+       snapshot newly trips an alert (low disk / API errors / budget spent)."""
+    prior = db.execute(
+        "SELECT health, owner_user_id, name FROM nodes WHERE id=?",
+        (node_id,)).fetchone()
     cur = db.execute(
         "UPDATE nodes SET health=?, health_at=? WHERE id=?",
         (json.dumps(snapshot), int(time.time()), node_id))
     db.commit()
+    if cur.rowcount > 0 and prior is not None:
+        try:
+            _notify_node_health(db, node_id, prior, snapshot)
+        except Exception:
+            log.warning("node-health notification failed (non-fatal)",
+                        exc_info=True)
     return cur.rowcount > 0
 
 
