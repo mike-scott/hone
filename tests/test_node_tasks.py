@@ -663,6 +663,31 @@ def test_review_handler_emits_schema_valid_reviewed_record(monkeypatch,
     assert cleaned == [calls[0]["cwd"]]          # worktree torn down
 
 
+def test_review_user_text_includes_cover_letter_intent():
+    """The cover letter (series-level intent) rides in the review prompt as a
+       labelled block so the reviewer can judge whether the change delivers
+       what the submitter claims — the per-patch commit messages only carry
+       per-patch intent."""
+    claim = dict(_REVIEW_CLAIM)
+    claim["cover_letter_body"] = (
+        "From: a@x\nSubject: [PATCH 0/2] drm/msm: PERFCNTR\n\n"
+        "COVER-INTENT: lets userspace program performance counters.\n")
+    text = tasks._build_review_user_text(claim)
+    assert "=== SERIES INTENT (cover letter) ===" in text
+    assert "COVER-INTENT: lets userspace program performance counters." in text
+    assert "diff --git" in text                  # the diffs are still there
+
+
+def test_review_user_text_omits_cover_block_when_absent():
+    """No cover (single [PATCH], or cover_letter_body None) → no intent block,
+       and the rest of the prompt is unchanged."""
+    claim = dict(_REVIEW_CLAIM)
+    claim["cover_letter_body"] = None
+    text = tasks._build_review_user_text(claim)
+    assert "SERIES INTENT" not in text
+    assert "diff --git" in text                  # diffs unaffected
+
+
 # The off-contract shapes from the 2026-06-11 schema rejection: the model
 # paraphrased the challenge fields (challenge/response/confirmed instead
 # of challenge_kind/challenge_text/outcome_note/upheld) and dropped the

@@ -607,7 +607,12 @@ def _build_review_payload(db, work_item, methodology_version, methodology):
                 "patch_type":       metadata.get("patch_type"),
                 "review_intensity": metadata.get("review_intensity"),
                 "tree_state":       metadata.get("tree_state")},
-            "patches": _patches_payload(db, root)}
+            "patches": _patches_payload(db, root),
+            # The series-level intent (motivation, design, testing notes) the
+            # reviewer judges the change against — per-patch commit messages
+            # ride in the patch bodies, but the [PATCH 0/N] narrative lives
+            # only here. None when the series has no cover.
+            "cover_letter_body": _cover_letter_body(db, root)}
 
 
 def _build_train_payload(db, work_item, methodology_version, methodology):

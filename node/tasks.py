@@ -740,12 +740,19 @@ def _build_review_system(claim: dict) -> str:
 
 def _build_review_user_text(claim: dict) -> str:
     """The review user message: the patchset + its prepare metadata as
-       context, the patch diffs (what the series changes), and the review
-       return contract. The series is already applied in the model's cwd
-       worktree, so the prompt tells it the files it reads there are the
-       post-apply tip and the diffs below are the change."""
+       context, the series cover letter (its stated intent), the patch diffs
+       (what the series changes), and the review return contract. The series
+       is already applied in the model's cwd worktree, so the prompt tells it
+       the files it reads there are the post-apply tip and the diffs below are
+       the change.
+
+       The cover letter is the series-level "why" — motivation, design,
+       testing — which per-patch commit messages don't carry; it's slimmed
+       with _slim_patch_body so a cover that inlined a diff can't bloat the
+       prompt, and omitted entirely when the series has no cover."""
     patchset = claim.get("patchset") or {}
     meta_block = claim.get("patchset_metadata") or {}
+    cover = _slim_patch_body(claim.get("cover_letter_body"))
     diffs = sorted((p for p in (claim.get("patches") or [])
                     if p.get("type") == "patch" and p.get("body")),
                    key=lambda p: (p.get("part_index") or 0))
@@ -763,8 +770,13 @@ def _build_review_user_text(claim: dict) -> str:
         "patches in `patch_scope.patches` by those Message-Ids exactly."
         "\n\n=== PATCHSET (context) ===\n",
         json.dumps({"patchset": patchset,
-                    "patchset_metadata": meta_block}, indent=2),
-        "\n\n=== PATCH DIFFS (the change under review) ===\n"]
+                    "patchset_metadata": meta_block}, indent=2)]
+    if cover:
+        parts.append("\n\n=== SERIES INTENT (cover letter) ===\n"
+                     "What the submitter says the series does and why — "
+                     "judge whether the change delivers it.\n\n")
+        parts.append(cover)
+    parts.append("\n\n=== PATCH DIFFS (the change under review) ===\n")
     for p in diffs:
         parts.append(f"\n--- patch {p.get('part_index')} "
                      f"(Message-Id: {p.get('message_id')}): "

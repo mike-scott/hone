@@ -438,6 +438,46 @@ def test_claim_serves_a_review_task_with_full_core_and_patchset_metadata(ctx):
     assert payload["patchset"]["sent"] == 1_700_000_000
 
 
+def test_review_claim_carries_the_cover_letter(ctx):
+    """The review payload ships the [PATCH 0/N] cover so the reviewer can
+       judge the change against the series' stated intent — per-patch commit
+       messages carry only per-patch intent, not the series narrative."""
+    core_db.upsert_patchset(ctx.db, "<r1@x>", subject="[PATCH 0/2] x",
+                             n_patches=2, sent=1_700_000_000)
+    _plant_metadata(ctx.db, "<r1@x>")
+    core_db.upsert_message(ctx.db, "<r1@x>", root_message_id="<r1@x>",
+                           type=core_db.MSG_TYPE_COVER,
+                           body="COVER-INTENT: program perf counters",
+                           part_index=0)
+    core_db.upsert_message(ctx.db, "<p1@x>", root_message_id="<r1@x>",
+                           type=core_db.MSG_TYPE_PATCH, body="diff",
+                           part_index=1)
+    core_db.upsert_message(ctx.db, "<p2@x>", root_message_id="<r1@x>",
+                           type=core_db.MSG_TYPE_PATCH, body="diff",
+                           part_index=2)            # n_patches=2 → both needed
+    core_db.maybe_enqueue_review(ctx.db, "<r1@x>")
+    r = ctx.http.post("/v1/claims", headers=HEADERS)
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["task_type"] == "review"
+    assert payload["cover_letter_body"] == "COVER-INTENT: program perf counters"
+
+
+def test_review_claim_cover_letter_is_none_for_a_single_patch(ctx):
+    """A lone [PATCH] with no series has no cover — the field is present and
+       None (not missing), so the node's omit-the-block logic is exercised."""
+    core_db.upsert_patchset(ctx.db, "<r1@x>", subject="[PATCH] x",
+                             n_patches=1, sent=1_700_000_000)
+    _plant_metadata(ctx.db, "<r1@x>")
+    core_db.upsert_message(ctx.db, "<p1@x>", root_message_id="<r1@x>",
+                           type=core_db.MSG_TYPE_PATCH, body="diff",
+                           part_index=1)
+    core_db.maybe_enqueue_review(ctx.db, "<r1@x>")
+    payload = ctx.http.post("/v1/claims", headers=HEADERS).json()
+    assert payload["task_type"] == "review"
+    assert payload["cover_letter_body"] is None
+
+
 def test_claim_serves_a_train_task_with_session_fields_and_named_comment(ctx):
     """A train claim payload echoes the session metadata and names the
        specific comment via comment_message_id, not a "latest comment"
