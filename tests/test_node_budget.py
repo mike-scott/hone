@@ -22,8 +22,8 @@ def _freeze(monkeypatch, iso):
                         .replace(tzinfo=timezone.utc))
 
 
-# 2026-06-10 is a Wednesday; with the default Friday reset its weekly
-# window is anchored at Friday 2026-06-05.
+# 2026-06-10 is a Wednesday; with the default Monday reset its weekly
+# window is anchored at Monday 2026-06-08.
 WED = "2026-06-10T12:00:00"
 
 
@@ -39,7 +39,7 @@ def test_record_accrues_into_both_windows_and_persists(monkeypatch, tmp_path):
     # the same totals.
     stored = json.loads((tmp_path / budget.LEDGER_NAME).read_text())
     assert stored == {"day": "2026-06-10", "day_tokens": 1300,
-                      "week": "2026-06-05", "week_tokens": 1300}
+                      "week": "2026-06-08", "week_tokens": 1300}
 
 
 def test_record_is_thread_safe_under_concurrent_writes(monkeypatch, tmp_path):
@@ -80,19 +80,19 @@ def test_day_rolls_at_utc_midnight_week_carries(monkeypatch, tmp_path):
     assert st["day_tokens"] == 300 and st["week_tokens"] == 1000
 
 
-def test_week_rolls_friday_utc_midnight_by_default(monkeypatch, tmp_path):
+def test_week_rolls_monday_utc_midnight_by_default(monkeypatch, tmp_path):
     cfg = _cfg(tmp_path)
-    _freeze(monkeypatch, "2026-06-11T23:00:00")     # Thursday
+    _freeze(monkeypatch, "2026-06-14T23:00:00")     # Sunday
     budget.record(cfg, {"input_tokens": 500, "output_tokens": 0})
-    _freeze(monkeypatch, "2026-06-12T00:00:01")     # Friday 00:00 UTC
+    _freeze(monkeypatch, "2026-06-15T00:00:01")     # Monday 00:00 UTC
     st = budget.status(cfg)
     assert st["day_tokens"] == 0 and st["week_tokens"] == 0
 
 
 def test_week_reset_day_is_configurable(monkeypatch, tmp_path):
     """token_week_reset_day moves the weekly boundary — here Sunday, so
-       Saturday's usage vanishes at Sunday 00:00 UTC while a Friday
-       boundary (the default) would have kept it."""
+       Saturday's usage vanishes at Sunday 00:00 UTC while the default
+       Monday boundary would have kept it."""
     cfg = _cfg(tmp_path)
     cfg.token_week_reset_day = budget.parse_week_reset_day("sunday")
     _freeze(monkeypatch, "2026-06-13T12:00:00")     # Saturday
@@ -112,11 +112,11 @@ def test_parse_week_reset_day_names_and_abbreviations():
 
 
 def test_exhausted_reports_the_spent_window(monkeypatch, tmp_path):
-    """A Friday-to-Tuesday walk, all inside one default weekly window
-       (Friday reset): the daily cap trips and clears day by day until
+    """A Monday-to-Friday walk, all inside one default weekly window
+       (Monday reset): the daily cap trips and clears day by day until
        the accumulated weekly cap takes over."""
     cfg = _cfg(tmp_path, daily=1000, weekly=4500)
-    _freeze(monkeypatch, "2026-06-12T12:00:00")      # Friday — fresh week
+    _freeze(monkeypatch, "2026-06-15T12:00:00")      # Monday — fresh week
     assert budget.exhausted(cfg) is None
     budget.record(cfg, {"input_tokens": 999, "output_tokens": 0})
     assert budget.exhausted(cfg) is None             # under both caps
@@ -125,16 +125,16 @@ def test_exhausted_reports_the_spent_window(monkeypatch, tmp_path):
     assert budget.status(cfg)["exhausted"] == "daily"
     # Next day: the daily window is fresh, the weekly total survives —
     # keep going until the weekly cap trips with the daily one clear.
-    _freeze(monkeypatch, "2026-06-13T01:00:00")      # Saturday
+    _freeze(monkeypatch, "2026-06-16T01:00:00")      # Tuesday
     assert budget.exhausted(cfg) is None
     budget.record(cfg, {"input_tokens": 999, "output_tokens": 0})
-    _freeze(monkeypatch, "2026-06-14T01:00:00")      # Sunday
+    _freeze(monkeypatch, "2026-06-17T01:00:00")      # Wednesday
     budget.record(cfg, {"input_tokens": 999, "output_tokens": 0})
-    _freeze(monkeypatch, "2026-06-15T01:00:00")      # Monday
+    _freeze(monkeypatch, "2026-06-18T01:00:00")      # Thursday
     budget.record(cfg, {"input_tokens": 999, "output_tokens": 0})
-    _freeze(monkeypatch, "2026-06-16T01:00:00")      # Tuesday
+    _freeze(monkeypatch, "2026-06-19T01:00:00")      # Friday
     budget.record(cfg, {"input_tokens": 600, "output_tokens": 5})
-    # 1000 + 999*3 + 605 = 4602 ≥ the 4500 weekly cap, while Tuesday's
+    # 1000 + 999*3 + 605 = 4602 ≥ the 4500 weekly cap, while Friday's
     # own 605 stays under the daily cap — only the weekly window trips.
     assert budget.exhausted(cfg) == "weekly"
 
@@ -178,7 +178,7 @@ def test_config_unset_means_no_budget_enforced(monkeypatch):
     """The .env settings are opt-in: unconfigured, both caps read 0 and
        budget.exhausted never trips (the 50M/300M figures live only in
        .env.example as suggested starting points). The weekly reset day
-       still carries its Friday default for when a cap IS set."""
+       still carries its Monday default for when a cap IS set."""
     for k in ("HONE_TOKEN_LIMIT_DAILY", "HONE_TOKEN_LIMIT_WEEKLY",
               "HONE_TOKEN_WEEK_RESET_DAY"):
         monkeypatch.delenv(k, raising=False)
@@ -189,7 +189,7 @@ def test_config_unset_means_no_budget_enforced(monkeypatch):
     assert cfg.token_limit_daily == 0
     assert cfg.token_limit_weekly == 0
     assert budget.exhausted(cfg) is None
-    assert cfg.token_week_reset_day == 4             # Friday
+    assert cfg.token_week_reset_day == 0             # Monday (default)
 
 
 def test_config_env_overrides_the_caps_and_reset_day(monkeypatch):
@@ -207,7 +207,7 @@ def test_config_env_overrides_the_caps_and_reset_day(monkeypatch):
 
 def test_config_rejects_a_bogus_reset_day(monkeypatch):
     """A typo'd weekday fails the node at startup, like the other
-       config validations — not a silent fall-back to Friday."""
+       config validations — not a silent fall-back to the default."""
     monkeypatch.setenv("HONE_CORE_URL", "https://core:8443")
     monkeypatch.setenv("HONE_FLEET_SECRET", "s")
     monkeypatch.setenv("HONE_CLAUDE_BACKEND", "cli")

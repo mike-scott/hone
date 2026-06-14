@@ -77,7 +77,7 @@ class Config:
                                 # HONE_TOKEN_WEEK_RESET_DAY — the weekday
                                 # whose UTC midnight starts a fresh weekly
                                 # window (datetime.weekday() numbering).
-                                # Default Friday. Optional in .env.
+                                # Default Monday. Optional in .env.
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -131,8 +131,11 @@ class Config:
                                                     "0")),
             token_limit_weekly = int(os.environ.get("HONE_TOKEN_LIMIT_WEEKLY",
                                                     "0")),
-            token_week_reset_day = budget.parse_week_reset_day(
-                                       os.environ.get(
-                                           "HONE_TOKEN_WEEK_RESET_DAY",
-                                           "friday")),
+            # Default lives in budget.DEFAULT_WEEK_RESET_DAY (Monday) — fall
+            # back to it directly when unset rather than re-spelling the day,
+            # so the env default can't drift from the dataclass default.
+            token_week_reset_day = (
+                budget.parse_week_reset_day(_reset_day)
+                if (_reset_day := os.environ.get("HONE_TOKEN_WEEK_RESET_DAY"))
+                else budget.DEFAULT_WEEK_RESET_DAY),
         )

@@ -5,7 +5,7 @@ a small JSON ledger on the data volume. Once a window's total crosses
 its cap, the runner pauses claiming — the same idle-not-crash behaviour
 as the low-disk guard — and resumes when the window rolls over at UTC
 midnight. The daily window is the UTC calendar day; the weekly window
-runs from UTC midnight on the configured reset day (default Friday) to
+runs from UTC midnight on the configured reset day (default Monday) to
 the next.
 
 Optional configuration (node/.env) — unset (or 0), no budget is
@@ -14,7 +14,7 @@ from real numbers:
 
   HONE_TOKEN_LIMIT_DAILY        tokens/day; .env.example suggests 50M
   HONE_TOKEN_LIMIT_WEEKLY       tokens/week; .env.example suggests 300M
-  HONE_TOKEN_WEEK_RESET_DAY     default friday — the weekday whose UTC
+  HONE_TOKEN_WEEK_RESET_DAY     default monday — the weekday whose UTC
                                 midnight starts a fresh weekly window
 
 Ledger: $HONE_DATA/token-ledger.json — on the persistent volume so a
@@ -54,7 +54,7 @@ _WEEKDAYS = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
              "friday": 4, "saturday": 5, "sunday": 6}
 _WEEKDAYS.update({name[:3]: n for name, n in list(_WEEKDAYS.items())})
 
-DEFAULT_WEEK_RESET_DAY = _WEEKDAYS["friday"]
+DEFAULT_WEEK_RESET_DAY = _WEEKDAYS["monday"]
 
 
 def parse_week_reset_day(name):
