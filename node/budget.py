@@ -32,11 +32,21 @@ import json
 import logging
 import os
 import tempfile
+import threading
 from datetime import datetime, timedelta, timezone
 
 log = logging.getLogger("hone.node.budget")
 
 LEDGER_NAME = "token-ledger.json"
+
+# Serialises the load→increment→save in record(). record() is a
+# read-modify-write of the ledger, so concurrent callers would otherwise
+# read the same base totals and lose all but the last write (the atomic
+# rename in _save prevents a *corrupt* file, not a lost update). The claim
+# loop is serial today, so this is insurance — but it makes record()
+# correct under any future concurrency for negligible cost. Per-process;
+# the node is single-process so a threading.Lock suffices.
+_LEDGER_LOCK = threading.Lock()
 
 # datetime.weekday() numbering (Monday = 0). Full names and 3-letter
 # abbreviations both accepted in HONE_TOKEN_WEEK_RESET_DAY.
@@ -143,10 +153,11 @@ def record(cfg, usage):
     if tokens <= 0 or _ledger_path(cfg) is None:
         return
     try:
-        ledger = _load(cfg)
-        ledger["day_tokens"] += tokens
-        ledger["week_tokens"] += tokens
-        _save(cfg, ledger)
+        with _LEDGER_LOCK:
+            ledger = _load(cfg)
+            ledger["day_tokens"] += tokens
+            ledger["week_tokens"] += tokens
+            _save(cfg, ledger)
     except OSError as exc:
         log.error("token ledger update failed (%s) — %d token(s) not "
                   "counted toward the budget", exc, tokens)

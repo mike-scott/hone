@@ -42,6 +42,30 @@ def test_record_accrues_into_both_windows_and_persists(monkeypatch, tmp_path):
                       "week": "2026-06-05", "week_tokens": 1300}
 
 
+def test_record_is_thread_safe_under_concurrent_writes(monkeypatch, tmp_path):
+    """record() is a read-modify-write of the ledger; without the lock,
+       concurrent callers read the same base totals and lose all but the
+       last write. With it, every token is counted. (The claim loop is
+       serial today, so this guards against any future concurrent caller.)"""
+    import threading
+    cfg = _cfg(tmp_path)
+    _freeze(monkeypatch, WED)
+    n, per = 50, 100
+    barrier = threading.Barrier(n)
+
+    def worker():
+        barrier.wait()                       # maximise overlap on the ledger
+        budget.record(cfg, {"input_tokens": per, "output_tokens": 0})
+
+    threads = [threading.Thread(target=worker) for _ in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert budget.status(cfg)["day_tokens"] == n * per     # nothing lost
+
+
 def test_day_rolls_at_utc_midnight_week_carries(monkeypatch, tmp_path):
     """At UTC midnight the daily window resets but the weekly total
        keeps accruing — they share a ledger, not a lifetime."""
