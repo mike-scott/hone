@@ -17,6 +17,79 @@ mirrors it. Bump them together with the entry below on every release.
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-06-14
+
+hone learns to tell you things, and to watch itself. Users get an in-app
+notification feed — a nav bell, an unread badge, and a settings panel to
+opt in or out — so a review finishing, a lore comment landing on a series
+you track, or a node you own raising a health alert reaches you without
+re-checking the dashboard. The platform also starts measuring its own
+review methodology: every review now records which checks were applicable
+and which fired, surfaced as a check-usage report. The corpus listing is
+re-architected to stay fast at scale, and a batch of review-quality and
+node-operations fixes round it out.
+
+Pre-stable: this release carries schema migrations v10–v13 (trigram FTS,
+listing denormalization, per-review check coverage, notifications),
+applied automatically on first start.
+
+### Added
+
+- **User notifications** ([`core/core_db.py`](core/core_db.py),
+  [`core/ui.py`](core/ui.py), migration v13): an in-app feed fanned out to
+  the users tracking a patchset (uploader + claimants), to a node's owner,
+  or to admins. v1 events — review ready / failed, prepare failed, new lore
+  comment, patchset skipped, node health alert (edge-triggered), and new
+  user-access requests. A nav bell with a live unread badge + dropdown, a
+  `/notifications` feed with click-through mark-read, and per-user opt-in/out
+  preferences under User settings (scoped to the account's access level).
+  The data model is email-ready for a future delivery worker.
+- **Check-usage report** ([`core/reports.py`](core/reports.py),
+  [`core/check_gates.py`](core/check_gates.py), migration v12): every review
+  records which methodology checks were applicable vs fired
+  (`ai_reviews.check_coverage`); the operator UI charts per-check fire rates
+  with Wilson confidence intervals and version cohorts. A
+  `core/scripts/backfill_check_coverage.{py,sh}` recomputes coverage for
+  existing reviews.
+- **Concerns column** on the My Patchsets and Corpus lists
+  ([`core/ui.py`](core/ui.py)): a per-patchset severity summary of its AI
+  review.
+- **Phosphor theme** and a phone-usable operator console
+  ([`core/static/`](core/static/), [`core/templates/`](core/templates/)).
+- **Product-pitch presentation** ([`docs/presentation.html`](docs/presentation.html)).
+
+### Changed
+
+- **Corpus listing is O(page), not O(corpus)** ([`core/core_db.py`](core/core_db.py),
+  migrations v10/v11): trigram FTS search, indexed sort keys, and
+  denormalized author / part / comment counts keep the listing off the
+  (large) messages table.
+- **Reviews receive the series cover letter** as stated intent
+  ([`core/api.py`](core/api.py), [`node/tasks.py`](node/tasks.py)).
+- **Prepare prompt is slimmed to diffstats** so large series no longer
+  overflow the model context ([`node/tasks.py`](node/tasks.py)).
+- **Weekly token-budget reset defaults to Monday** ([`node/budget.py`](node/budget.py)).
+- **refrepo gc is fetch-gated** and instrumented (anchors / fetch / gc
+  surfaced on the node Health card) ([`node/refrepo.py`](node/refrepo.py),
+  [`node/runner.py`](node/runner.py)).
+- Status polls pause in hidden tabs; comment threads highlight and jump to
+  the reviewer's own words ([`core/templates/`](core/templates/)).
+
+### Fixed
+
+- **Prepare defers (re-arms) on a transient empty / off-contract completion**
+  instead of terminally burning the patchset ([`node/tasks.py`](node/tasks.py),
+  [`node/ai.py`](node/ai.py)).
+- **Review records are validated before submit and repaired when off-contract**;
+  the reviewer is given the patch Message-Ids and its citations are policed
+  ([`node/tasks.py`](node/tasks.py), [`core/api.py`](core/api.py)).
+- `budget.record()` is lost-update-safe under concurrency; the CLI self-heals
+  deny rules naming tools it doesn't ship; the subsystem heuristic survives a
+  `get_maintainer` miss; null-valued optional record fields are dropped before
+  validation ([`node/`](node/)).
+- Re-arm clears `completed_at` and labels the kept record; dead-thread
+  connections are swept from `ThreadLocalDB` ([`core/core_db.py`](core/core_db.py)).
+
 ## [0.3.1] — 2026-06-10
 
 The "my series is already on lore" dead end becomes the heart of the
