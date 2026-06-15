@@ -51,9 +51,14 @@ def build_ms(entries):
     total_msgs = sum(e.get("assistant_messages", 0) for e in entries)
     today = datetime.date.today().isoformat()
 
+    # tbl delimiter: a single literal char that appears in no field (feature
+    # slugs, ISO dates, formatted token/cost numbers) — NOT a tab, which a raw
+    # f-string can't carry into the tab() directive as one character.
     rows = "\n".join(
-        "\t".join((
-            e["feature"],
+        "@".join((
+            # text block (T{…T}) so a long feature name wraps to the capped
+            # column width instead of forcing the table past the line length.
+            "T{\n" + e["feature"] + "\nT}",
             (e.get("started") or "")[:10],
             wall(e),
             str(e.get("assistant_messages", 0)),
@@ -80,26 +85,31 @@ included. Every feature below shipped with its tests in the same window
 .SH
 Features
 .LP
-.TS
-box expand tab(\t);
-lb cb cb cb cb cb cb cb cb
-l c n n n n n n n .
-Feature\tDate\tWall\tTurns\tOut\tIn\tC-write\tC-read\tEst. cost
+.ps 9
+.vs 11
+.TS H
+box tab(@);
+lbw(2.2i) cb cb cb cb cb cb cb cb
+lw(2.2i) c n n n n n n n .
+Feature@Date@Wall@Turns@Out@In@C-write@C-read@Est. cost
+.TH
 {rows}
 .TE
+.ps
+.vs
 .SH
 Totals
 .LP
 .TS
-tab(\t);
+tab(@);
 lb l .
-Features\t{len(entries)}
-Assistant turns\t{total_msgs:,}
-Output tokens\t{total["output_tokens"]:,}
-Fresh input tokens\t{total["input_tokens"]:,}
-Cache-write tokens\t{total["cache_creation_input_tokens"]:,}
-Cache-read tokens\t{total["cache_read_input_tokens"]:,}
-Estimated cost\t${total_cost:,.2f}
+Features@{len(entries)}
+Assistant turns@{total_msgs:,}
+Output tokens@{total["output_tokens"]:,}
+Fresh input tokens@{total["input_tokens"]:,}
+Cache-write tokens@{total["cache_creation_input_tokens"]:,}
+Cache-read tokens@{total["cache_read_input_tokens"]:,}
+Estimated cost@${total_cost:,.2f}
 .TE
 .SH
 Method and caveats
