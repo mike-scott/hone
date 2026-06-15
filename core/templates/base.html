@@ -152,14 +152,19 @@
            dropdown AND htmx-loads its recent-unread contents. #}
         {% if current_user is defined and current_user and current_user.id is not none %}
         <li class="nav-item dropdown me-2">
-          <a id="notif-bell" class="nav-link position-relative" href="/notifications"
+          <a id="notif-bell" class="nav-link" href="/notifications"
              role="button" data-bs-toggle="dropdown" aria-expanded="false"
              title="Notifications"
              hx-get="/notifications/dropdown" hx-target="#notif-menu" hx-trigger="click">
-            <i class="bi bi-bell"></i>
-            <span hx-get="/notifications/badge"
-                  hx-trigger="load, every 10s [document.visibilityState === 'visible']"
-                  hx-target="this" hx-swap="outerHTML"></span>
+            {# position-relative wraps just the icon (not the padded
+               nav-link) so the badge's start-100/top-0 anchors to the
+               bell glyph's corner, not the link's padding edge. #}
+            <span class="position-relative d-inline-block">
+              <i class="bi bi-bell"></i>
+              <span hx-get="/notifications/badge"
+                    hx-trigger="load, every 10s [document.visibilityState === 'visible']"
+                    hx-target="this" hx-swap="outerHTML"></span>
+            </span>
           </a>
           <ul id="notif-menu" class="dropdown-menu dropdown-menu-end p-0"
               style="min-width: 24rem; max-width: 92vw;">
