@@ -619,6 +619,27 @@ async def notifications_read_all(request: Request,
     return RedirectResponse("/notifications", status_code=303)
 
 
+@router.post("/notifications/{notif_id}/dismiss", include_in_schema=False,
+             dependencies=[Depends(auth.require_csrf)])
+async def notification_dismiss(request: Request, notif_id: int,
+                              current_user: auth.SessionUser = Depends(auth.require_session)):
+    """Dismiss (delete) one of the caller's notifications. Idempotent — a
+       no-op (still 303) when it's already gone or not theirs."""
+    db = request.app.state.db
+    core_db.delete_notification(db, current_user.id, notif_id)
+    return RedirectResponse("/notifications", status_code=303)
+
+
+@router.post("/notifications/clear-read", include_in_schema=False,
+             dependencies=[Depends(auth.require_csrf)])
+async def notifications_clear_read(request: Request,
+                                  current_user: auth.SessionUser = Depends(auth.require_session)):
+    """Dismiss (delete) all of the caller's read notifications at once."""
+    db = request.app.state.db
+    core_db.delete_read_notifications(db, current_user.id)
+    return RedirectResponse("/notifications", status_code=303)
+
+
 def _notification_pref_rows(current_user, db):
     """The notification toggles appropriate to this user's access level:
        every developer/node type for any DB account, plus the admin-only

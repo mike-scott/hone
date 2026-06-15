@@ -1690,6 +1690,25 @@ def mark_all_notifications_read(db, user_id):
     return cur.rowcount
 
 
+def delete_notification(db, user_id, notif_id):
+    """Dismiss one notification — user-scoped so a user can't touch another's.
+       Idempotent. Returns True when a row was removed."""
+    cur = db.execute("DELETE FROM notifications WHERE id=? AND user_id=?",
+                     (notif_id, user_id))
+    db.commit()
+    return cur.rowcount > 0
+
+
+def delete_read_notifications(db, user_id):
+    """Dismiss ALL of a user's read notifications at once (the manual
+       'Clear read'); unread are left untouched. Returns the count removed."""
+    cur = db.execute(
+        "DELETE FROM notifications WHERE user_id=? AND read_at IS NOT NULL",
+        (user_id,))
+    db.commit()
+    return cur.rowcount
+
+
 def prune_read_notifications(db, user_id, *, keep=200):
     """Delete a user's READ notifications beyond the newest `keep`; unread are
        always retained. Keeps the feed bounded — called from the mark-read

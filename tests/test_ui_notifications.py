@@ -99,6 +99,54 @@ def test_mark_read_and_read_all(ctx):
     assert core_db.unread_notification_count(ctx.db, ctx.uid) == 0
 
 
+def test_dismiss_deletes_a_single_notification(ctx):
+    _notify(ctx.db, ctx.uid)
+    nid = core_db.list_notifications(ctx.db, ctx.uid)[0]["id"]
+    r = ctx.client.post(f"/notifications/{nid}/dismiss", follow_redirects=False)
+    assert r.status_code == 303
+    assert core_db.list_notifications(ctx.db, ctx.uid) == []
+
+
+def test_dismiss_anothers_notification_is_a_noop(ctx):
+    _notify(ctx.db, ctx.uid)
+    nid = core_db.list_notifications(ctx.db, ctx.uid)[0]["id"]
+    bob = core_db.create_user(ctx.db, "bob@x", "Bob", "local")
+    core_db.set_user_state(ctx.db, bob, "approved")
+    bob_user = auth.SessionUser(id=bob, email="bob@x", display_name="Bob",
+                                is_config_admin=False)
+    r = _client(ctx.db, bob_user).post(f"/notifications/{nid}/dismiss",
+                                       follow_redirects=False)
+    assert r.status_code == 303                                    # idempotent
+    assert len(core_db.list_notifications(ctx.db, ctx.uid)) == 1   # untouched
+
+
+def test_clear_read_deletes_only_read(ctx):
+    _notify(ctx.db, ctx.uid)                                  # will be read
+    nid = core_db.list_notifications(ctx.db, ctx.uid)[0]["id"]
+    core_db.mark_notification_read(ctx.db, ctx.uid, nid)
+    core_db.insert_notification(ctx.db, ctx.uid,              # stays (unread)
+                                type=core_db.NOTIF_TYPE_NEW_COMMENT,
+                                dedup_key="c:2", title="unread one")
+    ctx.client.post("/notifications/clear-read", follow_redirects=False)
+    rows = core_db.list_notifications(ctx.db, ctx.uid)
+    assert [r["title"] for r in rows] == ["unread one"]
+
+
+def test_dismiss_offered_only_on_read_rows(ctx):
+    _notify(ctx.db, ctx.uid)
+    nid = core_db.list_notifications(ctx.db, ctx.uid)[0]["id"]
+    # Unread: a Mark-read control, no dismiss action.
+    body = ctx.client.get("/notifications").text
+    assert f"/notifications/{nid}/read" in body
+    assert f"/notifications/{nid}/dismiss" not in body
+    assert "/notifications/clear-read" not in body            # no read items yet
+    # Once read: dismiss + Clear-read appear.
+    core_db.mark_notification_read(ctx.db, ctx.uid, nid)
+    body = ctx.client.get("/notifications").text
+    assert f"/notifications/{nid}/dismiss" in body
+    assert "/notifications/clear-read" in body
+
+
 def test_config_admin_badge_is_empty(tmp_path):
     db = core_db.connect(str(tmp_path / "h.db"))
     admin = auth.SessionUser(id=None, email="admin", display_name="admin",

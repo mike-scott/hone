@@ -144,6 +144,31 @@ def test_mark_all_and_prune_keeps_unread(db):
     assert sum(1 for r in rows if r["read_at"] is not None) == 2  # pruned to 2
 
 
+def test_delete_notification_is_user_scoped(db):
+    a = _user(db, "a@x"); b = _user(db, "b@x")
+    core_db.insert_notification(db, a, type=core_db.NOTIF_TYPE_NEW_COMMENT,
+                                dedup_key="c:1", title="x")
+    nid = core_db.list_notifications(db, a)[0]["id"]
+    assert core_db.delete_notification(db, b, nid) is False      # not b's
+    assert len(core_db.list_notifications(db, a)) == 1
+    assert core_db.delete_notification(db, a, nid) is True
+    assert core_db.list_notifications(db, a) == []
+    assert core_db.delete_notification(db, a, nid) is False      # idempotent
+
+
+def test_delete_read_notifications_leaves_unread(db):
+    a = _user(db, "a@x")
+    for i in range(3):
+        core_db.insert_notification(db, a, type=core_db.NOTIF_TYPE_NEW_COMMENT,
+                                    dedup_key=f"c:{i}", title=f"c{i}")
+    core_db.mark_all_notifications_read(db, a)
+    core_db.insert_notification(db, a, type=core_db.NOTIF_TYPE_NEW_COMMENT,
+                                dedup_key="c:new", title="fresh")   # unread
+    assert core_db.delete_read_notifications(db, a) == 3
+    rows = core_db.list_notifications(db, a)
+    assert [r["title"] for r in rows] == ["fresh"]
+
+
 def test_config_admin_none_is_a_noop_everywhere(db):
     assert core_db.unread_notification_count(db, None) == 0
     assert core_db.list_notifications(db, None) == []
