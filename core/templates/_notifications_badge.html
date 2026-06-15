@@ -1,10 +1,13 @@
 {# The unread-count badge inside the nav bell. Self-refreshes via htmx
    (outerHTML), so only this span is replaced — the bell <a> / dropdown
-   wiring around it stays intact. Renders nothing when there's nothing
+   wiring around it stays intact. hx-target="this" is REQUIRED: htmx
+   inherits hx-target from ancestors, and the bell <a> sets it to
+   #notif-menu; without the override this poll would clobber the dropdown
+   <ul> instead of the badge. Renders nothing when there's nothing
    unread. #}
 <span hx-get="/notifications/badge"
       hx-trigger="every 10s [document.visibilityState === 'visible']"
-      hx-swap="outerHTML">
+      hx-target="this" hx-swap="outerHTML">
   {%- if unread and unread > 0 %}
   <span class="position-absolute top-0 start-100 translate-middle badge rounded-pill text-bg-danger"
         style="font-size:.6rem;">
