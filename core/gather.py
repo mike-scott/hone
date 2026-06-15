@@ -21,6 +21,7 @@ import logging
 import os
 import sys
 import time
+import urllib.parse
 
 from core import core_db
 
@@ -139,10 +140,15 @@ def _ingest_ref(db, module, ref):
         # guard; the pre-check just skips the work for re-seen comments.
         if is_new_comment:
             who = ref.author_name or ref.author_email or "someone"
+            # Anchor straight at this comment's thread row (patchset.html
+            # gives each row id="msg-<normalised-id>"); URL-quote the id so
+            # the @/dot chars survive the fragment, the page JS decodes it.
+            cmt = core_db.norm_msgid(ref.message_id)
             core_db.notify_patchset_users(
                 db, ref.root_message_id,
                 type=core_db.NOTIF_TYPE_NEW_COMMENT,
-                dedup_key=f"comment:{core_db.norm_msgid(ref.message_id)}",
+                dedup_key=f"comment:{cmt}",
+                anchor="msg-" + urllib.parse.quote(cmt, safe=""),
                 title=f"New comment from {who}")
         return "messages"
     raise TypeError(f"{module.name}: unknown ref type {type(ref).__name__}")

@@ -61,8 +61,10 @@ def test_patchset_fanout_to_owner_and_claimants(db):
     assert core_db.unread_notification_count(db, up) == 1
     assert core_db.unread_notification_count(db, cl) == 1
     assert core_db.unread_notification_count(db, other) == 0
-    # the default link points at the (quoted) patchset detail
-    assert core_db.list_notifications(db, up)[0]["link"] == "/patchsets/r%40x"
+    # the default link points at the (quoted) patchset detail, anchored at
+    # the per-type element the click-through scrolls to and flashes
+    assert (core_db.list_notifications(db, up)[0]["link"]
+            == "/patchsets/r%40x#ai-review")
 
 
 def test_fanout_is_idempotent_on_dedup_key(db):

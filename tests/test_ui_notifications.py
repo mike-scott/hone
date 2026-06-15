@@ -70,7 +70,7 @@ def test_click_marks_read_and_redirects_to_stored_link(ctx):
     nid = core_db.list_notifications(ctx.db, ctx.uid)[0]["id"]
     r = ctx.client.get(f"/notifications/{nid}/click", follow_redirects=False)
     assert r.status_code == 303
-    assert r.headers["location"] == "/patchsets/r%40x"      # server-stored target
+    assert r.headers["location"] == "/patchsets/r%40x#ai-review"  # stored target + anchor
     assert core_db.unread_notification_count(ctx.db, ctx.uid) == 0
 
 

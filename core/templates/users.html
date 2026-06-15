@@ -25,7 +25,7 @@
       </thead>
       <tbody>
         {% for u in pending %}
-        <tr>
+        <tr id="user-{{ u.id }}">
           <td>{{ u.email }}</td>
           <td class="text-muted">{{ u.display_name or "—" }}</td>
           <td><span class="badge text-bg-secondary">{{ u.auth_provider }}</span></td>
@@ -72,7 +72,7 @@
       </thead>
       <tbody>
         {% for u in approved %}
-        <tr>
+        <tr id="user-{{ u.id }}">
           <td>{{ u.email }}</td>
           <td class="text-muted">{{ u.display_name or "—" }}</td>
           <td><span class="badge text-bg-secondary">{{ u.auth_provider }}</span></td>

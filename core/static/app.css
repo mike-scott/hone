@@ -72,3 +72,23 @@
 /* /reports charts: Chart.js needs a sized positioned box when
    maintainAspectRatio is off. */
 .report-chart { position: relative; height: 280px; }
+
+/* Notification deep-link flash. A notification click-through lands on the
+   destination page with a #fragment naming the element it's about (the AI
+   review, the pipeline status, a comment row, a node's health card, a user
+   row). base.html's deep-link script scrolls that element into view and
+   adds .notif-flash to pulse an amber ring so "what changed" is obvious,
+   then removes it. scroll-margin-top keeps the target clear of the sticky
+   app-header. Reduced-motion: hold a static ring instead of animating. */
+[id] { scroll-margin-top: 4.5rem; }
+.notif-flash { border-radius: .375rem; animation: notif-flash 2.4s ease-out; }
+@keyframes notif-flash {
+  0%, 15% { box-shadow: 0 0 0 .25rem rgba(var(--bs-warning-rgb), .65);
+            background-color: rgba(var(--bs-warning-rgb), .18); }
+  100%    { box-shadow: 0 0 0 .25rem rgba(var(--bs-warning-rgb), 0);
+            background-color: transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .notif-flash { animation: none;
+                 box-shadow: 0 0 0 .25rem rgba(var(--bs-warning-rgb), .55); }
+}

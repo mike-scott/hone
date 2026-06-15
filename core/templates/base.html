@@ -317,6 +317,42 @@
     });
   })();
 
+  // Notification deep-link flash — a notification click-through lands here
+  // with a #fragment naming the element it's about (the AI review, the
+  // pipeline status, a comment row, a node's health card, a user row).
+  // Scroll that element into view and pulse it (.notif-flash, app.css) so
+  // "what changed" is obvious. The target may arrive after an htmx swap
+  // (node live-panel; comment thread on first paint), so retry briefly
+  // before giving up. getElementById — NOT querySelector — because
+  // Message-Id anchors carry @/. that would break selector parsing; the
+  // fragment is URL-encoded server-side, so decode it back to the raw id.
+  (function () {
+    var reduce = window.matchMedia &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    function flash() {
+      var id = (location.hash || "").slice(1);
+      if (!id) return;
+      try { id = decodeURIComponent(id); } catch (e) { /* use as-is */ }
+      var deadline = Date.now() + 4000;   // htmx-late targets get a window
+      (function find() {
+        var el = document.getElementById(id);
+        if (!el) {
+          if (Date.now() < deadline) setTimeout(find, 150);
+          return;
+        }
+        if (el.tagName === "DETAILS") el.open = true;   // collapsed comment
+        el.scrollIntoView(
+          {behavior: reduce ? "auto" : "smooth", block: "center"});
+        el.classList.remove("notif-flash");
+        void el.offsetWidth;              // reflow so a re-fire restarts it
+        el.classList.add("notif-flash");
+        setTimeout(function () { el.classList.remove("notif-flash"); }, 2600);
+      })();
+    }
+    flash();
+    window.addEventListener("hashchange", flash);
+  })();
+
   // Light/dark toggle (user-menu item) — flip data-bs-theme, persist the
   // choice, repaint the icon + label to the mode a click switches TO.
   (function () {

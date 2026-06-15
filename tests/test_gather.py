@@ -365,6 +365,9 @@ def test_gather_new_comment_notifies_trackers_once(db):
     notes = core_db.list_notifications(db, uid)
     assert len(notes) == 1
     assert notes[0]["type"] == core_db.NOTIF_TYPE_NEW_COMMENT
+    # The link anchors at the comment's own thread row (id="msg-<norm-id>"),
+    # with the Message-Id URL-encoded so its @ survives the fragment.
+    assert notes[0]["link"] == "/patchsets/p1%40x#msg-c1%40x"
     # Re-run the whole stream — re-upserts the comment, must NOT re-notify.
     gather._gather_source(db, _FakeModule(refs))
     assert len(core_db.list_notifications(db, uid)) == 1

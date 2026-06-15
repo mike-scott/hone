@@ -93,6 +93,14 @@ NOTIF_TYPE_NAMES = {NOTIF_TYPE_REVIEW_READY:     "review_ready",
                     NOTIF_TYPE_PATCHSET_SKIPPED: "patchset_skipped",
                     NOTIF_TYPE_NODE_HEALTH:      "node_health_alert",
                     NOTIF_TYPE_USER_ACCESS:      "user_access_request"}
+# Default in-page anchor per patchset notification type — the element the
+# click-through should land on and flash (ids live in patchset.html).
+# new_comment is absent: its anchor is the specific message row, so the
+# caller passes it explicitly (it alone knows the comment's Message-Id).
+NOTIF_PATCHSET_ANCHOR = {NOTIF_TYPE_REVIEW_READY:     "ai-review",
+                         NOTIF_TYPE_REVIEW_FAILED:    "ai-review",
+                         NOTIF_TYPE_PREPARE_FAILED:   "patchset-status",
+                         NOTIF_TYPE_PATCHSET_SKIPPED: "patchset-status"}
 
 # ---- list_tags.origin ----
 LIST_TAG_ORIGIN_MANIFEST = 1
@@ -1592,13 +1600,20 @@ def _patchset_user_ids(db, root):
 
 
 def notify_patchset_users(db, root_message_id, *, type, dedup_key, title,
-                          link=None, exclude_user_id=None):
+                          link=None, anchor=None, exclude_user_id=None):
     """Fan a patchset event out to its tracking users (uploader ∪ claimants),
        minus `exclude_user_id` (the actor). Deduped + pref-gated per user.
        No-op for an unowned patchset (the common case): one indexed UNION
-       query, no inserts. Returns the count inserted."""
+       query, no inserts. Returns the count inserted.
+
+       `link` overrides the destination outright; otherwise it's the patchset
+       detail page with a per-type `#anchor` so the click-through scrolls to
+       and flashes the relevant element. `anchor` (already URL-safe) wins over
+       the type default — new_comment passes its message-row anchor that way."""
     root = norm_msgid(root_message_id)
-    link = link or f"/patchsets/{_urlquote(root)}"   # patchset detail page
+    if link is None:
+        anchor = anchor or NOTIF_PATCHSET_ANCHOR.get(type)
+        link = f"/patchsets/{_urlquote(root)}" + (f"#{anchor}" if anchor else "")
     n = 0
     for uid in _patchset_user_ids(db, root) - {exclude_user_id}:
         n += insert_notification(db, uid, type=type, dedup_key=dedup_key,
@@ -4147,7 +4162,7 @@ def _notify_node_health(db, node_id, prior_row, snapshot):
             db, owner, type=NOTIF_TYPE_NODE_HEALTH,
             dedup_key=f"node_health:{node_id}:{kind}:{day}",
             title=f"Node {name}: {_HEALTH_ALERT_TITLES.get(kind, kind)}",
-            link=f"/nodes/{node_id}")
+            link=f"/nodes/{node_id}#node-health")
 
 
 def update_node_health(db, node_id, snapshot):

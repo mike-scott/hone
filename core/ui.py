@@ -91,7 +91,8 @@ def _notify_access_request(db, new_user_id, email):
         core_db.notify_admins(
             db, type=core_db.NOTIF_TYPE_USER_ACCESS,
             dedup_key=f"user_access:{new_user_id}",
-            title=f"Access request: {email}", link="/users")
+            title=f"Access request: {email}",
+            link=f"/users#user-{new_user_id}")
     except Exception:
         log.warning("access-request notification failed (non-fatal)",
                     exc_info=True)
