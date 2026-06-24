@@ -26,6 +26,11 @@ class Config:
     public_url:      str   # HONE_PUBLIC_URL — base URL nodes/operators reach
     session_cookie_secure: bool  # HONE_SESSION_COOKIE_SECURE — sets the
                                   # session cookie's Secure flag
+    serve_tls:       bool  # HONE_SERVE_TLS — when true (default) hone-core
+                           # terminates TLS itself with its self-generated
+                           # cert; false serves plain HTTP behind a
+                           # TLS-terminating proxy and trusts its forwarded
+                           # headers
 
     @staticmethod
     def _env_bool(name, default):
@@ -68,4 +73,7 @@ class Config:
             # with a proxy that speaks HTTP to the backend.
             session_cookie_secure = cls._env_bool(
                 "HONE_SESSION_COOKIE_SECURE", default=True),
+            # Secure-by-default transport: hone-core terminates TLS itself
+            # unless explicitly placed behind a TLS-terminating proxy.
+            serve_tls = cls._env_bool("HONE_SERVE_TLS", default=True),
         )

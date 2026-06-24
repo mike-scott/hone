@@ -315,10 +315,12 @@ def create_app() -> FastAPI:
 
 
 def run():
-    """Container entry point — ensure the TLS material exists, then serve
-       HTTPS directly with the self-generated server certificate (no external
-       TLS-terminating proxy; see ARCHITECTURE.md → Auth, enrollment &
-       transport).
+    """Container entry point — ensure the TLS material exists, then serve the
+       app. By default (HONE_SERVE_TLS=true) hone-core terminates TLS itself
+       with its self-generated server certificate; set HONE_SERVE_TLS=false to
+       serve plain HTTP behind a TLS-terminating proxy (see
+       core/nginx/hone-core.conf). The CA is generated either way because it is
+       delivered to nodes at enrollment.
 
        The FastAPI app is constructed here rather than at module top so a
        plain `import core.main` (in tests or by tooling) doesn't run the
@@ -334,19 +336,35 @@ def run():
 
     app = create_app()
     cfg: Config = app.state.config
+    # Generate the CA/server cert regardless of serving mode — the CA is
+    # delivered to nodes at enrollment even when a proxy terminates TLS.
     _, cert_file, key_file = tls.ensure_certs(cfg.cert_dir, [cfg.hostname])
-    log.info("hone-core serving HTTPS on :%d", cfg.http_port)
-    # log_config=None: skip uvicorn's own logging dictConfig so its
-    # `uvicorn`, `uvicorn.access`, and `uvicorn.error` loggers use
-    # the root logger we configured at module top — same
-    # `%(asctime)s %(name)s %(levelname)s %(message)s` format as
-    # `hone.core` lines, instead of uvicorn's default that omits
-    # the timestamp entirely. The `_QuietIdlePollFilter` attached
-    # to `uvicorn.access` keeps working because the filter is on
-    # the logger, not the handler.
-    uvicorn.run(app, host="0.0.0.0", port=cfg.http_port,
-                ssl_certfile=cert_file, ssl_keyfile=key_file,
-                timeout_graceful_shutdown=8, log_config=None)
+
+    # log_config=None (passed below): skip uvicorn's own logging dictConfig so
+    # its `uvicorn`, `uvicorn.access`, and `uvicorn.error` loggers use the root
+    # logger we configured at module top — same
+    # `%(asctime)s %(name)s %(levelname)s %(message)s` format as `hone.core`
+    # lines, instead of uvicorn's default that omits the timestamp entirely. The
+    # `_QuietIdlePollFilter` attached to `uvicorn.access` keeps working because
+    # the filter is on the logger, not the handler.
+    if cfg.serve_tls:
+        # Default: hone-core terminates TLS itself with its self-generated cert.
+        log.info("hone-core serving HTTPS on :%d", cfg.http_port)
+        uvicorn.run(app, host="0.0.0.0", port=cfg.http_port,
+                    ssl_certfile=cert_file, ssl_keyfile=key_file,
+                    timeout_graceful_shutdown=8, log_config=None)
+    else:
+        # Behind a TLS-terminating proxy (e.g. host nginx): serve plain HTTP and
+        # trust the proxy's X-Forwarded-* so request.client.host and the request
+        # scheme reflect the real client, not the proxy (the login limiter and
+        # redirect logic depend on this). Pair with HONE_SESSION_COOKIE_SECURE=
+        # false, and publish the port on loopback only so the proxy is the sole
+        # client that can reach this plain-HTTP socket.
+        log.info("hone-core serving HTTP on :%d (TLS terminated upstream)",
+                 cfg.http_port)
+        uvicorn.run(app, host="0.0.0.0", port=cfg.http_port,
+                    proxy_headers=True, forwarded_allow_ips="*",
+                    timeout_graceful_shutdown=8, log_config=None)
 
 
 if __name__ == "__main__":

@@ -3,9 +3,15 @@
 #   cd core && cp .env.example .env     # fill in the secrets
 #   docker compose up --build
 #
-# The build context is the project root (..) because the image needs
-# common/. hone-core serves HTTPS directly with a TLS certificate it
-# generates on first start. hone-node is a separate deployment — see node/.
+# The build context is the project root (..) because the image needs common/.
+# Two serving modes (set HONE_SERVE_TLS in .env); the `ports:` block below must
+# match the mode you pick:
+#   * proxy mode (HONE_SERVE_TLS=false, the active block): hone-core serves
+#     plain HTTP published on loopback only; host nginx terminates TLS and
+#     proxies to it (see nginx/hone-core.conf).
+#   * TLS-self mode (HONE_SERVE_TLS=true, the default): hone-core terminates
+#     TLS itself and is published publicly — see the commented block below.
+# hone-node is a separate deployment — see node/.
 
 name: hone-core
 
@@ -16,10 +22,22 @@ services:
       dockerfile: core/Dockerfile
     image: hone-core
     restart: unless-stopped
+    # --- proxy mode (HONE_SERVE_TLS=false) ---------------------------------
+    # Publish the plain-HTTP socket on the loopback interface only, so host
+    # nginx can proxy to it but it is never reachable off-box. HONE_BACKEND_PORT
+    # sets the host-side port (default 8001 — kept distinct from the public
+    # :8000 so this loopback bind doesn't collide with nginx's listener). nginx
+    # can't read this var, so its upstream is a matching literal you edit by
+    # hand — see the marked line in nginx/hone-core.conf. The container always
+    # listens on 8000.
     ports:
-      # host:container — HONE_PUBLISH_PORT is host-side only; the container
-      # always listens on 8000. HTTPS: hone-core terminates TLS itself.
-      - "${HONE_PUBLISH_PORT:-8000}:8000"
+      - "127.0.0.1:${HONE_BACKEND_PORT:-8001}:8000"
+    # --- TLS-self mode (HONE_SERVE_TLS=true, default) ----------------------
+    # hone-core terminates TLS itself, so publish 8000 publicly. Comment out
+    # the loopback `ports:` above and use this instead. HONE_PUBLISH_PORT is the
+    # host-side port and feeds the default HONE_PUBLIC_URL.
+    # ports:
+    #   - "${HONE_PUBLISH_PORT:-8000}:8000"
     env_file:
       - .env                             # every setting in .env reaches the container
     environment:
